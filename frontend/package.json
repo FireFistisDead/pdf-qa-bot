@@ -1,7 +1,14 @@
 {
-  "name": "frontend",
+  "name": "pdf-qa-bot-frontend",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
+  "main": "src/index.js",
+  "license": "MIT",
+  "author": "FireFistisDead",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FireFistisDead/pdf-qa-bot.git"
+  },
   "dependencies": {
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
