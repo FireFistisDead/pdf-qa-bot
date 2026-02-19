@@ -15,6 +15,10 @@ const upload = multer({ dest: "uploads/" });
 // Route: Upload PDF
 app.post("/upload", upload.single("file"), async (req, res) => {
   try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded. Use form field name 'file'." });
+    }
+
     const filePath = path.join(__dirname, req.file.path);
 
     // Send PDF to Python service
@@ -24,8 +28,9 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
     res.json({ message: "PDF uploaded & processed successfully!" });
   } catch (err) {
-    console.error(err.message);
-    res.status(500).json({ error: "PDF processing failed" });
+    const details = err.response?.data || err.message;
+    console.error("Upload processing failed:", details);
+    res.status(500).json({ error: "PDF processing failed", details });
   }
 });
 
@@ -41,6 +46,17 @@ app.post("/ask", async (req, res) => {
   } catch (err) {
     console.error(err.message);
     res.status(500).json({ error: "Error answering question" });
+  }
+});
+
+app.post("/summarize", async (req, res) => {
+  try {
+    const response = await axios.post("http://localhost:5000/summarize", req.body || {});
+    res.json({ summary: response.data.summary });
+  } catch (err) {
+    const details = err.response?.data || err.message;
+    console.error("Summarization failed:", details);
+    res.status(500).json({ error: "Error summarizing PDF", details });
   }
 });
 

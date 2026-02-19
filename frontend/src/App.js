@@ -7,7 +7,12 @@ import { saveAs } from "file-saver";
 import Papa from "papaparse";
 import 'bootstrap/dist/css/bootstrap.min.css';
 import { Container, Row, Col, Button, Form, Card, ToggleButton, ToggleButtonGroup, Spinner, Navbar, Nav, Dropdown } from 'react-bootstrap';
-pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.js`;
+pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+  "pdfjs-dist/build/pdf.worker.min.mjs",
+  import.meta.url
+).toString();
+
+const API_BASE = process.env.REACT_APP_API_URL || "";
 
 
 
@@ -28,16 +33,16 @@ function App() {
     if (!file) return;
     setUploading(true);
     const formData = new FormData();
-    formData.append("filePath", file);
-    formData.append("pdfName", file.name);
+    formData.append("file", file);
     try {
-  const res = await axios.post("http://localhost:5000/process-pdf", formData);
+      await axios.post(`${API_BASE}/upload`, formData);
       const url = URL.createObjectURL(file);
       setPdfs(prev => [...prev, { name: file.name, url, chat: [] }]);
       setSelectedPdf(file.name);
       alert("PDF uploaded!");
     } catch (e) {
-      alert("Upload failed.");
+      const message = e.response?.data?.error || "Upload failed.";
+      alert(message);
     }
     setUploading(false);
   };
@@ -48,7 +53,7 @@ function App() {
     setAsking(true);
     setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "user", text: question }] } : pdf));
     try {
-  const res = await axios.post("http://localhost:5000/ask", { question, pdf: selectedPdf });
+      const res = await axios.post(`${API_BASE}/ask`, { question });
       setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: res.data.answer }] } : pdf));
     } catch (e) {
       setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: "Error getting answer." }] } : pdf));
@@ -62,7 +67,7 @@ function App() {
     if (!selectedPdf) return;
     setSummarizing(true);
     try {
-  const res = await axios.post("http://localhost:5000/summarize", { pdf: selectedPdf });
+      const res = await axios.post(`${API_BASE}/summarize`, { pdf: selectedPdf });
       setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: res.data.summary }] } : pdf));
     } catch (e) {
       setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: "Error summarizing PDF." }] } : pdf));
