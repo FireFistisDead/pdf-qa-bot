@@ -3,6 +3,10 @@ uvicorn
 python-dotenv
 pydantic
 langchain
+langchain-community
+langchain-text-splitters
 sentence-transformers
+faiss-cpu
+pypdf
 requests
 numpy
