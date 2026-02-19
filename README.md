@@ -1,70 +1,123 @@
-# Getting Started with Create React App
+# PDF Q&A Bot
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+RAG-based PDF question-answering app with:
 
-## Available Scripts
+- **Frontend**: React app (`frontend/`)
+- **Backend API**: Node + Express (`server.js`)
+- **RAG Service**: FastAPI + Hugging Face + FAISS (`rag-service/`)
 
-In the project directory, you can run:
+Upload a PDF, ask questions from its content, and generate a short summary.
 
-### `npm start`
+## Architecture
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+1. Frontend uploads file to Node backend (`/upload`)
+2. Node forwards file path to FastAPI (`/process-pdf`)
+3. FastAPI loads/splits PDF, builds vector index with embeddings
+4. For `/ask` and `/summarize`, FastAPI retrieves relevant chunks and generates output with a Hugging Face model
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+## Project Structure
 
-### `npm test`
+```text
+.
+├── frontend/           # React UI
+├── rag-service/        # FastAPI RAG service
+├── server.js           # Node API gateway
+├── uploads/            # Uploaded files (runtime)
+└── CONTRIBUTING.md
+```
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+## Prerequisites
 
-### `npm run build`
+- Node.js 18+ (LTS recommended)
+- Python 3.10+
+- `pip`
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+## 1) Clone and Install Dependencies
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+From repository root:
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+```bash
+npm install
+cd frontend && npm install
+cd ../rag-service && python -m pip install -r requirements.txt
+```
 
-### `npm run eject`
+## 2) Environment Variables
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+Create `.env` in repo root (or edit existing):
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+```env
+# Optional model override
+HF_GENERATION_MODEL=google/flan-t5-base
+```
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+Notes:
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+- `OPENAI_API_KEY` is not required for current Hugging Face RAG flow.
+- Keep real secrets out of git.
 
-## Learn More
+## 3) Run the App (3 terminals)
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+### Terminal A — RAG service (port 5000)
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+```bash
+cd rag-service
+uvicorn main:app --host 0.0.0.0 --port 5000 --reload
+```
 
-### Code Splitting
+### Terminal B — Node backend (port 4000)
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
+```bash
+cd /workspaces/pdf-qa-bot
+node server.js
+```
 
-### Analyzing the Bundle Size
+### Terminal C — Frontend (port 3000)
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
+```bash
+cd /workspaces/pdf-qa-bot/frontend
+npm start
+```
 
-### Making a Progressive Web App
+Open: `http://localhost:3000`
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
+## API Endpoints
 
-### Advanced Configuration
+Node backend (`http://localhost:4000`):
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
+- `POST /upload` (multipart form-data, field: `file`)
+- `POST /ask` (`{ "question": "..." }`)
+- `POST /summarize` (`{}`)
 
-### Deployment
+FastAPI RAG service (`http://localhost:5000`):
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
+- `POST /process-pdf`
+- `POST /ask`
+- `POST /summarize`
 
-### `npm run build` fails to minify
+Interactive docs: `http://localhost:5000/docs`
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+## Troubleshooting
+
+- **`Cannot POST /upload` from frontend**
+	- Restart frontend dev server after config changes: `npm start`
+	- Ensure Node backend is running on port `4000`
+
+- **Upload fails / connection refused**
+	- Ensure FastAPI is running on port `5000`
+
+- **Slow first request**
+	- Hugging Face model downloads on first run (can take time)
+
+- **Port already in use**
+	- Stop old processes or change ports consistently in frontend/backend/service
+
+## Development Notes
+
+- Uploaded files are stored in `uploads/`
+- RAG index is in-memory (rebuilds after restart)
+- Summarization and QA use retrieved context from the last processed PDF
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
