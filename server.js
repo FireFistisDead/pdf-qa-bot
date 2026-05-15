@@ -11,25 +11,38 @@ app.use(express.json());
 
 // Storage for uploaded PDFs
 const upload = multer({ dest: "uploads/" });
+const cleanupUploadedFile = async (filePath) => {
+  if (!filePath) return;
+
+  try {
+    await fs.promises.unlink(filePath);
+  } catch (cleanupErr) {
+    if (cleanupErr.code !== "ENOENT") {
+      console.error("Failed to delete uploaded file:", cleanupErr.message);
+    }
+  }
+};
 
 // Route: Upload PDF
 app.post("/upload", upload.single("file"), async (req, res) => {
+  const filePath = req.file ? path.join(__dirname, req.file.path) : null;
+
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded. Use form field name 'file'." });
     }
-
-    const filePath = path.join(__dirname, req.file.path);
 
     // Send PDF to Python service
     await axios.post("http://localhost:5000/process-pdf", {
       filePath: filePath,
     });
 
+    await cleanupUploadedFile(filePath);
     res.json({ message: "PDF uploaded & processed successfully!" });
   } catch (err) {
     const details = err.response?.data || err.message;
     console.error("Upload processing failed:", details);
+    await cleanupUploadedFile(filePath);
     res.status(500).json({ error: "PDF processing failed", details });
   }
 });
