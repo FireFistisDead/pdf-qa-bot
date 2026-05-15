@@ -22,12 +22,24 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     const filePath = path.join(__dirname, req.file.path);
 
     // Send PDF to Python service
-    await axios.post("http://localhost:5000/process-pdf", {
+    const response = await axios.post("http://localhost:5000/process-pdf", {
       filePath: filePath,
     });
 
-    res.json({ message: "PDF uploaded & processed successfully!" });
+    // Clean up local file to prevent disk space bloat
+    fs.unlink(filePath, (err) => {
+      if (err) console.error("Failed to delete local file:", err);
+    });
+
+    res.json({ 
+      message: "PDF uploaded & processed successfully!",
+      session_id: response.data.session_id
+    });
   } catch (err) {
+    // Ensure cleanup even on failure
+    if (req.file) {
+      fs.unlink(path.join(__dirname, req.file.path), () => {});
+    }
     const details = err.response?.data || err.message;
     console.error("Upload processing failed:", details);
     res.status(500).json({ error: "PDF processing failed", details });
@@ -36,10 +48,11 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
 // Route: Ask Question
 app.post("/ask", async (req, res) => {
-  const { question } = req.body;
+  const { question, session_id } = req.body;
   try {
     const response = await axios.post("http://localhost:5000/ask", {
       question,
+      session_id,
     });
 
     res.json({ answer: response.data.answer });
