@@ -11,11 +11,19 @@ app.use(express.json());
 
 // Storage for uploaded PDFs
 const upload = multer({ dest: "uploads/" });
+const uploadsDirectory = path.join(__dirname, "uploads");
 const cleanupUploadedFile = async (filePath) => {
   if (!filePath) return;
+  const resolvedPath = path.resolve(filePath);
+  const resolvedUploadsDirectory = `${path.resolve(uploadsDirectory)}${path.sep}`;
+
+  if (!resolvedPath.startsWith(resolvedUploadsDirectory)) {
+    console.error("Skipping cleanup for unexpected upload path:", resolvedPath);
+    return;
+  }
 
   try {
-    await fs.promises.unlink(filePath);
+    await fs.promises.unlink(resolvedPath);
   } catch (cleanupErr) {
     if (cleanupErr.code !== "ENOENT") {
       console.error("Failed to delete uploaded file:", cleanupErr.message);
@@ -25,12 +33,13 @@ const cleanupUploadedFile = async (filePath) => {
 
 // Route: Upload PDF
 app.post("/upload", upload.single("file"), async (req, res) => {
-  const filePath = req.file ? path.join(__dirname, req.file.path) : null;
+  let filePath = null;
 
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded. Use form field name 'file'." });
     }
+    filePath = path.join(uploadsDirectory, req.file.filename);
 
     // Send PDF to Python service
     await axios.post("http://localhost:5000/process-pdf", {
