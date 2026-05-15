@@ -35,9 +35,9 @@ function App() {
     const formData = new FormData();
     formData.append("file", file);
     try {
-      await axios.post(`${API_BASE}/upload`, formData);
+      const res = await axios.post(`${API_BASE}/upload`, formData);
       const url = URL.createObjectURL(file);
-      setPdfs(prev => [...prev, { name: file.name, url, chat: [] }]);
+      setPdfs(prev => [...prev, { name: file.name, url, chat: [], session_id: res.data.session_id }]);
       setSelectedPdf(file.name);
       alert("PDF uploaded!");
     } catch (e) {
@@ -52,8 +52,9 @@ function App() {
     if (!question.trim() || !selectedPdf) return;
     setAsking(true);
     setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "user", text: question }] } : pdf));
+    const currentPdf = pdfs.find(p => p.name === selectedPdf);
     try {
-      const res = await axios.post(`${API_BASE}/ask`, { question });
+      const res = await axios.post(`${API_BASE}/ask`, { question, session_id: currentPdf.session_id });
       setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: res.data.answer }] } : pdf));
     } catch (e) {
       setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: "Error getting answer." }] } : pdf));
@@ -66,8 +67,9 @@ function App() {
   const summarizePDF = async () => {
     if (!selectedPdf) return;
     setSummarizing(true);
+    const currentPdf = pdfs.find(p => p.name === selectedPdf);
     try {
-      const res = await axios.post(`${API_BASE}/summarize`, { pdf: selectedPdf });
+      const res = await axios.post(`${API_BASE}/summarize`, { pdf: selectedPdf, session_id: currentPdf.session_id });
       setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: res.data.summary }] } : pdf));
     } catch (e) {
       setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: "Error summarizing PDF." }] } : pdf));

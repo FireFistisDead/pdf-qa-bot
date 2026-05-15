@@ -6,6 +6,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from dotenv import load_dotenv
 import os
+import uuid
 import uvicorn
 import torch
 from transformers import AutoConfig, AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM
@@ -14,9 +15,8 @@ load_dotenv()
 
 app = FastAPI()
 
-# Temporary global variables
-vectorstore = None
-qa_chain = False
+# Session storage mapping session_id to vectorstore
+sessions = {}
 HF_GENERATION_MODEL = os.getenv("HF_GENERATION_MODEL", "google/flan-t5-base")
 generation_tokenizer = None
 generation_model = None
@@ -77,15 +77,15 @@ class PDFPath(BaseModel):
 
 class Question(BaseModel):
     question: str
+    session_id: str
 
 
 class SummarizeRequest(BaseModel):
     pdf: str | None = None
+    session_id: str
 
 @app.post("/process-pdf")
 def process_pdf(data: PDFPath):
-    global vectorstore, qa_chain
-
     loader = PyPDFLoader(data.filePath)
     docs = loader.load()
 
@@ -93,18 +93,19 @@ def process_pdf(data: PDFPath):
     chunks = splitter.split_documents(docs)
     if not chunks:
             return {"error": "No text chunks generated from the PDF. Please check your file."}
-    vectorstore = FAISS.from_documents(chunks, embedding_model)
+    
+    session_id = str(uuid.uuid4())
+    sessions[session_id] = FAISS.from_documents(chunks, embedding_model)
 
-    qa_chain = True  # Just a flag to indicate PDF is processed
-
-    return {"message": "PDF processed successfully"}
+    return {"message": "PDF processed successfully", "session_id": session_id}
 
 
 @app.post("/ask")
 def ask_question(data: Question):
-    global vectorstore, qa_chain
-    if not qa_chain:
-        return {"answer": "Please upload a PDF first!"}
+    if data.session_id not in sessions:
+        return {"answer": "Session expired or invalid. Please re-upload the PDF!"}
+    
+    vectorstore = sessions[data.session_id]
 
     docs = vectorstore.similarity_search(data.question, k=4)
     if not docs:
@@ -125,10 +126,11 @@ def ask_question(data: Question):
 
 
 @app.post("/summarize")
-def summarize_pdf(_: SummarizeRequest):
-    global vectorstore, qa_chain
-    if not qa_chain:
-        return {"summary": "Please upload a PDF first!"}
+def summarize_pdf(data: SummarizeRequest):
+    if data.session_id not in sessions:
+        return {"summary": "Session expired or invalid. Please re-upload the PDF!"}
+    
+    vectorstore = sessions[data.session_id]
 
     docs = vectorstore.similarity_search("Give a concise summary of the document.", k=6)
     if not docs:
