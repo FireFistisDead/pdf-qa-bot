@@ -1,0 +1,29 @@
+name: Fix request
+description: Request a targeted fix, cleanup, or refactor.
+title: "[Fix]: "
+labels:
+  - fix
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for small fixes, code cleanups, or implementation corrections.
+  - type: textarea
+    id: issue
+    attributes:
+      label: What needs to be fixed?
+      description: Describe the specific problem or area to change.
+    validations:
+      required: true
+  - type: textarea
+    id: desired
+    attributes:
+      label: Desired outcome
+      description: What should the corrected behavior look like?
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Mention files, assumptions, or constraints if known.

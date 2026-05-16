@@ -74,6 +74,17 @@ Please include:
 - How you tested it
 - Any screenshots (if UI changes)
 
+## Issues and labels
+
+Use the GitHub issue forms for bug reports, feature requests, and fix requests.
+
+- Bug reports go through the bug form and get the `bug` label.
+- Feature requests go through the feature form and get the `feature` label.
+- Fix requests go through the fix form and get the `fix` label.
+
+The repository also includes an auto-label workflow in `.github/workflows/auto-label.yml`.
+Edit `.github/label-rules.json` to customize label names, colors, descriptions, keywords, and file-path rules.
+
 ## Security Notes
 
 - Never commit real credentials in code or `.env`.

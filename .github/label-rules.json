@@ -1,0 +1,49 @@
+{
+  "labels": [
+    {
+      "name": "bug",
+      "color": "d73a4a",
+      "description": "Something is broken or incorrect",
+      "keywords": ["bug", "error", "fail", "broken", "crash", "incorrect"]
+    },
+    {
+      "name": "feature",
+      "color": "a2eeef",
+      "description": "A new feature or improvement",
+      "keywords": ["feature", "enhancement", "improve", "add", "support"]
+    },
+    {
+      "name": "fix",
+      "color": "fbca04",
+      "description": "A targeted fix or cleanup",
+      "keywords": ["fix", "cleanup", "refactor", "adjust", "correct"]
+    },
+    {
+      "name": "docs",
+      "color": "0075ca",
+      "description": "Documentation only",
+      "keywords": ["docs", "documentation", "readme", "guide", "instruction"]
+    },
+    {
+      "name": "frontend",
+      "color": "5319e7",
+      "description": "Frontend-related work",
+      "files": ["frontend/**", "src/**"],
+      "keywords": ["ui", "frontend", "react", "browser"]
+    },
+    {
+      "name": "backend",
+      "color": "0052cc",
+      "description": "Express or API gateway work",
+      "files": ["server.js", "package.json"],
+      "keywords": ["backend", "api", "express", "gateway"]
+    },
+    {
+      "name": "rag-service",
+      "color": "0e8a16",
+      "description": "FastAPI / model service work",
+      "files": ["rag-service/**"],
+      "keywords": ["rag", "fastapi", "python", "model", "embedding"]
+    }
+  ]
+}

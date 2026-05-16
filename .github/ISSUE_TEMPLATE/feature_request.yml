@@ -1,0 +1,35 @@
+name: Feature request
+description: Suggest a new feature or improvement.
+title: "[Feature]: "
+labels:
+  - feature
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for new capabilities, UX improvements, or workflow changes.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What problem are you trying to solve?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What should the app do?
+      placeholder: Describe the change you want.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any other options you considered?
+  - type: textarea
+    id: impact
+    attributes:
+      label: Why this matters
+      description: Who benefits and how often will this be used?

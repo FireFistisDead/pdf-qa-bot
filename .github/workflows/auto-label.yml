@@ -1,0 +1,115 @@
+name: Auto label issues and PRs
+
+on:
+  issues:
+    types: [opened, reopened, edited]
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository metadata
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Apply labels from repo rules
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const rulesPath = path.join(process.env.GITHUB_WORKSPACE, '.github', 'label-rules.json');
+            const rawRules = fs.readFileSync(rulesPath, 'utf8');
+            const config = JSON.parse(rawRules);
+
+            const isPullRequest = context.eventName === 'pull_request_target';
+            const subject = isPullRequest ? context.payload.pull_request : context.payload.issue;
+            const bodyText = `${subject.title || ''}\n${subject.body || ''}`.toLowerCase();
+
+            const globToRegExp = (glob) => {
+              const escaped = glob
+                .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+                .replace(/\*\*/g, '::DOUBLE_STAR::')
+                .replace(/\*/g, '[^/]*')
+                .replace(/::DOUBLE_STAR::/g, '.*');
+              return new RegExp(`^${escaped}$`);
+            };
+
+            const matchesKeyword = (keywords = []) =>
+              keywords.some((keyword) => bodyText.includes(String(keyword).toLowerCase()));
+
+            const labelsToAdd = new Set();
+            const ensureLabel = async (label) => {
+              try {
+                await github.rest.issues.getLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label.name,
+                });
+              } catch (error) {
+                if (error.status !== 404) {
+                  throw error;
+                }
+
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label.name,
+                  color: label.color || 'ededed',
+                  description: label.description || '',
+                });
+              }
+            };
+
+            for (const label of config.labels || []) {
+              await ensureLabel(label);
+
+              const fileMatchers = (label.files || []).map(globToRegExp);
+              const shouldApplyByFiles = isPullRequest && fileMatchers.length > 0;
+              const shouldApplyByKeywords = matchesKeyword(label.keywords || []);
+
+              if (shouldApplyByKeywords) {
+                labelsToAdd.add(label.name);
+              }
+
+              if (shouldApplyByFiles) {
+                const files = await github.paginate(github.rest.pulls.listFiles, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: subject.number,
+                  per_page: 100,
+                });
+
+                const touchedFiles = files.map((file) => file.filename);
+                const matchesFileRule = touchedFiles.some((filename) =>
+                  fileMatchers.some((matcher) => matcher.test(filename))
+                );
+
+                if (matchesFileRule) {
+                  labelsToAdd.add(label.name);
+                }
+              }
+            }
+
+            if (labelsToAdd.size === 0) {
+              core.info('No labels matched the configured rules.');
+              return;
+            }
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: subject.number,
+              labels: [...labelsToAdd],
+            });
+
+            core.info(`Applied labels: ${[...labelsToAdd].join(', ')}`);
