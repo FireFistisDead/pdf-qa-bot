@@ -3,8 +3,14 @@
     {
       "name": "bug",
       "color": "d73a4a",
-      "description": "Something is broken or incorrect",
+      "description": "Something isn't working",
       "keywords": ["bug", "error", "fail", "broken", "crash", "incorrect"]
+    },
+    {
+      "name": "enhancement",
+      "color": "a2eeef",
+      "description": "New feature or request",
+      "keywords": ["enhancement", "improvement", "request", "upgrade"]
     },
     {
       "name": "feature",
@@ -23,6 +29,30 @@
       "color": "0075ca",
       "description": "Documentation only",
       "keywords": ["docs", "documentation", "readme", "guide", "instruction"]
+    },
+    {
+      "name": "documentation",
+      "color": "0075ca",
+      "description": "Improvements or additions to documentation",
+      "keywords": ["documentation", "doc update", "docs only", "readme"]
+    },
+    {
+      "name": "type:docs",
+      "color": "0075ca",
+      "description": "Documentation-type change",
+      "keywords": ["type:docs", "docs", "documentation"]
+    },
+    {
+      "name": "type:security",
+      "color": "b60205",
+      "description": "Security-related change",
+      "keywords": ["security", "vulnerability", "xss", "csrf", "auth"]
+    },
+    {
+      "name": "type:testing",
+      "color": "1d76db",
+      "description": "Testing-related change",
+      "keywords": ["test", "testing", "unit test", "integration test"]
     },
     {
       "name": "frontend",
@@ -44,6 +74,108 @@
       "description": "FastAPI / model service work",
       "files": ["rag-service/**"],
       "keywords": ["rag", "fastapi", "python", "model", "embedding"]
+    },
+    {
+      "name": "help wanted",
+      "color": "008672",
+      "description": "Extra attention is needed",
+      "keywords": ["help wanted", "need help", "assistance needed"]
+    },
+    {
+      "name": "good first issue",
+      "color": "7057ff",
+      "description": "Good for newcomers",
+      "keywords": ["good first issue", "beginner friendly", "starter task"]
+    },
+    {
+      "name": "question",
+      "color": "d876e3",
+      "description": "Further information is requested",
+      "keywords": ["question", "clarification", "how to"]
+    },
+    {
+      "name": "duplicate",
+      "color": "cfd3d7",
+      "description": "This issue or pull request already exists",
+      "keywords": ["duplicate", "already exists", "same issue"]
+    },
+    {
+      "name": "invalid",
+      "color": "e4e669",
+      "description": "This doesn't seem right",
+      "keywords": ["invalid", "not valid", "cannot reproduce"]
+    },
+    {
+      "name": "wontfix",
+      "color": "ffffff",
+      "description": "This will not be worked on",
+      "keywords": ["wontfix", "won't fix", "not planned"]
+    },
+    {
+      "name": "level:beginner",
+      "color": "0e8a16",
+      "description": "Beginner level task",
+      "keywords": ["level:beginner", "beginner"]
+    },
+    {
+      "name": "level:intermediate",
+      "color": "fbca04",
+      "description": "Intermediate level task",
+      "keywords": ["level:intermediate", "intermediate"]
+    },
+    {
+      "name": "level:advanced",
+      "color": "d93f0b",
+      "description": "Advanced level task",
+      "keywords": ["level:advanced", "advanced"]
+    },
+    {
+      "name": "level:critical",
+      "color": "b60205",
+      "description": "Critical priority task",
+      "keywords": ["level:critical", "critical", "urgent", "blocker"]
+    },
+    {
+      "name": "quality:clean",
+      "color": "1d76db",
+      "description": "Code quality is clean",
+      "keywords": ["quality:clean", "clean implementation"]
+    },
+    {
+      "name": "quality:exceptional",
+      "color": "5319e7",
+      "description": "High-quality exceptional implementation",
+      "keywords": ["quality:exceptional", "exceptional quality"]
+    },
+    {
+      "name": "mentor:FireFistisDead",
+      "color": "5319e7",
+      "description": "Mentored by FireFistisDead",
+      "keywords": ["mentor:firefistisdead", "mentor assigned"]
+    },
+    {
+      "name": "gssoc:approved",
+      "color": "0e8a16",
+      "description": "Approved under GSSoC",
+      "keywords": ["gssoc:approved"]
+    },
+    {
+      "name": "gssoc:invalid",
+      "color": "e4e669",
+      "description": "Invalid under GSSoC",
+      "keywords": ["gssoc:invalid"]
+    },
+    {
+      "name": "gssoc:spam",
+      "color": "b60205",
+      "description": "Spam under GSSoC",
+      "keywords": ["gssoc:spam"]
+    },
+    {
+      "name": "gssoc:ai-slop",
+      "color": "b60205",
+      "description": "Low quality AI generated submission",
+      "keywords": ["gssoc:ai-slop"]
     }
   ]
 }
