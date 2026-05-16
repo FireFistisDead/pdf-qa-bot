@@ -27,6 +27,7 @@ function App() {
   const [numPages, setNumPages] = useState(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [summarizing, setSummarizing] = useState(false);
+  const isProcessing = uploading || asking || summarizing;
 
   // Multi-PDF upload
   const uploadPDF = async () => {
@@ -186,24 +187,23 @@ function App() {
                     </div>
                   ))}
                 </div>
+                {uploading && <p>Processing PDF...</p>}{asking && <p>Generating answer...</p>}{summarizing && <p>Generating summary...</p>}
                 <Form className="d-flex gap-2 mb-2">
                   <Form.Control
                     type="text"
                     placeholder="Ask a question..."
                     value={question}
                     onChange={e => setQuestion(e.target.value)}
-                    disabled={asking}
+                    disabled={isProcessing}
                     onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); askQuestion(); } }}
                   />
-                  <Button variant="success" onClick={askQuestion} disabled={asking || !question.trim() || !selectedPdf}>
-                    {asking ? <Spinner animation="border" size="sm" /> : "Ask"}
-                  </Button>
+                  <Button variant="success" onClick={askQuestion} disabled={isProcessing || !question.trim() || !selectedPdf}>{asking ? <Spinner animation="border" size="sm" /> : "Ask"}</Button>
                 </Form>
-                <Button variant="warning" className="me-2" onClick={summarizePDF} disabled={summarizing || !selectedPdf}>
+                <Button variant="warning" className="me-2" onClick={summarizePDF} disabled={isProcessing || !selectedPdf}>
                   {summarizing ? <Spinner animation="border" size="sm" /> : "Summarize PDF"}
                 </Button>
-                <Button variant="outline-secondary" className="me-2" onClick={() => exportChat("csv")} disabled={!selectedPdf}>Export CSV</Button>
-                <Button variant="outline-secondary" onClick={() => exportChat("pdf")} disabled={!selectedPdf}>Export PDF</Button>
+                <Button variant="outline-secondary" className="me-2" onClick={() => exportChat("csv")} disabled={isProcessing || !selectedPdf}>Export CSV</Button>
+                <Button variant="outline-secondary" onClick={() => exportChat("pdf")} disabled={isProcessing || !selectedPdf}>Export PDF</Button>
               </Card.Body>
             </Card>
           </Col>
