@@ -15,7 +15,9 @@ Upload PDF documents, ask natural-language questions grounded in their content, 
 - [Configuration](#configuration)
 - [Project Structure](#project-structure)
 - [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
+- [Contributors](#-contributors)
+- [Join the Community](#-join-the-community)
+- [License](#license)
 
 ---
 
@@ -418,9 +420,21 @@ $env:HF_HOME = "D:\hf-cache"
 
 ---
 
-## Contributing
+## 🤝 Contributors
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for branch workflow, validation checklist, and pull request guidelines.
+Contributions of all kinds are welcome! Check out our [CONTRIBUTING.md](CONTRIBUTING.md) to get started.
+
+[![](https://contrib.rocks/image?repo=FireFistisDead/pdf-qa-bot)](https://github.com/FireFistisDead/pdf-qa-bot/graphs/contributors)
+
+---
+
+## 🚀 Join the Community
+
+Connect with other contributors, ask questions, and share feedback on Discord:
+
+**[Join the pdf-qa-bot Discord →](https://discord.gg/4wFrQEwft)**
+
+We’d love to hear from you — whether you’re setting up the project for the first time or shipping your next pull request.
 
 ---
 
