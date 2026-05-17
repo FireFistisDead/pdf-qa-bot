@@ -5,6 +5,9 @@ const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 
+const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
+const PORT = process.env.PORT || 4000;
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -22,7 +25,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     const filePath = path.join(__dirname, req.file.path);
 
     // Send PDF to Python service
-    const response = await axios.post("http://localhost:5000/process-pdf", {
+    const response = await axios.post(`${RAG_SERVICE_URL}/process-pdf`, {
       filePath: filePath,
     });
 
@@ -50,7 +53,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 app.post("/ask", async (req, res) => {
   const { question, session_id } = req.body;
   try {
-    const response = await axios.post("http://localhost:5000/ask", {
+    const response = await axios.post(`${RAG_SERVICE_URL}/ask`, {
       question,
       session_id,
     });
@@ -64,7 +67,7 @@ app.post("/ask", async (req, res) => {
 
 app.post("/summarize", async (req, res) => {
   try {
-    const response = await axios.post("http://localhost:5000/summarize", req.body || {});
+    const response = await axios.post(`${RAG_SERVICE_URL}/summarize`, req.body || {});
     res.json({ summary: response.data.summary });
   } catch (err) {
     const details = err.response?.data || err.message;
@@ -73,4 +76,4 @@ app.post("/summarize", async (req, res) => {
   }
 });
 
-app.listen(4000, () => console.log("Backend running on http://localhost:4000"));
+app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
