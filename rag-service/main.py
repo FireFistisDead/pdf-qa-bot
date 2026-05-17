@@ -1,5 +1,5 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
@@ -9,11 +9,14 @@ import os
 import uuid
 import uvicorn
 import torch
+from pathlib import Path
 from transformers import AutoConfig, AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM
 
 load_dotenv()
 
 app = FastAPI()
+
+UPLOADS_DIR = Path(__file__).resolve().parent.parent / "uploads"
 
 # Session storage mapping session_id to vectorstore
 sessions = {}
@@ -24,6 +27,27 @@ generation_is_encoder_decoder = False
 
 # Load local embedding model
 embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+
+
+def resolve_upload_path(file_path: str) -> Path:
+    if not file_path or not isinstance(file_path, str):
+        raise HTTPException(status_code=400, detail="filePath is required")
+
+    candidate = Path(file_path).resolve()
+    uploads_root = UPLOADS_DIR.resolve()
+
+    try:
+        candidate.relative_to(uploads_root)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="filePath must point to a file inside the uploads directory",
+        ) from exc
+
+    if not candidate.is_file():
+        raise HTTPException(status_code=400, detail="PDF file not found")
+
+    return candidate
 
 
 def load_generation_model():
@@ -73,20 +97,21 @@ def generate_response(prompt: str, max_new_tokens: int) -> str:
     return text.strip()
 
 class PDFPath(BaseModel):
-    filePath: str
+    filePath: str = Field(..., min_length=1)
 
 class Question(BaseModel):
-    question: str
-    session_id: str
+    question: str = Field(..., min_length=1, max_length=2000)
+    session_id: str = Field(..., min_length=36, max_length=36)
 
 
 class SummarizeRequest(BaseModel):
     pdf: str | None = None
-    session_id: str
+    session_id: str = Field(..., min_length=36, max_length=36)
 
 @app.post("/process-pdf")
 def process_pdf(data: PDFPath):
-    loader = PyPDFLoader(data.filePath)
+    safe_path = resolve_upload_path(data.filePath)
+    loader = PyPDFLoader(str(safe_path))
     docs = loader.load()
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
