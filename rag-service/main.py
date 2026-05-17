@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI
 from pydantic import BaseModel
 from langchain_community.document_loaders import PyPDFLoader
@@ -10,13 +11,65 @@ import uuid
 import uvicorn
 import torch
 from transformers import AutoConfig, AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM
+import threading
+import time
 
 load_dotenv()
 
+
 app = FastAPI()
 
-# Session storage mapping session_id to vectorstore
+# Session storage with metadata and thread safety
 sessions = {}
+sessions_lock = threading.Lock()
+
+# Configurable session TTL and max cap
+SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "30"))
+MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "100"))
+
+def now_ts():
+    return time.time()
+
+def cleanup_expired_sessions():
+    """
+    Remove expired sessions and enforce max session cap.
+    """
+    expired = []
+    evicted_count = 0
+    active_sessions = 0
+    with sessions_lock:
+        # Expire old sessions
+        ttl_seconds = SESSION_TTL_MINUTES * 60
+        for sid, meta in list(sessions.items()):
+            if now_ts() - meta["last_accessed"] > ttl_seconds:
+                expired.append(sid)
+        for sid in expired:
+            del sessions[sid]
+        # Enforce max cap (evict oldest)
+        while len(sessions) > MAX_ACTIVE_SESSIONS:
+            oldest = min(sessions.items(), key=lambda x: x[1]["created_at"])[0]
+            del sessions[oldest]
+            evicted_count += 1
+        active_sessions = len(sessions)
+    if expired or evicted_count:
+        print(
+            f"[SessionCleanup] "
+            f"Expired: {len(expired)}, "
+            f"Evicted: {evicted_count}, "
+            f"Active: {active_sessions}"
+        )
+# Helper to get a valid session (handles TTL, locking, and last_accessed update)
+def get_valid_session(session_id: str):
+    with sessions_lock:
+        meta = sessions.get(session_id)
+        if not meta:
+            return None
+        ttl_seconds = SESSION_TTL_MINUTES * 60
+        if now_ts() - meta["last_accessed"] > ttl_seconds:
+            del sessions[session_id]
+            return None
+        meta["last_accessed"] = now_ts()
+        return meta["vectorstore"]
 HF_GENERATION_MODEL = os.getenv("HF_GENERATION_MODEL", "google/flan-t5-base")
 generation_tokenizer = None
 generation_model = None
@@ -84,28 +137,42 @@ class SummarizeRequest(BaseModel):
     pdf: str | None = None
     session_id: str
 
+
 @app.post("/process-pdf")
 def process_pdf(data: PDFPath):
+    cleanup_expired_sessions()
     loader = PyPDFLoader(data.filePath)
     docs = loader.load()
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     chunks = splitter.split_documents(docs)
     if not chunks:
-            return {"error": "No text chunks generated from the PDF. Please check your file."}
-    
-    session_id = str(uuid.uuid4())
-    sessions[session_id] = FAISS.from_documents(chunks, embedding_model)
+        return {"error": "No text chunks generated from the PDF. Please check your file."}
 
+    session_id = str(uuid.uuid4())
+    vectorstore = FAISS.from_documents(chunks, embedding_model)
+    now = now_ts()
+    with sessions_lock:
+        # Enforce max cap before insert
+        while len(sessions) >= MAX_ACTIVE_SESSIONS:
+            oldest = min(sessions.items(), key=lambda x: x[1]["created_at"])[0]
+            del sessions[oldest]
+        sessions[session_id] = {
+            "vectorstore": vectorstore,
+            "created_at": now,
+            "last_accessed": now,
+        }
     return {"message": "PDF processed successfully", "session_id": session_id}
+
+
 
 
 @app.post("/ask")
 def ask_question(data: Question):
-    if data.session_id not in sessions:
+    cleanup_expired_sessions()
+    vectorstore = get_valid_session(data.session_id)
+    if not vectorstore:
         return {"answer": "Session expired or invalid. Please re-upload the PDF!"}
-    
-    vectorstore = sessions[data.session_id]
 
     docs = vectorstore.similarity_search(data.question, k=4)
     if not docs:
@@ -125,12 +192,14 @@ def ask_question(data: Question):
     return {"answer": answer}
 
 
+
+
 @app.post("/summarize")
 def summarize_pdf(data: SummarizeRequest):
-    if data.session_id not in sessions:
+    cleanup_expired_sessions()
+    vectorstore = get_valid_session(data.session_id)
+    if not vectorstore:
         return {"summary": "Session expired or invalid. Please re-upload the PDF!"}
-    
-    vectorstore = sessions[data.session_id]
 
     docs = vectorstore.similarity_search("Give a concise summary of the document.", k=6)
     if not docs:
