@@ -200,6 +200,16 @@ function App() {
     setSummarizing(false);
   };
 
+  const clearChat = () => {
+    if (!selectedPdf) return;
+    setPdfs((prev) =>
+      prev.map((pdf) =>
+        pdf.name === selectedPdf ? { ...pdf, chat: [] } : pdf
+      )
+    );
+    toast.success("Chat cleared for this document.");
+  };
+
   // Export chat
   const exportChat = (type) => {
     if (!selectedPdf) return;
@@ -297,6 +307,7 @@ function App() {
   summarizing={summarizing}
   selectedPdf={selectedPdf}
   exportChat={exportChat}
+  clearChat={clearChat}
 />
       </Col>
 
