@@ -1,0 +1,7 @@
+node_modules
+frontend/node_modules
+rag-service/__pycache__
+uploads
+.git
+.env
+*.log

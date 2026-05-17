@@ -9,6 +9,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
+
 // Storage for uploaded PDFs
 const upload = multer({ dest: "uploads/" });
 
@@ -41,7 +43,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
     // Send absolute path to Python service
     const response = await axios.post(
-      "http://localhost:5000/process-pdf",
+      `${RAG_SERVICE_URL}/process-pdf`,
       {
         filePath: absoluteFilePath,
       }
@@ -74,7 +76,7 @@ app.post("/ask", async (req, res) => {
 
   try {
     const response = await axios.post(
-      "http://localhost:5000/ask",
+      `${RAG_SERVICE_URL}/ask`,
       {
         question,
         session_id,
@@ -93,7 +95,7 @@ app.post("/ask", async (req, res) => {
 app.post("/summarize", async (req, res) => {
   try {
     const response = await axios.post(
-      "http://localhost:5000/summarize",
+      `${RAG_SERVICE_URL}/summarize`,
       req.body || {}
     );
 
