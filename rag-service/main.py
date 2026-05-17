@@ -18,6 +18,10 @@ app = FastAPI()
 # Session storage mapping session_id to vectorstore
 sessions = {}
 HF_GENERATION_MODEL = os.getenv("HF_GENERATION_MODEL", "google/flan-t5-base")
+FAISS_DISTANCE_THRESHOLD = float(os.getenv("FAISS_DISTANCE_THRESHOLD", "1.2"))
+NO_RELEVANT_ANSWER = (
+    "The document does not appear to contain information about this question."
+)
 generation_tokenizer = None
 generation_model = None
 generation_is_encoder_decoder = False
@@ -72,6 +76,12 @@ def generate_response(prompt: str, max_new_tokens: int) -> str:
     text = tokenizer.decode(new_tokens, skip_special_tokens=True)
     return text.strip()
 
+
+def retrieve_relevant_docs(vectorstore, query: str, k: int = 4):
+    docs_with_scores = vectorstore.similarity_search_with_score(query, k=k)
+    return [doc for doc, score in docs_with_scores if score <= FAISS_DISTANCE_THRESHOLD]
+
+
 class PDFPath(BaseModel):
     filePath: str
 
@@ -107,11 +117,12 @@ def ask_question(data: Question):
     
     vectorstore = sessions[data.session_id]
 
-    docs = vectorstore.similarity_search(data.question, k=4)
+    docs = retrieve_relevant_docs(vectorstore, data.question, k=4)
     if not docs:
-        return {"answer": "No relevant context found."}
+        return {"answer": NO_RELEVANT_ANSWER, "sources": []}
 
     context = "\n\n".join([doc.page_content for doc in docs])
+    source_pages = extract_source_pages(docs)
 
     prompt = (
         "You are a helpful assistant for question answering over PDF documents. "
@@ -122,7 +133,7 @@ def ask_question(data: Question):
     )
 
     answer = generate_response(prompt, max_new_tokens=256)
-    return {"answer": answer}
+    return {"answer": answer, "sources": source_pages}
 
 
 @app.post("/summarize")
