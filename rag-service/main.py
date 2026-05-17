@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI
 from pydantic import BaseModel
 from langchain_community.document_loaders import PyPDFLoader
@@ -10,13 +11,13 @@ import uuid
 import uvicorn
 import torch
 from transformers import AutoConfig, AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM
+import threading
+import time
 
 load_dotenv()
 
-app = FastAPI()
 
-import threading
-import time
+app = FastAPI()
 
 # Session storage with metadata and thread safety
 sessions = {}
@@ -35,6 +36,7 @@ def cleanup_expired_sessions():
     """
     expired = []
     evicted_count = 0
+    active_sessions = 0
     with sessions_lock:
         # Expire old sessions
         ttl_seconds = SESSION_TTL_MINUTES * 60
@@ -48,12 +50,13 @@ def cleanup_expired_sessions():
             oldest = min(sessions.items(), key=lambda x: x[1]["created_at"])[0]
             del sessions[oldest]
             evicted_count += 1
+        active_sessions = len(sessions)
     if expired or evicted_count:
         print(
             f"[SessionCleanup] "
             f"Expired: {len(expired)}, "
             f"Evicted: {evicted_count}, "
-            f"Active: {len(sessions)}"
+            f"Active: {active_sessions}"
         )
 # Helper to get a valid session (handles TTL, locking, and last_accessed update)
 def get_valid_session(session_id: str):
