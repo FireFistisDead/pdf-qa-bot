@@ -36,3 +36,119 @@
     transform: rotate(360deg);
   }
 }
+.typing-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #8B5CF6;
+  animation: typingBounce 1.4s infinite ease-in-out;
+}
+
+.typing-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.typing-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes typingBounce {
+  0%, 80%, 100% {
+    transform: scale(0.7);
+    opacity: 0.5;
+  }
+
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+.chat-message {
+  animation: fadeSlideUp 0.35s ease;
+}
+
+@keyframes fadeSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.custom-chat-input,
+.custom-chat-input:focus {
+  color: #ffffff !important;
+}
+
+.custom-chat-input::placeholder {
+  color: rgba(255, 255, 255, 0.78) !important;
+  opacity: 1 !important;
+}
+
+.light-placeholder::placeholder {
+  color: rgba(0, 0, 0, 0.45) !important;
+  opacity: 1 !important;
+}
+.custom-chat-input:disabled {
+  -webkit-text-fill-color: rgba(255,255,255,0.78);
+}
+.custom-chat-input:disabled::placeholder {
+  color: rgba(255,255,255,0.78) !important;
+}
+
+.light-placeholder:disabled {
+  opacity: 1 !important;
+  -webkit-text-fill-color: rgba(0,0,0,0.45);
+}
+.glass-card {
+  transition:
+    transform 0.28s ease,
+    box-shadow 0.28s ease,
+    border-color 0.28s ease;
+
+  backdrop-filter: blur(14px);
+
+  background:
+    linear-gradient(
+      180deg,
+      rgba(255,255,255,0.03),
+      rgba(255,255,255,0.015)
+    );
+}
+
+.glass-card:hover {
+  transform: translateY(-5px);
+
+  box-shadow:
+    0 24px 50px rgba(0,0,0,0.18),
+    0 0 0 1px rgba(139,92,246,0.10);
+}
+button {
+  transition:
+    transform 0.22s ease,
+    box-shadow 0.22s ease,
+    opacity 0.22s ease !important;
+}
+
+button:hover {
+  transform: translateY(-1px);
+}
+body {
+  background:
+    radial-gradient(
+      circle at top,
+      rgba(124,77,255,0.12),
+      transparent 28%
+    ),
+    radial-gradient(
+      circle at bottom right,
+      rgba(139,92,246,0.08),
+      transparent 22%
+    ),
+    #0B1120;
+
+  min-height: 100vh;
+}
