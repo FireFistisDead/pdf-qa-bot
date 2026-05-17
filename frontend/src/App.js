@@ -1,5 +1,5 @@
 
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import axios from "axios";
 import { pdfjs } from "react-pdf";
 import { saveAs } from "file-saver";
@@ -19,9 +19,12 @@ const API_BASE = process.env.REACT_APP_API_URL || "";
 
 
 function App() {
-  const [file, setFile] = useState(null);
-  const [pdfs, setPdfs] = useState([]); // {name, url, chat: []}
-  const [selectedPdf, setSelectedPdf] = useState(null);
+  const fileInputRef = useRef(null);
+  const [selectedFiles, setSelectedFiles] = useState([]);
+  const [pdfs, setPdfs] = useState([]);
+  const [selectedDocumentId, setSelectedDocumentId] = useState(null);
+  const [sessionId, setSessionId] = useState(null);
+  const [chat, setChat] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [question, setQuestion] = useState("");
  
@@ -30,72 +33,99 @@ function App() {
   const [numPages, setNumPages] = useState(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [summarizing, setSummarizing] = useState(false);
-  const isProcessing = uploading || asking || summarizing;
+
+  const getApiErrorMessage = (error, fallbackMessage) => {
+    if (error.code === "ECONNABORTED") {
+      return "Request timed out. Please try again.";
+    }
+    if (!error.response) {
+      return "Network error. Please check if the backend server is running.";
+    }
+    return error.response?.data?.error || error.response?.data?.detail || fallbackMessage;
+  };
+
+  const handleFileChange = (event) => {
+    setSelectedFiles(Array.from(event.target.files || []));
+  };
 
   // Multi-PDF upload
   const uploadPDF = async () => {
-  if (!file) {
-    toast.error("Please select a PDF file first.");
+  if (selectedFiles.length === 0) {
+    toast.error("Please select at least one PDF file first.");
     return;
   }
 
-  // Validate file type
-  if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
-    toast.error("Only PDF files are allowed. Please select a valid PDF document.");
+  const invalidFile = selectedFiles.find(
+    (candidateFile) =>
+      candidateFile.type !== "application/pdf" &&
+      !candidateFile.name.toLowerCase().endsWith(".pdf")
+  );
+
+  if (invalidFile) {
+    toast.error(`Only PDF files are allowed: ${invalidFile.name}`);
     return;
   }
 
   // Validate file size (20MB limit)
   const maxSize = 20 * 1024 * 1024; // 20MB in bytes
-  if (file.size > maxSize) {
-    toast.error("File size exceeds 20MB limit. Please choose a smaller file.");
+  const oversizedFile = selectedFiles.find((candidateFile) => candidateFile.size > maxSize);
+  if (oversizedFile) {
+    toast.error(`${oversizedFile.name} exceeds the 20MB limit.`);
     return;
   }
 
   setUploading(true);
-  const loadingToast = toast.loading("Uploading PDF...");
-
-  const formData = new FormData();
-  formData.append("file", file);
+  const loadingToast = toast.loading(
+    selectedFiles.length === 1 ? "Uploading PDF..." : `Uploading ${selectedFiles.length} PDFs...`
+  );
+  const uploadedPdfs = [];
 
   try {
-    const res = await axios.post(`${API_BASE}/upload`, formData, {
-      timeout: 30000, // 30 second timeout
-    });
+    let activeSessionId = sessionId;
 
-    const url = URL.createObjectURL(file);
-
-    setPdfs(prev => [
-      ...prev,
-      {
-        name: file.name,
-        url,
-        chat: [],
-        session_id: res.data.session_id
+    for (const pdfFile of selectedFiles) {
+      const formData = new FormData();
+      formData.append("file", pdfFile);
+      if (activeSessionId) {
+        formData.append("session_id", activeSessionId);
       }
-    ]);
 
-    setSelectedPdf(file.name);
-    setFile(null);
-    toast.success("PDF uploaded successfully!", {
+      const res = await axios.post(`${API_BASE}/upload`, formData, {
+        timeout: 60000,
+      });
+
+      activeSessionId = res.data.session_id;
+      const documentMetadata = res.data.document || {};
+      const uploadedPdf = {
+        name: documentMetadata.filename || pdfFile.name,
+        url: URL.createObjectURL(pdfFile),
+        document_id: documentMetadata.document_id,
+        uploaded_at: documentMetadata.uploaded_at,
+      };
+
+      uploadedPdfs.push(uploadedPdf);
+      setSessionId(activeSessionId);
+      setPdfs(prev => [...prev, uploadedPdf]);
+      setSelectedDocumentId(uploadedPdf.document_id);
+    }
+
+    setSelectedFiles([]);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+    toast.success(
+      selectedFiles.length === 1
+        ? "PDF added to this session."
+        : `${selectedFiles.length} PDFs added to this session.`,
+      {
       id: loadingToast,
-    });
+      }
+    );
 
   } catch (e) {
-    let message = "Upload failed. Please try again.";
-    
-    if (e.code === "ECONNABORTED") {
-      message = "Upload timed out. Please check your connection and try again.";
-    } else if (!e.response) {
-      message = "Network error. Please check if the backend server is running.";
-    } else if (e.response?.status === 413) {
-      message = "File too large. Please choose a file under 20MB.";
-    } else if (e.response?.status === 500) {
-      message = "Server error. Please try again later.";
-    } else if (e.response?.data?.error) {
-      message = e.response.data.error;
-    }
-    
+    const message = uploadedPdfs.length > 0
+      ? `${uploadedPdfs.length} PDF(s) uploaded, but one file failed: ${getApiErrorMessage(e, "Upload failed.")}`
+      : getApiErrorMessage(e, "Upload failed. Please try again.");
     toast.error(message, {
       id: loadingToast,
     });
@@ -112,42 +142,24 @@ function App() {
       return;
     }
     
-    if (!selectedPdf) {
-      toast.error("Please upload and select a PDF document first.");
+    if (!sessionId || pdfs.length === 0) {
+      toast.error("Please upload at least one PDF document first.");
       return;
     }
-    
-    const currentPdf = pdfs.find(p => p.name === selectedPdf);
-    if (!currentPdf || !currentPdf.session_id) {
-      toast.error("Invalid session. Please upload the PDF again.");
-      return;
-    }
-    
+
+    const submittedQuestion = question.trim();
     setAsking(true);
-    setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "user", text: question }] } : pdf));
+    setChat(prev => [...prev, { role: "user", text: submittedQuestion }]);
     
     try {
-      const res = await axios.post(`${API_BASE}/ask`, { question, session_id: currentPdf.session_id }, {
+      const res = await axios.post(`${API_BASE}/ask`, { question: submittedQuestion, session_id: sessionId }, {
         timeout: 60000, // 60 second timeout for AI responses
       });
-      setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: res.data.answer }] } : pdf));
+      setChat(prev => [...prev, { role: "bot", text: res.data.answer }]);
     } catch (e) {
-      let errorMessage = "Error getting answer. Please try again.";
-      
-      if (e.code === "ECONNABORTED") {
-        errorMessage = "Request timed out. The AI is taking too long to respond. Please try a simpler question.";
-      } else if (!e.response) {
-        errorMessage = "Network error. Please check if the backend server is running.";
-      } else if (e.response?.status === 404) {
-        errorMessage = "Session not found. Please upload the PDF again.";
-      } else if (e.response?.status === 500) {
-        errorMessage = "Server error. Please try again later.";
-      } else if (e.response?.data?.error) {
-        errorMessage = e.response.data.error;
-      }
-      
+      const errorMessage = getApiErrorMessage(e, "Error getting answer. Please try again.");
       toast.error(errorMessage);
-      setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: errorMessage }] } : pdf));
+      setChat(prev => [...prev, { role: "bot", text: errorMessage }]);
     }
     setQuestion("");
     setAsking(false);
@@ -155,64 +167,44 @@ function App() {
 
   // Summarization
   const summarizePDF = async () => {
-    if (!selectedPdf) {
-      toast.error("Please upload and select a PDF document first.");
-      return;
-    }
-    
-    const currentPdf = pdfs.find(p => p.name === selectedPdf);
-    if (!currentPdf || !currentPdf.session_id) {
-      toast.error("Invalid session. Please upload the PDF again.");
+    if (!sessionId || pdfs.length === 0) {
+      toast.error("Please upload at least one PDF document first.");
       return;
     }
     
     setSummarizing(true);
-    const loadingToast = toast.loading("Summarizing PDF...");
+    const loadingToast = toast.loading("Summarizing uploaded documents...");
     
     try {
-      const res = await axios.post(`${API_BASE}/summarize`, { pdf: selectedPdf, session_id: currentPdf.session_id }, {
+      const res = await axios.post(`${API_BASE}/summarize`, { session_id: sessionId }, {
         timeout: 60000, // 60 second timeout for summarization
       });
-      setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: res.data.summary }] } : pdf));
-      toast.success("PDF summarized successfully!", {
+      setChat(prev => [...prev, { role: "bot", text: res.data.summary }]);
+      toast.success("Documents summarized successfully!", {
         id: loadingToast,
       });
     } catch (e) {
-      let errorMessage = "Error summarizing PDF. Please try again.";
-      
-      if (e.code === "ECONNABORTED") {
-        errorMessage = "Summarization timed out. The document might be too large. Please try again.";
-      } else if (!e.response) {
-        errorMessage = "Network error. Please check if the backend server is running.";
-      } else if (e.response?.status === 404) {
-        errorMessage = "Session not found. Please upload the PDF again.";
-      } else if (e.response?.status === 500) {
-        errorMessage = "Server error. Please try again later.";
-      } else if (e.response?.data?.error) {
-        errorMessage = e.response.data.error;
-      }
-      
+      const errorMessage = getApiErrorMessage(e, "Error summarizing documents. Please try again.");
       toast.error(errorMessage, {
         id: loadingToast,
       });
-      setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: errorMessage }] } : pdf));
+      setChat(prev => [...prev, { role: "bot", text: errorMessage }]);
     }
     setSummarizing(false);
   };
 
   // Export chat
   const exportChat = (type) => {
-    if (!selectedPdf) return;
-    const chat = pdfs.find(pdf => pdf.name === selectedPdf)?.chat || [];
+    if (!sessionId) return;
     if (type === "csv") {
       const csv = Papa.unparse(chat);
       const blob = new Blob([csv], { type: "text/csv" });
-      saveAs(blob, `${selectedPdf}-chat.csv`);
+      saveAs(blob, `document-session-chat.csv`);
     } else if (type === "pdf") {
       // Simple text PDF export
       const text = chat.map(msg => `${msg.role}: ${msg.text}`).join("\n\n");
       const blob = new Blob([text], { type: "application/pdf" });
-      saveAs(blob, `${selectedPdf}-chat.pdf`);
+      saveAs(blob, `document-session-chat.pdf`);
     }
   };
 
@@ -224,8 +216,7 @@ function App() {
 
   const themeClass = darkMode ? "bg-dark text-light" : "bg-light text-dark";
 
-  const currentChat = pdfs.find(pdf => pdf.name === selectedPdf)?.chat || [];
-  const currentPdfUrl = pdfs.find(pdf => pdf.name === selectedPdf)?.url || null;
+  const currentPdfUrl = pdfs.find(pdf => pdf.document_id === selectedDocumentId)?.url || null;
   return (
     <>
     <Toaster
@@ -264,8 +255,12 @@ function App() {
         <UploadSection
   uploading={uploading}
   darkMode={darkMode}
-  file={file}
-  handleFileChange={(e) => setFile(e.target.files[0])}
+  files={selectedFiles}
+  fileInputRef={fileInputRef}
+  uploadedDocuments={pdfs}
+  selectedDocumentId={selectedDocumentId}
+  setSelectedDocumentId={setSelectedDocumentId}
+  handleFileChange={handleFileChange}
   handleUpload={uploadPDF}
 />
         <Row className="justify-content-center">
@@ -288,14 +283,14 @@ function App() {
       <Col md={5}>
         <ChatSection
   darkMode={darkMode}
-  currentChat={currentChat}
+  currentChat={chat}
   question={question}
   setQuestion={setQuestion}
   askQuestion={askQuestion}
   asking={asking}
   summarizePDF={summarizePDF}
   summarizing={summarizing}
-  selectedPdf={selectedPdf}
+  hasSession={Boolean(sessionId)}
   exportChat={exportChat}
 />
       </Col>

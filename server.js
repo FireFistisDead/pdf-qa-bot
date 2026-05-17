@@ -9,8 +9,24 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+const MAX_PDF_SIZE_BYTES = 20 * 1024 * 1024;
+
 // Storage for uploaded PDFs
-const upload = multer({ dest: "uploads/" });
+const upload = multer({
+  dest: "uploads/",
+  limits: { fileSize: MAX_PDF_SIZE_BYTES },
+  fileFilter: (req, file, cb) => {
+    const isPdf =
+      file.mimetype === "application/pdf" ||
+      file.originalname.toLowerCase().endsWith(".pdf");
+
+    if (!isPdf) {
+      return cb(new Error("Only PDF files are allowed."));
+    }
+
+    cb(null, true);
+  },
+});
 
 /**
  * Safely delete uploaded temp file
@@ -31,6 +47,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   const uploadedFilePath = req.file?.path;
   // Always send absolute path to FastAPI
   const absoluteFilePath = uploadedFilePath ? path.resolve(uploadedFilePath) : null;
+  const sessionId = req.body?.session_id || null;
 
   try {
     if (!req.file) {
@@ -44,6 +61,8 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       "http://localhost:5000/process-pdf",
       {
         filePath: absoluteFilePath,
+        filename: req.file.originalname,
+        session_id: sessionId,
       }
     );
 
@@ -53,16 +72,20 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     return res.json({
       message: "PDF uploaded & processed successfully!",
       session_id: response.data.session_id,
+      document: response.data.document,
+      documents: response.data.documents || [],
     });
   } catch (err) {
     // Ensure cleanup on failure
     await cleanupFile(uploadedFilePath);
 
-    const details = err.response?.data || err.message;
+    const statusCode = err.response?.status || (err.code === "LIMIT_FILE_SIZE" ? 413 : 500);
+    const upstreamDetails = err.response?.data;
+    const details = upstreamDetails?.detail || upstreamDetails?.error || err.message;
     console.error("Upload processing failed:", details);
 
-    return res.status(500).json({
-      error: "PDF processing failed",
+    return res.status(statusCode).json({
+      error: details || "PDF processing failed",
       details,
     });
   }
@@ -71,6 +94,14 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 // Route: Ask Question
 app.post("/ask", async (req, res) => {
   const { question, session_id } = req.body;
+
+  if (!question || !question.trim()) {
+    return res.status(400).json({ error: "Question is required." });
+  }
+
+  if (!session_id) {
+    return res.status(400).json({ error: "session_id is required." });
+  }
 
   try {
     const response = await axios.post(
@@ -83,14 +114,20 @@ app.post("/ask", async (req, res) => {
 
     res.json({ answer: response.data.answer });
   } catch (err) {
-    console.error(err.message);
-    res.status(500).json({
-      error: "Error answering question",
+    const statusCode = err.response?.status || 500;
+    const details = err.response?.data?.detail || err.response?.data?.error || err.message;
+    console.error("Question answering failed:", details);
+    res.status(statusCode).json({
+      error: details || "Error answering question",
     });
   }
 });
 
 app.post("/summarize", async (req, res) => {
+  if (!req.body?.session_id) {
+    return res.status(400).json({ error: "session_id is required." });
+  }
+
   try {
     const response = await axios.post(
       "http://localhost:5000/summarize",
@@ -101,15 +138,32 @@ app.post("/summarize", async (req, res) => {
       summary: response.data.summary,
     });
   } catch (err) {
-    const details = err.response?.data || err.message;
+    const statusCode = err.response?.status || 500;
+    const details = err.response?.data?.detail || err.response?.data?.error || err.message;
 
     console.error("Summarization failed:", details);
 
-    res.status(500).json({
-      error: "Error summarizing PDF",
+    res.status(statusCode).json({
+      error: details || "Error summarizing PDF",
       details,
     });
   }
+});
+
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
+    return res.status(413).json({
+      error: "File too large. Please choose a PDF under 20MB.",
+    });
+  }
+
+  if (err) {
+    return res.status(400).json({
+      error: err.message || "Invalid upload request.",
+    });
+  }
+
+  next();
 });
 
 app.listen(4000, () =>
