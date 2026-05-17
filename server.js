@@ -3,6 +3,7 @@ const cors = require("cors");
 const multer = require("multer");
 const axios = require("axios");
 const fs = require("fs/promises");
+const path = require("path");
 
 const app = express();
 app.use(cors());
@@ -27,7 +28,9 @@ const cleanupFile = async (filePath) => {
 
 // Route: Upload PDF
 app.post("/upload", upload.single("file"), async (req, res) => {
-  const filePath = req.file?.path;
+  const uploadedFilePath = req.file?.path;
+  // Always send absolute path to FastAPI
+  const absoluteFilePath = uploadedFilePath ? path.resolve(uploadedFilePath) : null;
 
   try {
     if (!req.file) {
@@ -36,16 +39,16 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       });
     }
 
-    // Send PDF to Python service
+    // Send absolute path to Python service
     const response = await axios.post(
       "http://localhost:5000/process-pdf",
       {
-        filePath,
+        filePath: absoluteFilePath,
       }
     );
 
     // Cleanup uploaded file after successful processing
-    await cleanupFile(filePath);
+    await cleanupFile(uploadedFilePath);
 
     return res.json({
       message: "PDF uploaded & processed successfully!",
@@ -53,7 +56,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     });
   } catch (err) {
     // Ensure cleanup on failure
-    await cleanupFile(filePath);
+    await cleanupFile(uploadedFilePath);
 
     const details = err.response?.data || err.message;
     console.error("Upload processing failed:", details);
