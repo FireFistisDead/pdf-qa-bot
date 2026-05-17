@@ -26,6 +26,10 @@ sessions_lock = threading.Lock()
 # Configurable session TTL and max cap
 SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "30"))
 MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "100"))
+RAG_CHUNK_SIZE = int(os.getenv("RAG_CHUNK_SIZE", "800"))
+RAG_CHUNK_OVERLAP = int(os.getenv("RAG_CHUNK_OVERLAP", "160"))
+RAG_FETCH_K = int(os.getenv("RAG_FETCH_K", "6"))
+RAG_CONTEXT_K = int(os.getenv("RAG_CONTEXT_K", "4"))
 
 def now_ts():
     return time.time()
@@ -125,6 +129,20 @@ def generate_response(prompt: str, max_new_tokens: int) -> str:
     text = tokenizer.decode(new_tokens, skip_special_tokens=True)
     return text.strip()
 
+
+def deduplicate_documents(documents):
+    """Drop near-duplicate chunks so retrieval context stays focused."""
+    seen = set()
+    unique = []
+    for doc in documents:
+        key = doc.page_content.strip()[:400]
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(doc)
+    return unique
+
+
 class PDFPath(BaseModel):
     filePath: str
 
@@ -174,7 +192,8 @@ def ask_question(data: Question):
     if not vectorstore:
         return {"answer": "Session expired or invalid. Please re-upload the PDF!"}
 
-    docs = vectorstore.similarity_search(data.question, k=4)
+    docs = vectorstore.similarity_search(data.question, k=RAG_FETCH_K)
+    docs = deduplicate_documents(docs)[:RAG_CONTEXT_K]
     if not docs:
         return {"answer": "No relevant context found."}
 
