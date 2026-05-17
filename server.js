@@ -44,6 +44,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       "http://localhost:5000/process-pdf",
       {
         filePath: absoluteFilePath,
+        session_id: req.body.session_id || null,
       }
     );
 
@@ -51,8 +52,9 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     await cleanupFile(uploadedFilePath);
 
     return res.json({
-      message: "PDF uploaded & processed successfully!",
+      message: response.data.message || "PDF uploaded & processed successfully!",
       session_id: response.data.session_id,
+      document_count: response.data.document_count,
     });
   } catch (err) {
     // Ensure cleanup on failure
@@ -81,7 +83,10 @@ app.post("/ask", async (req, res) => {
       }
     );
 
-    res.json({ answer: response.data.answer });
+    res.json({
+      answer: response.data.answer,
+      sources: response.data.sources || [],
+    });
   } catch (err) {
     console.error(err.message);
     res.status(500).json({
