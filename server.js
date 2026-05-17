@@ -14,8 +14,13 @@ const upload = multer({ dest: "uploads/" });
 
 // Centralized helper to safely delete a temp file
 async function cleanupFile(filePath) {
+  const resolved = path.resolve(filePath);
+  if (!resolved.startsWith(path.resolve("uploads"))) {
+    console.error("Refusing to delete file outside uploads dir:", resolved);
+    return;
+  }
   try {
-    await fsPromises.unlink(filePath);
+    await fsPromises.unlink(resolved);
   } catch (err) {
     console.error("Failed to delete temp file:", err);
   }
