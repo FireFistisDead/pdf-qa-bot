@@ -26,6 +26,10 @@ sessions_lock = threading.Lock()
 # Configurable session TTL and max cap
 SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "30"))
 MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "100"))
+FAISS_DISTANCE_THRESHOLD = float(os.getenv("FAISS_DISTANCE_THRESHOLD", "1.2"))
+NO_RELEVANT_ANSWER = (
+    "The document does not appear to contain information about this question."
+)
 
 def now_ts():
     return time.time()
@@ -60,6 +64,11 @@ def cleanup_expired_sessions():
         )
 # Helper to get a valid session (handles TTL, locking, and last_accessed update)
 def get_valid_session(session_id: str):
+    meta = get_session_meta(session_id)
+    return meta["vectorstore"] if meta else None
+
+
+def get_session_meta(session_id: str):
     with sessions_lock:
         meta = sessions.get(session_id)
         if not meta:
@@ -69,7 +78,7 @@ def get_valid_session(session_id: str):
             del sessions[session_id]
             return None
         meta["last_accessed"] = now_ts()
-        return meta["vectorstore"]
+        return meta
 HF_GENERATION_MODEL = os.getenv("HF_GENERATION_MODEL", "google/flan-t5-base")
 generation_tokenizer = None
 generation_model = None
@@ -125,6 +134,22 @@ def generate_response(prompt: str, max_new_tokens: int) -> str:
     text = tokenizer.decode(new_tokens, skip_special_tokens=True)
     return text.strip()
 
+
+def retrieve_relevant_docs(vectorstore, query: str, k: int = 4):
+    docs_with_scores = vectorstore.similarity_search_with_score(query, k=k)
+    return [doc for doc, score in docs_with_scores if score <= FAISS_DISTANCE_THRESHOLD]
+
+
+def extract_source_pages(docs):
+    return sorted(
+        {
+            doc.metadata.get("page", 0) + 1
+            for doc in docs
+            if doc.metadata and "page" in doc.metadata
+        }
+    )
+
+
 class PDFPath(BaseModel):
     filePath: str
 
@@ -153,7 +178,6 @@ def process_pdf(data: PDFPath):
     vectorstore = FAISS.from_documents(chunks, embedding_model)
     now = now_ts()
     with sessions_lock:
-        # Enforce max cap before insert
         while len(sessions) >= MAX_ACTIVE_SESSIONS:
             oldest = min(sessions.items(), key=lambda x: x[1]["created_at"])[0]
             del sessions[oldest]
@@ -174,12 +198,11 @@ def ask_question(data: Question):
     if not vectorstore:
         return {"answer": "Session expired or invalid. Please re-upload the PDF!"}
 
-    docs = vectorstore.similarity_search(data.question, k=4)
+    docs = retrieve_relevant_docs(vectorstore, data.question, k=4)
     if not docs:
-        return {"answer": "No relevant context found."}
+        return {"answer": NO_RELEVANT_ANSWER}
 
     context = "\n\n".join([doc.page_content for doc in docs])
-
     prompt = (
         "You are a helpful assistant for question answering over PDF documents. "
         "Use only the provided context. If the context does not contain the answer, say so briefly.\n\n"
