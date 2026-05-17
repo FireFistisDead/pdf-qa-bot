@@ -23,6 +23,7 @@ const ChatSection = ({
   summarizing,
   selectedPdf,
   exportChat,
+  clearChat,
 }) => {
     const messagesEndRef = useRef(null);
 
@@ -102,6 +103,15 @@ useEffect(() => {
               disabled={!selectedPdf}
             >
               Export
+            </Button>
+
+            <Button
+              variant="outline-danger"
+              size="sm"
+              onClick={clearChat}
+              disabled={!selectedPdf || currentChat.length === 0}
+            >
+              Clear
             </Button>
           </div>
         </div>

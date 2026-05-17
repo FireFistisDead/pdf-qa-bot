@@ -182,7 +182,10 @@ def ask_question(data: Question):
 
     prompt = (
         "You are a helpful assistant for question answering over PDF documents. "
-        "Use only the provided context. If the context does not contain the answer, say so briefly.\n\n"
+        "Use only the provided context. If the context does not contain the answer, say so briefly.\n"
+        "Format answers for humans: use clear sentences, bullet lists for multiple items, "
+        "and commas between list values (e.g. skills: Python, Flask, MySQL). "
+        "Do not dump raw space-separated tokens from the document.\n\n"
         f"Context:\n{context}\n\n"
         f"Question: {data.question}\n"
         "Answer:"
