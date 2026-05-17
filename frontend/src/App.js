@@ -1,17 +1,16 @@
 
 import React, { useState } from "react";
 import axios from "axios";
-import ReactMarkdown from "react-markdown";
-import { Document, Page, pdfjs } from "react-pdf";
+import { pdfjs } from "react-pdf";
 import { saveAs } from "file-saver";
 import Papa from "papaparse";
 import 'bootstrap/dist/css/bootstrap.min.css';
-import { Container, Row, Col, Button, Form, Card,Spinner} from 'react-bootstrap';
+import { Container, Row, Col } from 'react-bootstrap';
 import Navbar from "./components/Navbar/Navbar";
 import UploadSection from "./components/UploadSection/UploadSection";
 import PdfViewer from "./components/PdfViewer/PdfViewer";
 import ChatSection from "./components/ChatSection/ChatSection";
-//import toast, { Toaster } from "react-hot-toast";
+import toast, { Toaster } from "react-hot-toast";
 pdfjs.GlobalWorkerOptions.workerSrc =
   `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
 
@@ -35,21 +34,34 @@ function App() {
 
   // Multi-PDF upload
   const uploadPDF = async () => {
-
   if (!file) {
-    // toast.error("Please select a PDF first");
+    toast.error("Please select a PDF file first.");
+    return;
+  }
+
+  // Validate file type
+  if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+    toast.error("Only PDF files are allowed. Please select a valid PDF document.");
+    return;
+  }
+
+  // Validate file size (20MB limit)
+  const maxSize = 20 * 1024 * 1024; // 20MB in bytes
+  if (file.size > maxSize) {
+    toast.error("File size exceeds 20MB limit. Please choose a smaller file.");
     return;
   }
 
   setUploading(true);
-
-  // const loadingToast = toast.loading("Uploading PDF...");
+  const loadingToast = toast.loading("Uploading PDF...");
 
   const formData = new FormData();
   formData.append("file", file);
 
   try {
-    const res = await axios.post(`${API_BASE}/upload`, formData);
+    const res = await axios.post(`${API_BASE}/upload`, formData, {
+      timeout: 30000, // 30 second timeout
+    });
 
     const url = URL.createObjectURL(file);
 
@@ -64,19 +76,29 @@ function App() {
     ]);
 
     setSelectedPdf(file.name);
-
-    // toast.success("PDF uploaded successfully!", {
-    //   id: loadingToast,
-    // });
+    setFile(null);
+    toast.success("PDF uploaded successfully!", {
+      id: loadingToast,
+    });
 
   } catch (e) {
-
-    const message =
-      e.response?.data?.error || "Upload failed.";
-
-    // toast.error(message, {
-    //   id: loadingToast,
-    // });
+    let message = "Upload failed. Please try again.";
+    
+    if (e.code === "ECONNABORTED") {
+      message = "Upload timed out. Please check your connection and try again.";
+    } else if (!e.response) {
+      message = "Network error. Please check if the backend server is running.";
+    } else if (e.response?.status === 413) {
+      message = "File too large. Please choose a file under 20MB.";
+    } else if (e.response?.status === 500) {
+      message = "Server error. Please try again later.";
+    } else if (e.response?.data?.error) {
+      message = e.response.data.error;
+    }
+    
+    toast.error(message, {
+      id: loadingToast,
+    });
 
   } finally {
     setUploading(false);
@@ -85,15 +107,47 @@ function App() {
 
   // Chat per PDF
   const askQuestion = async () => {
-    if (!question.trim() || !selectedPdf) return;
+    if (!question.trim()) {
+      toast.error("Please enter a question before submitting.");
+      return;
+    }
+    
+    if (!selectedPdf) {
+      toast.error("Please upload and select a PDF document first.");
+      return;
+    }
+    
+    const currentPdf = pdfs.find(p => p.name === selectedPdf);
+    if (!currentPdf || !currentPdf.session_id) {
+      toast.error("Invalid session. Please upload the PDF again.");
+      return;
+    }
+    
     setAsking(true);
     setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "user", text: question }] } : pdf));
-    const currentPdf = pdfs.find(p => p.name === selectedPdf);
+    
     try {
-      const res = await axios.post(`${API_BASE}/ask`, { question, session_id: currentPdf.session_id });
+      const res = await axios.post(`${API_BASE}/ask`, { question, session_id: currentPdf.session_id }, {
+        timeout: 60000, // 60 second timeout for AI responses
+      });
       setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: res.data.answer }] } : pdf));
     } catch (e) {
-      setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: "Error getting answer." }] } : pdf));
+      let errorMessage = "Error getting answer. Please try again.";
+      
+      if (e.code === "ECONNABORTED") {
+        errorMessage = "Request timed out. The AI is taking too long to respond. Please try a simpler question.";
+      } else if (!e.response) {
+        errorMessage = "Network error. Please check if the backend server is running.";
+      } else if (e.response?.status === 404) {
+        errorMessage = "Session not found. Please upload the PDF again.";
+      } else if (e.response?.status === 500) {
+        errorMessage = "Server error. Please try again later.";
+      } else if (e.response?.data?.error) {
+        errorMessage = e.response.data.error;
+      }
+      
+      toast.error(errorMessage);
+      setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: errorMessage }] } : pdf));
     }
     setQuestion("");
     setAsking(false);
@@ -101,14 +155,47 @@ function App() {
 
   // Summarization
   const summarizePDF = async () => {
-    if (!selectedPdf) return;
-    setSummarizing(true);
+    if (!selectedPdf) {
+      toast.error("Please upload and select a PDF document first.");
+      return;
+    }
+    
     const currentPdf = pdfs.find(p => p.name === selectedPdf);
+    if (!currentPdf || !currentPdf.session_id) {
+      toast.error("Invalid session. Please upload the PDF again.");
+      return;
+    }
+    
+    setSummarizing(true);
+    const loadingToast = toast.loading("Summarizing PDF...");
+    
     try {
-      const res = await axios.post(`${API_BASE}/summarize`, { pdf: selectedPdf, session_id: currentPdf.session_id });
+      const res = await axios.post(`${API_BASE}/summarize`, { pdf: selectedPdf, session_id: currentPdf.session_id }, {
+        timeout: 60000, // 60 second timeout for summarization
+      });
       setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: res.data.summary }] } : pdf));
+      toast.success("PDF summarized successfully!", {
+        id: loadingToast,
+      });
     } catch (e) {
-      setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: "Error summarizing PDF." }] } : pdf));
+      let errorMessage = "Error summarizing PDF. Please try again.";
+      
+      if (e.code === "ECONNABORTED") {
+        errorMessage = "Summarization timed out. The document might be too large. Please try again.";
+      } else if (!e.response) {
+        errorMessage = "Network error. Please check if the backend server is running.";
+      } else if (e.response?.status === 404) {
+        errorMessage = "Session not found. Please upload the PDF again.";
+      } else if (e.response?.status === 500) {
+        errorMessage = "Server error. Please try again later.";
+      } else if (e.response?.data?.error) {
+        errorMessage = e.response.data.error;
+      }
+      
+      toast.error(errorMessage, {
+        id: loadingToast,
+      });
+      setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: errorMessage }] } : pdf));
     }
     setSummarizing(false);
   };
@@ -141,7 +228,7 @@ function App() {
   const currentPdfUrl = pdfs.find(pdf => pdf.name === selectedPdf)?.url || null;
   return (
     <>
-    {/* <Toaster
+    <Toaster
   position="top-right"
   toastOptions={{
     duration: 3500,
@@ -170,7 +257,7 @@ function App() {
       },
     },
   }}
-/> */}
+/>
     <div className={themeClass} style={{ minHeight: "100vh", transition: "background 0.3s" }}>
       <Navbar darkMode={darkMode} setDarkMode={setDarkMode} />
       <Container>
