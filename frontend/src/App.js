@@ -1,16 +1,18 @@
 
 import React, { useState } from "react";
 import axios from "axios";
-import ReactMarkdown from "react-markdown";
-import { Document, Page, pdfjs } from "react-pdf";
+import { pdfjs } from "react-pdf";
 import { saveAs } from "file-saver";
 import Papa from "papaparse";
 import 'bootstrap/dist/css/bootstrap.min.css';
-import { Container, Row, Col, Button, Form, Card, ToggleButton, ToggleButtonGroup, Spinner, Navbar, Nav, Dropdown } from 'react-bootstrap';
-pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-  "pdfjs-dist/build/pdf.worker.min.mjs",
-  import.meta.url
-).toString();
+import { Container, Row, Col } from 'react-bootstrap';
+import Navbar from "./components/Navbar/Navbar";
+import UploadSection from "./components/UploadSection/UploadSection";
+import PdfViewer from "./components/PdfViewer/PdfViewer";
+import ChatSection from "./components/ChatSection/ChatSection";
+import toast, { Toaster } from "react-hot-toast";
+pdfjs.GlobalWorkerOptions.workerSrc =
+  `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
 
 const API_BASE = process.env.REACT_APP_API_URL || "";
 
@@ -20,8 +22,9 @@ function App() {
   const [file, setFile] = useState(null);
   const [pdfs, setPdfs] = useState([]); // {name, url, chat: []}
   const [selectedPdf, setSelectedPdf] = useState(null);
-  const [question, setQuestion] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [question, setQuestion] = useState("");
+ 
   const [asking, setAsking] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
   const [numPages, setNumPages] = useState(null);
@@ -31,34 +34,120 @@ function App() {
 
   // Multi-PDF upload
   const uploadPDF = async () => {
-    if (!file) return;
-    setUploading(true);
-    const formData = new FormData();
-    formData.append("file", file);
-    try {
-      const res = await axios.post(`${API_BASE}/upload`, formData);
-      const url = URL.createObjectURL(file);
-      setPdfs(prev => [...prev, { name: file.name, url, chat: [], session_id: res.data.session_id }]);
-      setSelectedPdf(file.name);
-      alert("PDF uploaded!");
-    } catch (e) {
-      const message = e.response?.data?.error || "Upload failed.";
-      alert(message);
+  if (!file) {
+    toast.error("Please select a PDF file first.");
+    return;
+  }
+
+  // Validate file type
+  if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+    toast.error("Only PDF files are allowed. Please select a valid PDF document.");
+    return;
+  }
+
+  // Validate file size (20MB limit)
+  const maxSize = 20 * 1024 * 1024; // 20MB in bytes
+  if (file.size > maxSize) {
+    toast.error("File size exceeds 20MB limit. Please choose a smaller file.");
+    return;
+  }
+
+  setUploading(true);
+  const loadingToast = toast.loading("Uploading PDF...");
+
+  const formData = new FormData();
+  formData.append("file", file);
+
+  try {
+    const res = await axios.post(`${API_BASE}/upload`, formData, {
+      timeout: 30000, // 30 second timeout
+    });
+
+    const url = URL.createObjectURL(file);
+
+    setPdfs(prev => [
+      ...prev,
+      {
+        name: file.name,
+        url,
+        chat: [],
+        session_id: res.data.session_id
+      }
+    ]);
+
+    setSelectedPdf(file.name);
+    setFile(null);
+    toast.success("PDF uploaded successfully!", {
+      id: loadingToast,
+    });
+
+  } catch (e) {
+    let message = "Upload failed. Please try again.";
+    
+    if (e.code === "ECONNABORTED") {
+      message = "Upload timed out. Please check your connection and try again.";
+    } else if (!e.response) {
+      message = "Network error. Please check if the backend server is running.";
+    } else if (e.response?.status === 413) {
+      message = "File too large. Please choose a file under 20MB.";
+    } else if (e.response?.status === 500) {
+      message = "Server error. Please try again later.";
+    } else if (e.response?.data?.error) {
+      message = e.response.data.error;
     }
+    
+    toast.error(message, {
+      id: loadingToast,
+    });
+
+  } finally {
     setUploading(false);
-  };
+  }
+};
 
   // Chat per PDF
   const askQuestion = async () => {
-    if (!question.trim() || !selectedPdf) return;
+    if (!question.trim()) {
+      toast.error("Please enter a question before submitting.");
+      return;
+    }
+    
+    if (!selectedPdf) {
+      toast.error("Please upload and select a PDF document first.");
+      return;
+    }
+    
+    const currentPdf = pdfs.find(p => p.name === selectedPdf);
+    if (!currentPdf || !currentPdf.session_id) {
+      toast.error("Invalid session. Please upload the PDF again.");
+      return;
+    }
+    
     setAsking(true);
     setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "user", text: question }] } : pdf));
-    const currentPdf = pdfs.find(p => p.name === selectedPdf);
+    
     try {
-      const res = await axios.post(`${API_BASE}/ask`, { question, session_id: currentPdf.session_id });
+      const res = await axios.post(`${API_BASE}/ask`, { question, session_id: currentPdf.session_id }, {
+        timeout: 60000, // 60 second timeout for AI responses
+      });
       setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: res.data.answer }] } : pdf));
     } catch (e) {
-      setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: "Error getting answer." }] } : pdf));
+      let errorMessage = "Error getting answer. Please try again.";
+      
+      if (e.code === "ECONNABORTED") {
+        errorMessage = "Request timed out. The AI is taking too long to respond. Please try a simpler question.";
+      } else if (!e.response) {
+        errorMessage = "Network error. Please check if the backend server is running.";
+      } else if (e.response?.status === 404) {
+        errorMessage = "Session not found. Please upload the PDF again.";
+      } else if (e.response?.status === 500) {
+        errorMessage = "Server error. Please try again later.";
+      } else if (e.response?.data?.error) {
+        errorMessage = e.response.data.error;
+      }
+      
+      toast.error(errorMessage);
+      setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: errorMessage }] } : pdf));
     }
     setQuestion("");
     setAsking(false);
@@ -66,14 +155,47 @@ function App() {
 
   // Summarization
   const summarizePDF = async () => {
-    if (!selectedPdf) return;
-    setSummarizing(true);
+    if (!selectedPdf) {
+      toast.error("Please upload and select a PDF document first.");
+      return;
+    }
+    
     const currentPdf = pdfs.find(p => p.name === selectedPdf);
+    if (!currentPdf || !currentPdf.session_id) {
+      toast.error("Invalid session. Please upload the PDF again.");
+      return;
+    }
+    
+    setSummarizing(true);
+    const loadingToast = toast.loading("Summarizing PDF...");
+    
     try {
-      const res = await axios.post(`${API_BASE}/summarize`, { pdf: selectedPdf, session_id: currentPdf.session_id });
+      const res = await axios.post(`${API_BASE}/summarize`, { pdf: selectedPdf, session_id: currentPdf.session_id }, {
+        timeout: 60000, // 60 second timeout for summarization
+      });
       setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: res.data.summary }] } : pdf));
+      toast.success("PDF summarized successfully!", {
+        id: loadingToast,
+      });
     } catch (e) {
-      setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: "Error summarizing PDF." }] } : pdf));
+      let errorMessage = "Error summarizing PDF. Please try again.";
+      
+      if (e.code === "ECONNABORTED") {
+        errorMessage = "Summarization timed out. The document might be too large. Please try again.";
+      } else if (!e.response) {
+        errorMessage = "Network error. Please check if the backend server is running.";
+      } else if (e.response?.status === 404) {
+        errorMessage = "Session not found. Please upload the PDF again.";
+      } else if (e.response?.status === 500) {
+        errorMessage = "Server error. Please try again later.";
+      } else if (e.response?.data?.error) {
+        errorMessage = e.response.data.error;
+      }
+      
+      toast.error(errorMessage, {
+        id: loadingToast,
+      });
+      setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: errorMessage }] } : pdf));
     }
     setSummarizing(false);
   };
@@ -104,112 +226,87 @@ function App() {
 
   const currentChat = pdfs.find(pdf => pdf.name === selectedPdf)?.chat || [];
   const currentPdfUrl = pdfs.find(pdf => pdf.name === selectedPdf)?.url || null;
-
   return (
+    <>
+    <Toaster
+  position="top-right"
+  toastOptions={{
+    duration: 3500,
+
+    style: {
+      background: "#111827",
+      color: "#fff",
+      border: "1px solid rgba(255,255,255,0.08)",
+      borderRadius: "16px",
+      padding: "14px 16px",
+      backdropFilter: "blur(12px)",
+      boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
+    },
+
+    success: {
+      iconTheme: {
+        primary: "#8B5CF6",
+        secondary: "#fff",
+      },
+    },
+
+    error: {
+      iconTheme: {
+        primary: "#EF4444",
+        secondary: "#fff",
+      },
+    },
+  }}
+/>
     <div className={themeClass} style={{ minHeight: "100vh", transition: "background 0.3s" }}>
-      <Navbar bg={darkMode ? "dark" : "primary"} variant={darkMode ? "dark" : "light"} expand="lg" className="mb-4">
-        <Container>
-          <Navbar.Brand href="#">PDF Q&A Bot</Navbar.Brand>
-          <Nav className="ml-auto">
-            <ToggleButtonGroup type="radio" name="theme" value={darkMode ? 1 : 0} onChange={() => setDarkMode(!darkMode)}>
-              <ToggleButton id="tbg-light" value={0} variant={darkMode ? "outline-light" : "outline-dark"}>Light</ToggleButton>
-              <ToggleButton id="tbg-dark" value={1} variant={darkMode ? "outline-light" : "outline-dark"}>Dark</ToggleButton>
-            </ToggleButtonGroup>
-          </Nav>
-        </Container>
-      </Navbar>
+      <Navbar darkMode={darkMode} setDarkMode={setDarkMode} />
       <Container>
-        <Row className="justify-content-center mb-4">
-          <Col md={8}>
-            <Card className={darkMode ? "bg-secondary text-light" : "bg-white text-dark"}>
-              <Card.Body>
-                <Form>
-                  <Form.Group controlId="formFile" className="mb-3">
-                    <Form.Label>Upload PDF</Form.Label>
-                    <Form.Control type="file" onChange={e => setFile(e.target.files[0])} />
-                  </Form.Group>
-                  <Button variant="primary" onClick={uploadPDF} disabled={!file || uploading}>
-                    {uploading ? <Spinner animation="border" size="sm" /> : "Upload"}
-                  </Button>
-                  {file && <span className="ms-3">{file.name}</span>}
-                </Form>
-                {pdfs.length > 0 && (
-                  <Dropdown className="mt-3">
-                    <Dropdown.Toggle variant="info" id="dropdown-pdf">
-                      {selectedPdf || "Select PDF"}
-                    </Dropdown.Toggle>
-                    <Dropdown.Menu>
-                      {pdfs.map(pdf => (
-                        <Dropdown.Item key={pdf.name} onClick={() => setSelectedPdf(pdf.name)}>{pdf.name}</Dropdown.Item>
-                      ))}
-                    </Dropdown.Menu>
-                  </Dropdown>
-                )}
-              </Card.Body>
-            </Card>
-          </Col>
-        </Row>
-        {currentPdfUrl && (
-          <Row className="justify-content-center mb-4">
-            <Col md={8}>
-              <Card className={darkMode ? "bg-secondary text-light" : "bg-white text-dark"}>
-                <Card.Body>
-                  <div style={{ textAlign: "center" }}>
-                    <Document file={currentPdfUrl} onLoadSuccess={onDocumentLoadSuccess}>
-                      <Page pageNumber={pageNumber} />
-                    </Document>
-                    <div className="d-flex justify-content-between align-items-center mt-2">
-                      <Button variant="outline-info" size="sm" disabled={pageNumber <= 1} onClick={() => setPageNumber(pageNumber - 1)}>Prev</Button>
-                      <span>Page {pageNumber} of {numPages}</span>
-                      <Button variant="outline-info" size="sm" disabled={pageNumber >= numPages} onClick={() => setPageNumber(pageNumber + 1)}>Next</Button>
-                    </div>
-                  </div>
-                </Card.Body>
-              </Card>
-            </Col>
-          </Row>
-        )}
+        <UploadSection
+  uploading={uploading}
+  darkMode={darkMode}
+  file={file}
+  handleFileChange={(e) => setFile(e.target.files[0])}
+  handleUpload={uploadPDF}
+/>
         <Row className="justify-content-center">
-          <Col md={8}>
-            <Card className={darkMode ? "bg-secondary text-light" : "bg-white text-dark"}>
-              <Card.Body style={{ minHeight: 300 }}>
-                <h5>Chat</h5>
-                <div style={{ maxHeight: 250, overflowY: "auto", marginBottom: 16 }}>
-                  {currentChat.map((msg, i) => (
-                    <div key={i} className={`d-flex ${msg.role === "user" ? "justify-content-end" : "justify-content-start"} mb-2`}>
-                      <div className={`p-2 rounded ${msg.role === "user" ? "bg-primary text-light" : darkMode ? "bg-dark text-light" : "bg-light text-dark"}`} style={{ maxWidth: "80%" }}>
-                        {msg.role === "bot" ? (
-                          <ReactMarkdown>{msg.text}</ReactMarkdown>
-                        ) : (
-                          <span><strong>You:</strong> {msg.text}</span>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                {uploading && <p>Processing PDF...</p>}{asking && <p>Generating answer...</p>}{summarizing && <p>Generating summary...</p>}
-                <Form className="d-flex gap-2 mb-2">
-                  <Form.Control
-                    type="text"
-                    placeholder="Ask a question..."
-                    value={question}
-                    onChange={e => setQuestion(e.target.value)}
-                    disabled={isProcessing}
-                    onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); askQuestion(); } }}
-                  />
-                  <Button variant="success" onClick={askQuestion} disabled={isProcessing || !question.trim() || !selectedPdf}>{asking ? <Spinner animation="border" size="sm" /> : "Ask"}</Button>
-                </Form>
-                <Button variant="warning" className="me-2" onClick={summarizePDF} disabled={isProcessing || !selectedPdf}>
-                  {summarizing ? <Spinner animation="border" size="sm" /> : "Summarize PDF"}
-                </Button>
-                <Button variant="outline-secondary" className="me-2" onClick={() => exportChat("csv")} disabled={isProcessing || !selectedPdf}>Export CSV</Button>
-                <Button variant="outline-secondary" onClick={() => exportChat("pdf")} disabled={isProcessing || !selectedPdf}>Export PDF</Button>
-              </Card.Body>
-            </Card>
-          </Col>
-        </Row>
+  <Col md={11}>
+    
+    <Row className="g-4">
+
+      {/* LEFT PANEL — PDF VIEWER */}
+      <Col md={7}>
+  <PdfViewer
+    darkMode={darkMode}
+    currentPdfUrl={currentPdfUrl}
+    pageNumber={pageNumber}
+    numPages={numPages}
+    setPageNumber={setPageNumber}
+    onDocumentLoadSuccess={onDocumentLoadSuccess}
+  />
+</Col>
+      {/* RIGHT PANEL — CHAT */}
+      <Col md={5}>
+        <ChatSection
+  darkMode={darkMode}
+  currentChat={currentChat}
+  question={question}
+  setQuestion={setQuestion}
+  askQuestion={askQuestion}
+  asking={asking}
+  summarizePDF={summarizePDF}
+  summarizing={summarizing}
+  selectedPdf={selectedPdf}
+  exportChat={exportChat}
+/>
+      </Col>
+
+    </Row>
+  </Col>
+</Row>
+          
       </Container>
     </div>
+    </>
   );
 }
 
