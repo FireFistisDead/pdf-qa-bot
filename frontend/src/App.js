@@ -57,7 +57,6 @@ function App() {
 
   const formData = new FormData();
   formData.append("file", file);
-
   try {
     const res = await axios.post(`${API_BASE}/upload`, formData, {
       timeout: 30000, // 30 second timeout
@@ -72,7 +71,7 @@ function App() {
         url,
         chat: [],
         session_id: res.data.session_id
-      }
+      },
     ]);
 
     setSelectedPdf(file.name);
@@ -130,7 +129,23 @@ function App() {
       const res = await axios.post(`${API_BASE}/ask`, { question, session_id: currentPdf.session_id }, {
         timeout: 60000, // 60 second timeout for AI responses
       });
-      setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: res.data.answer }] } : pdf));
+      setPdfs((prev) =>
+        prev.map((pdf) =>
+          pdf.name === selectedPdf
+            ? {
+                ...pdf,
+                chat: [
+                  ...pdf.chat,
+                  {
+                    role: "bot",
+                    text: res.data.answer,
+                    sources: res.data.sources || [],
+                  },
+                ],
+              }
+            : pdf
+        )
+      );
     } catch (e) {
       let errorMessage = "Error getting answer. Please try again.";
       
