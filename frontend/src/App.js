@@ -30,6 +30,7 @@ function App() {
   const [numPages, setNumPages] = useState(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [summarizing, setSummarizing] = useState(false);
+  const [workspaceSessionId, setWorkspaceSessionId] = useState(null);
   const isProcessing = uploading || asking || summarizing;
 
   // Multi-PDF upload
@@ -57,6 +58,9 @@ function App() {
 
   const formData = new FormData();
   formData.append("file", file);
+  if (workspaceSessionId) {
+    formData.append("session_id", workspaceSessionId);
+  }
 
   try {
     const res = await axios.post(`${API_BASE}/upload`, formData, {
@@ -65,19 +69,27 @@ function App() {
 
     const url = URL.createObjectURL(file);
 
-    setPdfs(prev => [
+    const sessionId = res.data.session_id;
+    setWorkspaceSessionId(sessionId);
+
+    setPdfs((prev) => [
       ...prev,
       {
         name: file.name,
         url,
         chat: [],
-        session_id: res.data.session_id
-      }
+        session_id: sessionId,
+      },
     ]);
 
     setSelectedPdf(file.name);
     setFile(null);
-    toast.success("PDF uploaded successfully!", {
+    const docCount = res.data.document_count || 1;
+    toast.success(
+      docCount > 1
+        ? `PDF added to session (${docCount} documents indexed).`
+        : "PDF uploaded successfully!",
+      {
       id: loadingToast,
     });
 
@@ -130,7 +142,23 @@ function App() {
       const res = await axios.post(`${API_BASE}/ask`, { question, session_id: currentPdf.session_id }, {
         timeout: 60000, // 60 second timeout for AI responses
       });
-      setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: res.data.answer }] } : pdf));
+      setPdfs((prev) =>
+        prev.map((pdf) =>
+          pdf.name === selectedPdf
+            ? {
+                ...pdf,
+                chat: [
+                  ...pdf.chat,
+                  {
+                    role: "bot",
+                    text: res.data.answer,
+                    sources: res.data.sources || [],
+                  },
+                ],
+              }
+            : pdf
+        )
+      );
     } catch (e) {
       let errorMessage = "Error getting answer. Please try again.";
       
