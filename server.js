@@ -2,8 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const axios = require("axios");
-const fs = require("fs");
-const path = require("path");
+const fs = require("fs/promises");
 
 const app = express();
 app.use(cors());
@@ -12,34 +11,42 @@ app.use(express.json());
 // Storage for uploaded PDFs
 const upload = multer({ dest: "uploads/" });
 
+async function cleanupFile(filePath) {
+  if (!filePath) {
+    return;
+  }
+
+  try {
+    await fs.unlink(filePath);
+  } catch (err) {
+    if (err.code !== "ENOENT") {
+      console.error("Failed to delete local file:", err);
+    }
+  }
+}
+
 // Route: Upload PDF
 app.post("/upload", upload.single("file"), async (req, res) => {
+  const filePath = req.file?.path;
+
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded. Use form field name 'file'." });
     }
 
-    const filePath = path.join(__dirname, req.file.path);
-
     // Send PDF to Python service
     const response = await axios.post("http://localhost:5000/process-pdf", {
-      filePath: filePath,
+      filePath,
     });
 
-    // Clean up local file to prevent disk space bloat
-    fs.unlink(filePath, (err) => {
-      if (err) console.error("Failed to delete local file:", err);
-    });
+    await cleanupFile(filePath);
 
-    res.json({ 
+    res.json({
       message: "PDF uploaded & processed successfully!",
-      session_id: response.data.session_id
+      session_id: response.data.session_id,
     });
   } catch (err) {
-    // Ensure cleanup even on failure
-    if (req.file) {
-      fs.unlink(path.join(__dirname, req.file.path), () => {});
-    }
+    await cleanupFile(filePath);
     const details = err.response?.data || err.message;
     console.error("Upload processing failed:", details);
     res.status(500).json({ error: "PDF processing failed", details });
