@@ -1,0 +1,35 @@
+services:
+  rag:
+    build:
+      context: ./rag-service
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    volumes:
+      - uploads:/app/uploads
+
+  api:
+    build:
+      context: .
+    ports:
+      - "4000:4000"
+    environment:
+      RAG_SERVICE_URL: http://rag:5000
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      - rag
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      REACT_APP_API_URL: http://localhost:4000
+    depends_on:
+      - api
+
+volumes:
+  uploads:
