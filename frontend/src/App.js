@@ -30,7 +30,7 @@ function App() {
   const [numPages, setNumPages] = useState(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [summarizing, setSummarizing] = useState(false);
-  
+  const isProcessing = uploading || asking || summarizing;
 
   // Multi-PDF upload
   const uploadPDF = async () => {
