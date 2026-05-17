@@ -213,7 +213,20 @@ useEffect(() => {
           }}
         >
           {msg.role === "bot" ? (
-            <ReactMarkdown>{msg.text}</ReactMarkdown>
+            <>
+              <ReactMarkdown>{msg.text}</ReactMarkdown>
+              {msg.sources?.length ? (
+                <p
+                  className="mb-0 mt-2"
+                  style={{
+                    fontSize: "12px",
+                    color: darkMode ? "#A1A1AA" : "#6B7280",
+                  }}
+                >
+                  Source pages: {msg.sources.join(", ")}
+                </p>
+              ) : null}
+            </>
           ) : (
             <span>{msg.text}</span>
           )}

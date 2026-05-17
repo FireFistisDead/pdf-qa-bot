@@ -82,6 +82,16 @@ def retrieve_relevant_docs(vectorstore, query: str, k: int = 4):
     return [doc for doc, score in docs_with_scores if score <= FAISS_DISTANCE_THRESHOLD]
 
 
+def extract_source_pages(docs):
+    return sorted(
+        {
+            doc.metadata.get("page", 0) + 1
+            for doc in docs
+            if doc.metadata and "page" in doc.metadata
+        }
+    )
+
+
 class PDFPath(BaseModel):
     filePath: str
 
