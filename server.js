@@ -42,6 +42,14 @@ const cleanupFile = async (filePath) => {
   }
 };
 
+const sendUploadError = (res, statusCode, message, details = message) => {
+  console.error("Upload failed:", details);
+  return res.status(statusCode).json({
+    error: message,
+    details,
+  });
+};
+
 // Route: Upload PDF
 app.post("/upload", upload.single("file"), async (req, res) => {
   const uploadedFilePath = req.file?.path;
@@ -51,9 +59,20 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
   try {
     if (!req.file) {
-      return res.status(400).json({
-        error: "No file uploaded. Use form field name 'file'.",
-      });
+      return sendUploadError(
+        res,
+        400,
+        "No PDF uploaded. Please choose a PDF file and try again."
+      );
+    }
+
+    if (req.file.size === 0) {
+      await cleanupFile(uploadedFilePath);
+      return sendUploadError(
+        res,
+        400,
+        "Uploaded PDF is empty. Please choose a valid PDF file."
+      );
     }
 
     // Send absolute path to Python service
@@ -79,7 +98,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
     // Ensure cleanup on failure
     await cleanupFile(uploadedFilePath);
 
-    const statusCode = err.response?.status || (err.code === "LIMIT_FILE_SIZE" ? 413 : 500);
+    const statusCode = err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
     const upstreamDetails = err.response?.data;
     const details = upstreamDetails?.detail || upstreamDetails?.error || err.message;
     console.error("Upload processing failed:", details);
@@ -152,12 +171,14 @@ app.post("/summarize", async (req, res) => {
 
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
+    console.error("Upload failed: file too large");
     return res.status(413).json({
       error: "File too large. Please choose a PDF under 20MB.",
     });
   }
 
   if (err) {
+    console.error("Upload failed:", err.message);
     return res.status(400).json({
       error: err.message || "Invalid upload request.",
     });

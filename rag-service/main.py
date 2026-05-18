@@ -14,6 +14,7 @@ from transformers import AutoConfig, AutoTokenizer, AutoModelForSeq2SeqLM, AutoM
 import threading
 import time
 import logging
+import re
 
 load_dotenv()
 
@@ -32,6 +33,78 @@ logging.basicConfig(
 # Configurable session TTL and max cap
 SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "30"))
 MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "100"))
+ASK_RETRIEVAL_CANDIDATES = int(os.getenv("ASK_RETRIEVAL_CANDIDATES", "12"))
+ASK_MAX_CONTEXT_CHUNKS = int(os.getenv("ASK_MAX_CONTEXT_CHUNKS", "6"))
+ASK_CHUNKS_PER_DOCUMENT = int(os.getenv("ASK_CHUNKS_PER_DOCUMENT", "2"))
+ASK_DIVERSITY_RANK_LIMIT = int(os.getenv("ASK_DIVERSITY_RANK_LIMIT", "8"))
+ASK_DIVERSITY_SCORE_MULTIPLIER = float(os.getenv("ASK_DIVERSITY_SCORE_MULTIPLIER", "1.8"))
+ASK_DIVERSITY_SCORE_MARGIN = float(os.getenv("ASK_DIVERSITY_SCORE_MARGIN", "0.35"))
+QUERY_STOPWORDS = {
+    "about",
+    "according",
+    "also",
+    "and",
+    "are",
+    "between",
+    "compare",
+    "describe",
+    "does",
+    "document",
+    "documents",
+    "explain",
+    "from",
+    "give",
+    "how",
+    "into",
+    "is",
+    "of",
+    "pdf",
+    "pdfs",
+    "related",
+    "summarize",
+    "tell",
+    "the",
+    "their",
+    "these",
+    "this",
+    "to",
+    "uploaded",
+    "what",
+    "with",
+}
+RELATIONSHIP_QUERY_TERMS = {
+    "associated",
+    "connection",
+    "linked",
+    "relation",
+    "relationship",
+    "related",
+}
+COMPARISON_QUERY_TERMS = {
+    "between",
+    "compare",
+    "comparison",
+    "contrast",
+    "difference",
+    "different",
+    "role",
+    "versus",
+    "vs",
+}
+OVERVIEW_QUERY_TERMS = {
+    "across",
+    "all",
+    "covered",
+    "coverage",
+    "documents",
+    "files",
+    "multiple",
+    "overall",
+    "overview",
+    "summarize",
+    "topics",
+}
+INSUFFICIENT_CONTEXT_MESSAGE = "The uploaded documents do not contain enough information to answer this question."
 
 def now_ts():
     return time.time()
@@ -109,10 +182,7 @@ def unique_documents(documents):
     seen = set()
     unique = []
     for doc in documents:
-        source = doc.metadata.get("filename") or doc.metadata.get("source", "")
-        page = doc.metadata.get("page", "")
-        content_key = " ".join(doc.page_content.split())[:500]
-        key = (source, page, content_key)
+        key = document_dedupe_key(doc)
         if key in seen:
             continue
         seen.add(key)
@@ -120,17 +190,488 @@ def unique_documents(documents):
     return unique
 
 
+def document_identity(document):
+    return (
+        document.metadata.get("document_id")
+        or document.metadata.get("filename")
+        or document.metadata.get("source")
+        or "unknown-document"
+    )
+
+
+def document_display_name(document):
+    return (
+        document.metadata.get("filename")
+        or os.path.basename(document.metadata.get("source", ""))
+        or "uploaded document"
+    )
+
+
+def document_dedupe_key(document):
+    source = document.metadata.get("filename") or document.metadata.get("source", "")
+    page = document.metadata.get("page", "")
+    content_key = " ".join(document.page_content.split())[:500]
+    return (document_identity(document), source, page, content_key)
+
+
+def query_keywords(question):
+    return {
+        token
+        for token in re.findall(r"[a-zA-Z0-9]+", question.lower())
+        if len(token) > 2 and token not in QUERY_STOPWORDS
+    }
+
+
+def tokenize_text(text):
+    return set(re.findall(r"[a-zA-Z0-9]+", text.lower()))
+
+
+def document_matches_query_terms(document, keywords):
+    if not keywords:
+        return False
+    document_text = " ".join(
+        [
+            document.page_content,
+            document.metadata.get("filename", ""),
+            document.metadata.get("source", ""),
+        ]
+    ).lower()
+    document_terms = tokenize_text(document_text)
+    return bool(keywords.intersection(document_terms))
+
+
+def detect_question_intent(question):
+    normalized_question = question.lower()
+    terms = tokenize_text(normalized_question)
+
+    if "what is this document about" in normalized_question or "what are these documents about" in normalized_question:
+        return "overview"
+    if "how is" in normalized_question and terms.intersection(RELATIONSHIP_QUERY_TERMS):
+        return "relationship"
+    if terms.intersection(RELATIONSHIP_QUERY_TERMS):
+        return "relationship"
+    if terms.intersection(COMPARISON_QUERY_TERMS):
+        return "comparison"
+    if (
+        terms.intersection(OVERVIEW_QUERY_TERMS)
+        or "summarize all" in normalized_question
+        or "across uploaded documents" in normalized_question
+    ):
+        return "overview"
+    return "factual"
+
+
+def concise_excerpt(text, max_chars=420):
+    normalized_text = " ".join(text.split())
+    if len(normalized_text) <= max_chars:
+        return normalized_text
+    return normalized_text[:max_chars].rsplit(" ", 1)[0] + "..."
+
+
+def split_sentences(text):
+    normalized_text = " ".join(text.split())
+    if not normalized_text:
+        return []
+    return [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", normalized_text)
+        if sentence.strip()
+    ]
+
+
+def clean_sentence(sentence):
+    return sentence.strip().strip("-*• ").rstrip()
+
+
+def document_sentences(document, max_sentences=3):
+    return [
+        clean_sentence(sentence)
+        for sentence in split_sentences(document.page_content)[:max_sentences]
+        if clean_sentence(sentence)
+    ]
+
+
+def group_documents_by_source(documents):
+    grouped_documents = {}
+    for document in documents:
+        source_name = document_display_name(document)
+        grouped_documents.setdefault(source_name, []).append(document)
+    return grouped_documents
+
+
+def best_sentences_for_document(documents, question=None, max_sentences=2):
+    keywords = query_keywords(question or "")
+    scored_sentences = []
+
+    for document in documents:
+        for sentence in document_sentences(document, max_sentences=6):
+            sentence_terms = tokenize_text(sentence)
+            overlap = len(keywords.intersection(sentence_terms)) if keywords else 0
+            scored_sentences.append((overlap, sentence))
+
+    scored_sentences.sort(key=lambda item: item[0], reverse=True)
+    selected_sentences = []
+    seen = set()
+    for _score, sentence in scored_sentences:
+        sentence_key = sentence.lower()
+        if sentence_key in seen:
+            continue
+        seen.add(sentence_key)
+        selected_sentences.append(sentence)
+        if len(selected_sentences) >= max_sentences:
+            break
+
+    return selected_sentences
+
+
+def has_grounded_keyword_overlap(question, documents):
+    keywords = query_keywords(question)
+    if not keywords:
+        return True
+    for document in documents:
+        document_text = " ".join(
+            [
+                document.page_content,
+                document.metadata.get("filename", ""),
+                document.metadata.get("source", ""),
+            ]
+        )
+        if keywords.intersection(tokenize_text(document_text)):
+            return True
+    return False
+
+
+def markdown_bullets(sentences):
+    return "\n".join(f"* {sentence}" for sentence in sentences)
+
+
+def build_relationship_answer(documents, question):
+    grouped_documents = group_documents_by_source(documents)
+
+    if len(grouped_documents) < 2:
+        return None
+
+    answer_parts = ["Based on the uploaded documents:"]
+    for source_name, source_documents in grouped_documents.items():
+        sentences = best_sentences_for_document(source_documents, question, max_sentences=2)
+        if sentences:
+            answer_parts.append(f"* **{source_name}**: {' '.join(sentences)}")
+
+    source_list = ", ".join(grouped_documents.keys())
+    answer_parts.append(
+        f"\nTogether, these points show the relationship across {source_list} without using information outside the uploaded documents."
+    )
+    return "\n".join(answer_parts)
+
+
+def build_comparison_answer(documents, question):
+    grouped_documents = group_documents_by_source(documents)
+    if len(grouped_documents) < 2:
+        return None
+
+    answer_parts = ["Based on the uploaded documents:"]
+    for source_name, source_documents in grouped_documents.items():
+        sentences = best_sentences_for_document(source_documents, question, max_sentences=2)
+        if sentences:
+            answer_parts.append(f"* **{source_name}**: {' '.join(sentences)}")
+
+    answer_parts.append(
+        "\nIn comparison, each document describes a different role or focus, and the contrast above is limited to the retrieved PDF content."
+    )
+    return "\n".join(answer_parts)
+
+
+def build_overview_answer(documents, question):
+    grouped_documents = group_documents_by_source(documents)
+    if not grouped_documents:
+        return None
+
+    answer_parts = ["The uploaded documents cover:"]
+    for source_name, source_documents in grouped_documents.items():
+        sentences = best_sentences_for_document(source_documents, question, max_sentences=2)
+        if sentences:
+            answer_parts.append(f"* **{source_name}**: {' '.join(sentences)}")
+    return "\n".join(answer_parts)
+
+
+def extract_factual_subject(question):
+    match = re.search(r"\b(?:what|who|where|when)\s+(?:is|are|was|were)\s+(.+?)[?.!]*$", question.strip(), re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def build_factual_answer(documents, question):
+    if not has_grounded_keyword_overlap(question, documents):
+        return None
+
+    subject = extract_factual_subject(question)
+    keywords = query_keywords(subject or question)
+    grouped_documents = group_documents_by_source(documents)
+    supporting_sentences = []
+
+    for source_name, source_documents in grouped_documents.items():
+        sentences = best_sentences_for_document(source_documents, subject or question, max_sentences=2)
+        for sentence in sentences:
+            if keywords and not keywords.intersection(tokenize_text(sentence)):
+                continue
+            supporting_sentences.append((source_name, sentence))
+
+    if not supporting_sentences:
+        return None
+
+    source_name, first_sentence = supporting_sentences[0]
+    if subject:
+        if "document" in subject.lower() and "about" in subject.lower():
+            answer = f"Based on **{source_name}**, {first_sentence}"
+        else:
+            answer = f"Based on **{source_name}**, {subject} is mentioned in this context: {first_sentence}"
+    else:
+        answer = f"Based on **{source_name}**, {first_sentence}"
+
+    additional_sentences = [
+        sentence
+        for _source, sentence in supporting_sentences[1:3]
+        if sentence.lower() != first_sentence.lower()
+    ]
+    if additional_sentences:
+        answer += " " + " ".join(additional_sentences)
+    return answer
+
+
+def build_answer_from_documents(question, documents, intent):
+    if not has_grounded_keyword_overlap(question, documents) and intent != "overview":
+        return INSUFFICIENT_CONTEXT_MESSAGE
+
+    if intent == "relationship":
+        return build_relationship_answer(documents, question) or INSUFFICIENT_CONTEXT_MESSAGE
+    if intent == "comparison":
+        return build_comparison_answer(documents, question) or INSUFFICIENT_CONTEXT_MESSAGE
+    if intent == "overview":
+        return build_overview_answer(documents, question) or INSUFFICIENT_CONTEXT_MESSAGE
+    if intent == "factual":
+        return build_factual_answer(documents, question) or INSUFFICIENT_CONTEXT_MESSAGE
+
+    return INSUFFICIENT_CONTEXT_MESSAGE
+
+
+def build_document_summary_bullets(documents, max_bullets=3):
+    sentences = best_sentences_for_document(documents, max_sentences=max_bullets)
+    if not sentences:
+        return ["No readable summary content was found."]
+    return sentences
+
+
+def shared_terms_between_documents(grouped_documents):
+    document_term_sets = []
+    for source_documents in grouped_documents.values():
+        source_text = " ".join(document.page_content for document in source_documents)
+        terms = {
+            term
+            for term in tokenize_text(source_text)
+            if len(term) > 3 and term not in QUERY_STOPWORDS
+        }
+        if terms:
+            document_term_sets.append(terms)
+
+    if len(document_term_sets) < 2:
+        return set()
+    shared_terms = set.intersection(*document_term_sets)
+    return shared_terms
+
+
+def build_combined_insights(grouped_documents):
+    if len(grouped_documents) < 2:
+        return []
+
+    insights = []
+    shared_terms = shared_terms_between_documents(grouped_documents)
+    if shared_terms:
+        shared_text = ", ".join(sorted(shared_terms)[:5])
+        insights.append(f"Shared concepts across documents include {shared_text}.")
+
+    source_descriptions = []
+    for source_name, source_documents in grouped_documents.items():
+        sentences = build_document_summary_bullets(source_documents, max_bullets=1)
+        if sentences:
+            source_descriptions.append(f"{source_name} focuses on {sentences[0]}")
+
+    if source_descriptions:
+        insights.append(" ".join(source_descriptions))
+
+    if not insights:
+        insights.append("The uploaded documents cover distinct but related areas of the session context.")
+
+    return insights[:3]
+
+
+def build_session_summary(uploaded_documents, indexed_documents):
+    document_summaries = []
+    grouped_for_insights = {}
+
+    for uploaded_document in uploaded_documents:
+        document_chunks = documents_for_upload(indexed_documents, uploaded_document["document_id"])
+        document_chunks = unique_documents(document_chunks)
+        filename = uploaded_document["filename"]
+        grouped_for_insights[filename] = document_chunks
+
+        bullets = build_document_summary_bullets(document_chunks)
+        document_summaries.append(f"## {filename}\n\n{markdown_bullets(bullets)}")
+
+    combined_insights = build_combined_insights(grouped_for_insights)
+    if combined_insights:
+        document_summaries.append(f"## Combined Insights\n\n{markdown_bullets(combined_insights)}")
+
+    return "\n\n".join(document_summaries)
+
+
+def representative_documents_by_source(documents, per_document_limit=2, max_documents=ASK_MAX_CONTEXT_CHUNKS):
+    grouped_documents = group_documents_by_source(unique_documents(documents))
+    representatives = []
+    for source_documents in grouped_documents.values():
+        representatives.extend(source_documents[:per_document_limit])
+        if len(representatives) >= max_documents:
+            break
+    return representatives[:max_documents]
+
+
+def search_retrieval_candidates(vectorstore, question, candidate_count):
+    """
+    Return ranked retrieval candidates as (document, score, rank).
+    FAISS scores are distances, so lower is better. If scores are unavailable,
+    rank is used as a conservative fallback.
+    """
+    try:
+        scored_documents = vectorstore.similarity_search_with_score(question, k=candidate_count)
+        return [
+            (document, float(score), rank)
+            for rank, (document, score) in enumerate(scored_documents)
+        ]
+    except Exception:
+        logger.debug("Falling back to similarity_search without scores", exc_info=True)
+        documents = vectorstore.similarity_search(question, k=candidate_count)
+        return [
+            (document, float(rank), rank)
+            for rank, document in enumerate(documents)
+        ]
+
+
+def dedupe_scored_candidates(scored_candidates):
+    seen = set()
+    unique_candidates = []
+    for document, score, rank in scored_candidates:
+        key = document_dedupe_key(document)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_candidates.append((document, score, rank))
+    return unique_candidates
+
+
+def group_candidates_by_document(scored_candidates):
+    grouped_candidates = {}
+    document_order = []
+    for document, score, rank in scored_candidates:
+        document_id = document_identity(document)
+        if document_id not in grouped_candidates:
+            grouped_candidates[document_id] = []
+            document_order.append(document_id)
+        grouped_candidates[document_id].append((document, score, rank))
+    return grouped_candidates, document_order
+
+
+def is_candidate_document_relevant(
+    best_score,
+    document_best_score,
+    document_best_rank,
+    document,
+    keywords,
+):
+    if document_best_rank <= 1:
+        return True
+    if document_best_rank > ASK_DIVERSITY_RANK_LIMIT:
+        return False
+
+    score_cutoff = max(
+        best_score + ASK_DIVERSITY_SCORE_MARGIN,
+        best_score * ASK_DIVERSITY_SCORE_MULTIPLIER,
+    )
+    return (
+        document_best_score <= score_cutoff
+        or document_matches_query_terms(document, keywords)
+    )
+
+
+def diversify_retrieved_documents(scored_candidates, question):
+    """
+    Keep the globally best context, but reserve space for other relevant PDFs.
+    This fixes cross-document questions where one document dominates top-k.
+    """
+    unique_candidates = dedupe_scored_candidates(scored_candidates)
+    if not unique_candidates:
+        return []
+
+    grouped_candidates, document_order = group_candidates_by_document(unique_candidates)
+    best_score = unique_candidates[0][1]
+    keywords = query_keywords(question)
+    selected_candidates = []
+
+    relevant_document_ids = []
+    for document_id in document_order:
+        document_best = grouped_candidates[document_id][0]
+        if is_candidate_document_relevant(
+            best_score,
+            document_best[1],
+            document_best[2],
+            document_best[0],
+            keywords,
+        ):
+            relevant_document_ids.append(document_id)
+
+    per_document_limit = (
+        ASK_MAX_CONTEXT_CHUNKS
+        if len(relevant_document_ids) == 1
+        else ASK_CHUNKS_PER_DOCUMENT
+    )
+
+    for document_id in relevant_document_ids:
+        selected_candidates.extend(
+            grouped_candidates[document_id][:per_document_limit]
+        )
+
+    selected_keys = {
+        document_dedupe_key(document)
+        for document, _score, _rank in selected_candidates
+    }
+    for candidate in unique_candidates:
+        document = candidate[0]
+        document_id = document_identity(document)
+        if len(selected_candidates) >= ASK_MAX_CONTEXT_CHUNKS:
+            break
+        if document_id not in relevant_document_ids:
+            continue
+        if document_dedupe_key(document) in selected_keys:
+            continue
+        selected_candidates.append(candidate)
+        selected_keys.add(document_dedupe_key(document))
+
+    selected_candidates.sort(key=lambda candidate: candidate[2])
+    return [
+        document for document, _score, _rank in selected_candidates[:ASK_MAX_CONTEXT_CHUNKS]
+    ]
+
+
 def format_context(documents, max_chars=7000):
     context_parts = []
     remaining = max_chars
     for doc in documents:
-        filename = doc.metadata.get("filename", "uploaded document")
+        filename = document_display_name(doc)
         page = doc.metadata.get("page")
         source_label = f"{filename}, page {page + 1}" if isinstance(page, int) else filename
         content = doc.page_content.strip()
         if not content:
             continue
-        block = f"[Source: {source_label}]\n{content}"
+        block = f"Document: {source_label}\nContent:\n{content}"
         if len(block) > remaining:
             block = block[:remaining].rsplit(" ", 1)[0]
         context_parts.append(block)
@@ -232,6 +773,8 @@ def process_pdf(data: PDFPath):
         raise HTTPException(status_code=400, detail="Missing PDF file path.")
     if not os.path.exists(file_path):
         raise HTTPException(status_code=400, detail="Uploaded PDF file was not found.")
+    if os.path.getsize(file_path) == 0:
+        raise HTTPException(status_code=400, detail="Uploaded PDF is empty. Please choose a valid PDF file.")
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF documents are supported.")
 
@@ -344,34 +887,58 @@ def ask_question(data: Question):
     if not question:
         raise HTTPException(status_code=400, detail="Question is required.")
 
+    intent = detect_question_intent(question)
     with sessions_lock:
         session = _touch_session_unlocked(data.session_id)
         if not session or not session.get("vectorstore"):
             raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+        indexed_documents = collect_index_documents(session["vectorstore"])
         try:
-            docs = session["vectorstore"].similarity_search(question, k=8)
+            scored_candidates = search_retrieval_candidates(
+                session["vectorstore"],
+                question,
+                ASK_RETRIEVAL_CANDIDATES,
+            )
         except Exception:
             logger.exception("Similarity search failed session_id=%s", data.session_id)
             raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
 
-    docs = unique_documents(docs)[:5]
+    docs = (
+        representative_documents_by_source(indexed_documents)
+        if intent == "overview"
+        else diversify_retrieved_documents(scored_candidates, question)
+    )
     if not docs:
         return {"answer": "No relevant context found."}
 
     context = format_context(docs, max_chars=6500)
+    retrieved_sources = sorted({document_display_name(doc) for doc in docs})
+    grounded_answer = build_answer_from_documents(question, docs, intent)
+    if grounded_answer:
+        logger.info(
+            "Returning grounded answer session_id=%s intent=%s retrieved_chunks=%s sources=%s",
+            data.session_id,
+            intent,
+            len(docs),
+            retrieved_sources,
+        )
+        return {"answer": grounded_answer}
 
     prompt = (
-        "You are a helpful assistant for question answering over one or more PDF documents. "
-        "Use only the provided context. If the context does not contain the answer, say so briefly.\n\n"
+        "You are a careful assistant answering questions over one or more uploaded PDF documents. "
+        "Use only the provided context. The context may include excerpts from multiple PDFs. "
+        "When the question asks for a relationship, comparison, or synthesis, connect the relevant facts across documents. "
+        "If the context does not contain enough information, say that briefly and do not invent details.\n\n"
         f"Context:\n{context}\n\n"
         f"Question: {question}\n"
         "Answer:"
     )
 
     logger.info(
-        "Executing query session_id=%s retrieved_chunks=%s",
+        "Executing query session_id=%s retrieved_chunks=%s sources=%s",
         data.session_id,
         len(docs),
+        retrieved_sources,
     )
     answer = generate_response(prompt, max_new_tokens=256)
     return {"answer": answer}
@@ -398,41 +965,7 @@ def summarize_pdf(data: SummarizeRequest):
         len(uploaded_documents),
     )
 
-    document_summaries = []
-    per_document_contexts = []
-    for uploaded_document in uploaded_documents:
-        document_chunks = documents_for_upload(indexed_documents, uploaded_document["document_id"])
-        document_chunks = unique_documents(document_chunks)[:4]
-        if not document_chunks:
-            document_summaries.append(f"## {uploaded_document['filename']}\n\nNo readable context available.")
-            continue
-
-        context = format_context(document_chunks, max_chars=3500)
-        per_document_contexts.append(f"{uploaded_document['filename']}:\n{context}")
-        prompt = (
-            "Summarize this PDF in 3-5 concise bullets. Focus on the core ideas and useful details.\n\n"
-            f"Context:\n{context}\n\n"
-            "Summary:"
-        )
-        summary = generate_response(prompt, max_new_tokens=180)
-        document_summaries.append(f"## {uploaded_document['filename']}\n\n{summary}")
-
-    combined_context = "\n\n".join(per_document_contexts)
-    combined_summary = ""
-    if combined_context:
-        combined_prompt = (
-            "Across these PDFs, provide high-level combined insights in 3-5 concise bullets. "
-            "Mention relationships, contrasts, or shared themes when supported by the context.\n\n"
-            f"Context:\n{combined_context[:6500]}\n\n"
-            "Combined Insights:"
-        )
-        combined_summary = generate_response(combined_prompt, max_new_tokens=180)
-
-    summary_parts = document_summaries
-    if combined_summary:
-        summary_parts.append(f"## Combined Insights\n\n{combined_summary}")
-
-    return {"summary": "\n\n".join(summary_parts)}
+    return {"summary": build_session_summary(uploaded_documents, indexed_documents)}
 
 
 if __name__ == "__main__":

@@ -1,7 +1,6 @@
 
 import React, { useRef, useState } from "react";
 import axios from "axios";
-import { pdfjs } from "react-pdf";
 import { saveAs } from "file-saver";
 import Papa from "papaparse";
 import 'bootstrap/dist/css/bootstrap.min.css';
@@ -11,8 +10,6 @@ import UploadSection from "./components/UploadSection/UploadSection";
 import PdfViewer from "./components/PdfViewer/PdfViewer";
 import ChatSection from "./components/ChatSection/ChatSection";
 import toast, { Toaster } from "react-hot-toast";
-pdfjs.GlobalWorkerOptions.workerSrc =
-  `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
 
 const API_BASE = process.env.REACT_APP_API_URL || "";
 
@@ -98,6 +95,7 @@ function App() {
       const documentMetadata = res.data.document || {};
       const uploadedPdf = {
         name: documentMetadata.filename || pdfFile.name,
+        file: pdfFile,
         url: URL.createObjectURL(pdfFile),
         document_id: documentMetadata.document_id,
         uploaded_at: documentMetadata.uploaded_at,
@@ -216,7 +214,9 @@ function App() {
 
   const themeClass = darkMode ? "bg-dark text-light" : "bg-light text-dark";
 
-  const currentPdfUrl = pdfs.find(pdf => pdf.document_id === selectedDocumentId)?.url || null;
+  const currentPdf = pdfs.find(pdf => pdf.document_id === selectedDocumentId);
+  const currentPdfFile = currentPdf?.file || null;
+  const currentPdfUrl = currentPdf?.url || null;
   return (
     <>
     <Toaster
@@ -272,6 +272,7 @@ function App() {
       <Col md={7}>
   <PdfViewer
     darkMode={darkMode}
+    currentPdfFile={currentPdfFile}
     currentPdfUrl={currentPdfUrl}
     pageNumber={pageNumber}
     numPages={numPages}
