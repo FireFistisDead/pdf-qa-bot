@@ -3,24 +3,40 @@ const cors = require("cors");
 const multer = require("multer");
 const axios = require("axios");
 const fs = require("fs/promises");
+const fsSync = require("fs");
 const path = require("path");
+const crypto = require("crypto");
+const { z } = require("zod");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const MAX_PDF_SIZE_BYTES = 20 * 1024 * 1024;
+const UPLOADS_DIR = path.resolve("uploads");
+const isDevelopment = process.env.NODE_ENV !== "production";
 
-// Storage for uploaded PDFs
+if (!fsSync.existsSync(UPLOADS_DIR)) {
+  fsSync.mkdirSync(UPLOADS_DIR, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, UPLOADS_DIR);
+  },
+  filename: (req, file, cb) => {
+    cb(null, `${crypto.randomUUID()}.pdf`);
+  },
+});
+
 const upload = multer({
-  dest: "uploads/",
+  storage,
   limits: { fileSize: MAX_PDF_SIZE_BYTES },
   fileFilter: (req, file, cb) => {
-    const isPdf =
-      file.mimetype === "application/pdf" ||
-      file.originalname.toLowerCase().endsWith(".pdf");
+    const isPdfMime = file.mimetype === "application/pdf";
+    const isPdfExtension = file.originalname.toLowerCase().endsWith(".pdf");
 
-    if (!isPdf) {
+    if (!isPdfMime || !isPdfExtension) {
       return cb(new Error("Only PDF files are allowed."));
     }
 
@@ -28,9 +44,6 @@ const upload = multer({
   },
 });
 
-/**
- * Safely delete uploaded temp file
- */
 const cleanupFile = async (filePath) => {
   if (!filePath) return;
 
@@ -50,10 +63,22 @@ const sendUploadError = (res, statusCode, message, details = message) => {
   });
 };
 
-// Route: Upload PDF
+const extractServiceDetails = (err) => {
+  const upstreamDetails = err.response?.data;
+  return upstreamDetails?.detail || upstreamDetails?.error || upstreamDetails || err.message;
+};
+
+const askSchema = z.object({
+  question: z.string().trim().min(1, "Question cannot be empty"),
+  session_id: z.string().uuid("Invalid session ID format"),
+});
+
+const summarizeSchema = z.object({
+  session_id: z.string().uuid("Invalid session ID format"),
+});
+
 app.post("/upload", upload.single("file"), async (req, res) => {
   const uploadedFilePath = req.file?.path;
-  // Always send absolute path to FastAPI
   const absoluteFilePath = uploadedFilePath ? path.resolve(uploadedFilePath) : null;
   const sessionId = req.body?.session_id || null;
 
@@ -75,17 +100,12 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       );
     }
 
-    // Send absolute path to Python service
-    const response = await axios.post(
-      "http://localhost:5000/process-pdf",
-      {
-        filePath: absoluteFilePath,
-        filename: req.file.originalname,
-        session_id: sessionId,
-      }
-    );
+    const response = await axios.post("http://localhost:5000/process-pdf", {
+      filePath: absoluteFilePath,
+      filename: req.file.originalname,
+      session_id: sessionId,
+    });
 
-    // Cleanup uploaded file after successful processing
     await cleanupFile(uploadedFilePath);
 
     return res.json({
@@ -95,85 +115,92 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       documents: response.data.documents || [],
     });
   } catch (err) {
-    // Ensure cleanup on failure
     await cleanupFile(uploadedFilePath);
 
     const statusCode = err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
-    const upstreamDetails = err.response?.data;
-    const details = upstreamDetails?.detail || upstreamDetails?.error || err.message;
+    const details = extractServiceDetails(err);
     console.error("Upload processing failed:", details);
 
     return res.status(statusCode).json({
-      error: details || "PDF processing failed",
-      details,
+      error: typeof details === "string" ? details : "PDF processing failed",
+      details: isDevelopment ? details : "Internal processing error",
     });
   }
 });
 
-// Route: Ask Question
 app.post("/ask", async (req, res) => {
-  const { question, session_id } = req.body;
+  const validation = askSchema.safeParse(req.body);
 
-  if (!question || !question.trim()) {
-    return res.status(400).json({ error: "Question is required." });
+  if (!validation.success) {
+    return res.status(400).json({
+      error: "Validation failed",
+      details: validation.error.issues,
+    });
   }
 
-  if (!session_id) {
-    return res.status(400).json({ error: "session_id is required." });
-  }
+  const { question, session_id } = validation.data;
 
   try {
-    const response = await axios.post(
-      "http://localhost:5000/ask",
-      {
-        question,
-        session_id,
-      }
-    );
+    const response = await axios.post("http://localhost:5000/ask", {
+      question,
+      session_id,
+    });
 
-    res.json({ answer: response.data.answer });
+    return res.json({ answer: response.data.answer });
   } catch (err) {
     const statusCode = err.response?.status || 500;
-    const details = err.response?.data?.detail || err.response?.data?.error || err.message;
+    const details = extractServiceDetails(err);
     console.error("Question answering failed:", details);
-    res.status(statusCode).json({
-      error: details || "Error answering question",
+
+    return res.status(statusCode).json({
+      error: typeof details === "string" ? details : "Error answering question",
+      details: isDevelopment ? details : "Internal processing error",
     });
   }
 });
 
 app.post("/summarize", async (req, res) => {
-  if (!req.body?.session_id) {
-    return res.status(400).json({ error: "session_id is required." });
+  const validation = summarizeSchema.safeParse(req.body);
+
+  if (!validation.success) {
+    return res.status(400).json({
+      error: "Validation failed",
+      details: validation.error.issues,
+    });
   }
 
   try {
     const response = await axios.post(
       "http://localhost:5000/summarize",
-      req.body || {}
+      validation.data
     );
 
-    res.json({
+    return res.json({
       summary: response.data.summary,
     });
   } catch (err) {
     const statusCode = err.response?.status || 500;
-    const details = err.response?.data?.detail || err.response?.data?.error || err.message;
-
+    const details = extractServiceDetails(err);
     console.error("Summarization failed:", details);
 
-    res.status(statusCode).json({
-      error: details || "Error summarizing PDF",
-      details,
+    return res.status(statusCode).json({
+      error: typeof details === "string" ? details : "Error summarizing PDF",
+      details: isDevelopment ? details : "Internal processing error",
     });
   }
 });
 
 app.use((err, req, res, next) => {
-  if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
-    console.error("Upload failed: file too large");
-    return res.status(413).json({
-      error: "File too large. Please choose a PDF under 20MB.",
+  if (err instanceof multer.MulterError) {
+    const statusCode = err.code === "LIMIT_FILE_SIZE" ? 413 : 400;
+    const message =
+      err.code === "LIMIT_FILE_SIZE"
+        ? "File too large. Please choose a PDF under 20MB."
+        : "File upload error";
+
+    return res.status(statusCode).json({
+      error: message,
+      details: err.message,
     });
   }
 
@@ -187,6 +214,6 @@ app.use((err, req, res, next) => {
   next();
 });
 
-app.listen(4000, () =>
-  console.log("Backend running on http://localhost:4000")
-);
+app.listen(4000, () => {
+  console.log("Backend running on http://localhost:4000");
+});

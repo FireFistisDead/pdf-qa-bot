@@ -1,6 +1,9 @@
-
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, Field, field_validator
+from pathlib import Path
+from uuid import UUID
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
@@ -10,7 +13,12 @@ import os
 import uuid
 import uvicorn
 import torch
-from transformers import AutoConfig, AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM
+from transformers import (
+    AutoConfig,
+    AutoTokenizer,
+    AutoModelForSeq2SeqLM,
+    AutoModelForCausalLM,
+)
 import threading
 import time
 import logging
@@ -20,6 +28,28 @@ load_dotenv()
 
 
 app = FastAPI()
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    errors = [
+        {"loc": err["loc"], "msg": err["msg"], "type": err["type"]}
+        for err in exc.errors()
+    ]
+    return JSONResponse(
+        status_code=422,
+        content={"error": "Validation failed", "details": errors},
+    )
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    print(f"Unhandled exception: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Internal server error. Please try again later."},
+    )
+
 
 # Session storage with metadata and thread safety
 sessions = {}
@@ -106,8 +136,13 @@ OVERVIEW_QUERY_TERMS = {
 }
 INSUFFICIENT_CONTEXT_MESSAGE = "The uploaded documents do not contain enough information to answer this question."
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+UPLOADS_DIR = (BASE_DIR / "uploads").resolve()
+
+
 def now_ts():
     return time.time()
+
 
 def cleanup_expired_sessions():
     """
@@ -280,7 +315,7 @@ def split_sentences(text):
 
 
 def clean_sentence(sentence):
-    return sentence.strip().strip("-*• ").rstrip()
+    return sentence.strip().strip("-* ").rstrip()
 
 
 def document_sentences(document, max_sentences=3):
@@ -698,7 +733,9 @@ generation_model = None
 generation_is_encoder_decoder = False
 
 # Load local embedding model
-embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+embedding_model = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
 
 
 def load_generation_model():
@@ -728,7 +765,11 @@ def generate_response(prompt: str, max_new_tokens: int) -> str:
 
     encoded = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
     encoded = {key: value.to(model_device) for key, value in encoded.items()}
-    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    pad_token_id = (
+        tokenizer.pad_token_id
+        if tokenizer.pad_token_id is not None
+        else tokenizer.eos_token_id
+    )
 
     with torch.no_grad():
         generated_ids = model.generate(
@@ -747,19 +788,43 @@ def generate_response(prompt: str, max_new_tokens: int) -> str:
     text = tokenizer.decode(new_tokens, skip_special_tokens=True)
     return text.strip()
 
+
 class PDFPath(BaseModel):
     filePath: str
     session_id: str | None = None
     filename: str | None = None
 
+    @field_validator("filePath")
+    @classmethod
+    def validate_file_path(cls, v: str) -> str:
+        path = Path(v).resolve()
+        try:
+            path.relative_to(UPLOADS_DIR)
+        except ValueError:
+            raise ValueError("File path is outside the allowed uploads directory.")
+
+        if not path.is_file():
+            raise ValueError("File does not exist or is not a valid file.")
+        if path.suffix.lower() != ".pdf":
+            raise ValueError("Only PDF files are allowed.")
+        return str(path)
+
+
 class Question(BaseModel):
-    question: str
-    session_id: str
+    question: str = Field(..., min_length=1, description="Question cannot be empty")
+    session_id: UUID
+
+    @field_validator("question")
+    @classmethod
+    def question_must_not_be_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Question cannot be whitespace only")
+        return v
 
 
 class SummarizeRequest(BaseModel):
     pdf: str | None = None
-    session_id: str
+    session_id: UUID
 
 
 @app.post("/process-pdf")
@@ -878,8 +943,6 @@ def process_pdf(data: PDFPath):
     }
 
 
-
-
 @app.post("/ask")
 def ask_question(data: Question):
     cleanup_expired_sessions()
@@ -888,8 +951,9 @@ def ask_question(data: Question):
         raise HTTPException(status_code=400, detail="Question is required.")
 
     intent = detect_question_intent(question)
+    session_id = str(data.session_id)
     with sessions_lock:
-        session = _touch_session_unlocked(data.session_id)
+        session = _touch_session_unlocked(session_id)
         if not session or not session.get("vectorstore"):
             raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
         indexed_documents = collect_index_documents(session["vectorstore"])
@@ -900,7 +964,7 @@ def ask_question(data: Question):
                 ASK_RETRIEVAL_CANDIDATES,
             )
         except Exception:
-            logger.exception("Similarity search failed session_id=%s", data.session_id)
+            logger.exception("Similarity search failed session_id=%s", session_id)
             raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
 
     docs = (
@@ -917,7 +981,7 @@ def ask_question(data: Question):
     if grounded_answer:
         logger.info(
             "Returning grounded answer session_id=%s intent=%s retrieved_chunks=%s sources=%s",
-            data.session_id,
+            session_id,
             intent,
             len(docs),
             retrieved_sources,
@@ -936,7 +1000,7 @@ def ask_question(data: Question):
 
     logger.info(
         "Executing query session_id=%s retrieved_chunks=%s sources=%s",
-        data.session_id,
+        session_id,
         len(docs),
         retrieved_sources,
     )
@@ -944,13 +1008,12 @@ def ask_question(data: Question):
     return {"answer": answer}
 
 
-
-
 @app.post("/summarize")
 def summarize_pdf(data: SummarizeRequest):
     cleanup_expired_sessions()
+    session_id = str(data.session_id)
     with sessions_lock:
-        session = _touch_session_unlocked(data.session_id)
+        session = _touch_session_unlocked(session_id)
         if not session or not session.get("vectorstore"):
             raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
         uploaded_documents = list(session.get("documents", []))
@@ -961,7 +1024,7 @@ def summarize_pdf(data: SummarizeRequest):
 
     logger.info(
         "Summarizing session session_id=%s documents=%s",
-        data.session_id,
+        session_id,
         len(uploaded_documents),
     )
 
