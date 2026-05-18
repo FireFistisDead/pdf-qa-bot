@@ -1,6 +1,9 @@
-
-from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, Field, field_validator
+from pathlib import Path
+from uuid import UUID
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
@@ -10,7 +13,12 @@ import os
 import uuid
 import uvicorn
 import torch
-from transformers import AutoConfig, AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM
+from transformers import (
+    AutoConfig,
+    AutoTokenizer,
+    AutoModelForSeq2SeqLM,
+    AutoModelForCausalLM,
+)
 import threading
 import time
 
@@ -18,6 +26,28 @@ load_dotenv()
 
 
 app = FastAPI()
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    errors = [
+        {"loc": err["loc"], "msg": err["msg"], "type": err["type"]}
+        for err in exc.errors()
+    ]
+    return JSONResponse(
+        status_code=422,
+        content={"error": "Validation failed", "details": errors},
+    )
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    print(f"Unhandled exception: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Internal server error. Please try again later."},
+    )
+
 
 # Session storage with metadata and thread safety
 sessions = {}
@@ -27,8 +57,13 @@ sessions_lock = threading.Lock()
 SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "30"))
 MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "100"))
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+UPLOADS_DIR = (BASE_DIR / "uploads").resolve()
+
+
 def now_ts():
     return time.time()
+
 
 def cleanup_expired_sessions():
     """
@@ -58,6 +93,8 @@ def cleanup_expired_sessions():
             f"Evicted: {evicted_count}, "
             f"Active: {active_sessions}"
         )
+
+
 # Helper to get a valid session (handles TTL, locking, and last_accessed update)
 def get_valid_session(session_id: str):
     with sessions_lock:
@@ -70,13 +107,17 @@ def get_valid_session(session_id: str):
             return None
         meta["last_accessed"] = now_ts()
         return meta["vectorstore"]
+
+
 HF_GENERATION_MODEL = os.getenv("HF_GENERATION_MODEL", "google/flan-t5-base")
 generation_tokenizer = None
 generation_model = None
 generation_is_encoder_decoder = False
 
 # Load local embedding model
-embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+embedding_model = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
 
 
 def load_generation_model():
@@ -106,7 +147,11 @@ def generate_response(prompt: str, max_new_tokens: int) -> str:
 
     encoded = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
     encoded = {key: value.to(model_device) for key, value in encoded.items()}
-    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    pad_token_id = (
+        tokenizer.pad_token_id
+        if tokenizer.pad_token_id is not None
+        else tokenizer.eos_token_id
+    )
 
     with torch.no_grad():
         generated_ids = model.generate(
@@ -125,17 +170,41 @@ def generate_response(prompt: str, max_new_tokens: int) -> str:
     text = tokenizer.decode(new_tokens, skip_special_tokens=True)
     return text.strip()
 
+
 class PDFPath(BaseModel):
     filePath: str
 
+    @field_validator("filePath")
+    @classmethod
+    def validate_file_path(cls, v: str) -> str:
+        path = Path(v).resolve()
+        try:
+            path.relative_to(UPLOADS_DIR)
+        except ValueError:
+            raise ValueError("File path is outside the allowed uploads directory.")
+
+        if not path.is_file():
+            raise ValueError("File does not exist or is not a valid file.")
+        if path.suffix.lower() != ".pdf":
+            raise ValueError("Only PDF files are allowed.")
+        return str(path)
+
+
 class Question(BaseModel):
-    question: str
-    session_id: str
+    question: str = Field(..., min_length=1, description="Question cannot be empty")
+    session_id: UUID
+
+    @field_validator("question")
+    @classmethod
+    def question_must_not_be_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Question cannot be whitespace only")
+        return v
 
 
 class SummarizeRequest(BaseModel):
     pdf: str | None = None
-    session_id: str
+    session_id: UUID
 
 
 @app.post("/process-pdf")
@@ -147,7 +216,9 @@ def process_pdf(data: PDFPath):
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     chunks = splitter.split_documents(docs)
     if not chunks:
-        return {"error": "No text chunks generated from the PDF. Please check your file."}
+        raise HTTPException(
+            status_code=400, detail="No text chunks generated from the PDF."
+        )
 
     session_id = str(uuid.uuid4())
     vectorstore = FAISS.from_documents(chunks, embedding_model)
@@ -165,12 +236,10 @@ def process_pdf(data: PDFPath):
     return {"message": "PDF processed successfully", "session_id": session_id}
 
 
-
-
 @app.post("/ask")
 def ask_question(data: Question):
     cleanup_expired_sessions()
-    vectorstore = get_valid_session(data.session_id)
+    vectorstore = get_valid_session(str(data.session_id))
     if not vectorstore:
         return {"answer": "Session expired or invalid. Please re-upload the PDF!"}
 
@@ -192,18 +261,22 @@ def ask_question(data: Question):
     return {"answer": answer}
 
 
-
-
 @app.post("/summarize")
 def summarize_pdf(data: SummarizeRequest):
     cleanup_expired_sessions()
-    vectorstore = get_valid_session(data.session_id)
+    vectorstore = get_valid_session(str(data.session_id))
     if not vectorstore:
-        return {"summary": "Session expired or invalid. Please re-upload the PDF!"}
+        raise HTTPException(
+            status_code=404,
+            detail="Session expired or invalid. Please re-upload the PDF!",
+        )
 
     docs = vectorstore.similarity_search("Give a concise summary of the document.", k=6)
     if not docs:
-        return {"summary": "No document context available to summarize."}
+        raise HTTPException(
+            status_code=404,
+            detail="No document context available to summarize.",
+        )
 
     context = "\n\n".join([doc.page_content for doc in docs])
     prompt = (
