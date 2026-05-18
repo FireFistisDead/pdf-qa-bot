@@ -128,7 +128,10 @@ app.post("/ask", async (req, res) => {
       session_id,
     });
 
-    res.json({ answer: response.data.answer });
+    res.json({
+      answer: response.data.answer,
+      sources: response.data.sources ?? [],
+    });
   } catch (err) {
     const status = err.response?.status || 500;
     const details = err.response?.data || err.message;
