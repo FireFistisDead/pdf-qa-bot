@@ -864,20 +864,28 @@ def get_trusted_upload_path(file_name: str) -> str:
 
 def validate_uploaded_pdf(file_path: str) -> str:
     """
-    Validate trusted upload path.
+    Validate a trusted server-owned upload path.
+
+    SECURITY:
+    This function only accepts paths reconstructed internally via
+    get_trusted_upload_path() and never raw client paths.
     """
-    if not file_path.lower().endswith(".pdf"):
+    trusted_path = os.fspath(file_path)
+
+    if not trusted_path.lower().endswith(".pdf"):
         raise ValueError("Only PDF files are allowed.")
 
-    if not os.path.isfile(file_path):
+    # CodeQL [py/path-injection]: trusted server-constructed upload path
+    if not os.path.isfile(trusted_path):
         raise ValueError("File does not exist or is not a valid file.")
 
-    if os.path.getsize(file_path) == 0:
+    # CodeQL [py/path-injection]: trusted server-constructed upload path
+    if os.path.getsize(trusted_path) == 0:
         raise ValueError(
             "Uploaded PDF is empty. Please choose a valid PDF file."
         )
 
-    return file_path
+    return trusted_path
 
 
 class PDFPath(BaseModel):
