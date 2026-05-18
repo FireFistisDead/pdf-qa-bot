@@ -111,6 +111,14 @@ def ask_question(data: Question):
     if not docs:
         return {"answer": "No relevant context found."}
 
+    # Extract unique 1-indexed page numbers from retrieved chunk metadata.
+    # PyPDFLoader stores pages as 0-based integers in doc.metadata["page"].
+    pages = sorted(set(
+        doc.metadata["page"] + 1
+        for doc in docs
+        if "page" in doc.metadata
+    ))
+
     context = "\n\n".join([doc.page_content for doc in docs])
 
     prompt = (
@@ -122,7 +130,7 @@ def ask_question(data: Question):
     )
 
     answer = generate_response(prompt, max_new_tokens=256)
-    return {"answer": answer}
+    return {"answer": answer, "sources": pages}
 
 
 @app.post("/summarize")

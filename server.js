@@ -81,7 +81,10 @@ app.post("/ask", async (req, res) => {
       }
     );
 
-    res.json({ answer: response.data.answer });
+    res.json({
+      answer: response.data.answer,
+      sources: response.data.sources ?? [],
+    });
   } catch (err) {
     console.error(err.message);
     res.status(500).json({
