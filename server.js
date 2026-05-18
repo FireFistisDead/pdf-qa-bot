@@ -27,7 +27,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB limit
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB limit
   fileFilter: (req, file, cb) => {
     const isPdfMime = file.mimetype === "application/pdf";
     const isPdfExtension = file.originalname.toLowerCase().endsWith(".pdf");
