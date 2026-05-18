@@ -136,6 +136,26 @@ OVERVIEW_QUERY_TERMS = {
     "topics",
 }
 INSUFFICIENT_CONTEXT_MESSAGE = "The uploaded documents do not contain enough information to answer this question."
+BASE_DIR = Path(__file__).resolve().parent.parent
+UPLOADS_DIR = (BASE_DIR / "uploads").resolve()
+FACTUAL_QUESTION_PREFIXES = (
+    ("what", "is"),
+    ("what", "are"),
+    ("what", "was"),
+    ("what", "were"),
+    ("who", "is"),
+    ("who", "are"),
+    ("who", "was"),
+    ("who", "were"),
+    ("where", "is"),
+    ("where", "are"),
+    ("where", "was"),
+    ("where", "were"),
+    ("when", "is"),
+    ("when", "are"),
+    ("when", "was"),
+    ("when", "were"),
+)
 
 def now_ts():
     return time.time()
@@ -426,11 +446,24 @@ def build_overview_answer(documents, question):
     return "\n".join(answer_parts)
 
 
+def strip_trailing_question_punctuation(text):
+    end = len(text)
+    while end > 0 and text[end - 1] in "?.!":
+        end -= 1
+    return text[:end].strip()
+
+
 def extract_factual_subject(question):
-    match = re.search(r"\b(?:what|who|where|when)\s+(?:is|are|was|were)\s+(.+?)[?.!]*$", question.strip(), re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-    return None
+    words = question.strip().split(maxsplit=2)
+    if len(words) < 3:
+        return None
+
+    prefix = (words[0].lower(), words[1].lower())
+    if prefix not in FACTUAL_QUESTION_PREFIXES:
+        return None
+
+    subject = strip_trailing_question_punctuation(words[2])
+    return subject or None
 
 
 def build_factual_answer(documents, question):
@@ -786,6 +819,20 @@ def generate_response(prompt: str, max_new_tokens: int) -> str:
     return text.strip()
 
 
+def resolve_upload_path(file_path: str) -> Path:
+    if not file_path or not file_path.strip():
+        raise ValueError("Missing PDF file path.")
+
+    resolved_path = Path(file_path).resolve()
+    if resolved_path.parent != UPLOADS_DIR:
+        raise ValueError("File path is outside the allowed uploads directory.")
+    if not resolved_path.is_file():
+        raise ValueError("File does not exist or is not a valid file.")
+    if resolved_path.suffix.lower() != ".pdf":
+        raise ValueError("Only PDF files are allowed.")
+    return resolved_path
+
+
 class PDFPath(BaseModel):
     filePath: str
     session_id: str | None = None
@@ -794,15 +841,7 @@ class PDFPath(BaseModel):
     @field_validator("filePath")
     @classmethod
     def validate_file_path(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("Missing PDF file path.")
-
-        path = Path(v).resolve()
-        if not path.is_file():
-            raise ValueError("File does not exist or is not a valid file.")
-        if path.suffix.lower() != ".pdf":
-            raise ValueError("Only PDF files are allowed.")
-        return str(path)
+        return str(resolve_upload_path(v))
 
 
 class Question(BaseModel):
@@ -825,15 +864,16 @@ class SummarizeRequest(BaseModel):
 @app.post("/process-pdf")
 def process_pdf(data: PDFPath):
     cleanup_expired_sessions()
-    file_path = (data.filePath or "").strip()
-    requested_session_id = (data.session_id or "").strip() or None
-    filename = data.filename or os.path.basename(file_path) or "uploaded.pdf"
+    try:
+        upload_path = resolve_upload_path(data.filePath)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
-    if not file_path:
-        raise HTTPException(status_code=400, detail="Missing PDF file path.")
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=400, detail="Uploaded PDF file was not found.")
-    if os.path.getsize(file_path) == 0:
+    file_path = str(upload_path)
+    requested_session_id = (data.session_id or "").strip() or None
+    filename = data.filename or upload_path.name or "uploaded.pdf"
+
+    if upload_path.stat().st_size == 0:
         raise HTTPException(status_code=400, detail="Uploaded PDF is empty. Please choose a valid PDF file.")
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF documents are supported.")
