@@ -57,6 +57,10 @@ sessions_lock = threading.Lock()
 SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "30"))
 MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "100"))
 
+# Relevance threshold for FAISS retrieval (L2 distance; lower = more similar).
+# Chunks with score > this value are considered irrelevant to the question.
+RELEVANCE_THRESHOLD = float(os.getenv("RELEVANCE_THRESHOLD", "1.0"))
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 UPLOADS_DIR = (BASE_DIR / "uploads").resolve()
 
@@ -243,10 +247,18 @@ def ask_question(data: Question):
     if not vectorstore:
         return {"answer": "Session expired or invalid. Please re-upload the PDF!"}
 
-    docs = vectorstore.similarity_search(data.question, k=4)
-    if not docs:
+    docs_and_scores = vectorstore.similarity_search_with_score(data.question, k=4)
+    if not docs_and_scores:
         return {"answer": "No relevant context found."}
 
+    # Relevance gate: if every retrieved chunk exceeds the distance threshold,
+    # the document does not contain information relevant to this question.
+    if all(score > RELEVANCE_THRESHOLD for _, score in docs_and_scores):
+        return {
+            "answer": "I could not find relevant information in the uploaded document to answer this question."
+        }
+
+    docs = [doc for doc, _ in docs_and_scores]
     context = "\n\n".join([doc.page_content for doc in docs])
 
     prompt = (
