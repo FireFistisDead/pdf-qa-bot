@@ -14,6 +14,10 @@ app.use(express.json());
 const UPLOADS_DIR = path.resolve("uploads");
 const isDevelopment = process.env.NODE_ENV !== "production";
 
+if (!fsSync.existsSync(UPLOADS_DIR)) {
+  fsSync.mkdirSync(UPLOADS_DIR, { recursive: true });
+}
+
 // Storage for uploaded PDFs with validation
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -112,7 +116,7 @@ app.post("/ask", async (req, res) => {
   if (!validation.success) {
     return res.status(400).json({
       error: "Validation failed",
-      details: validation.error.errors,
+      details: validation.error.issues,
     });
   }
 
@@ -143,7 +147,7 @@ app.post("/summarize", async (req, res) => {
   if (!validation.success) {
     return res.status(400).json({
       error: "Validation failed",
-      details: validation.error.errors,
+      details: validation.error.issues,
     });
   }
 
@@ -172,8 +176,10 @@ app.post("/summarize", async (req, res) => {
 // Global Error Handler
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
+    const status = err.code === "LIMIT_FILE_SIZE" ? 413 : 400;
+
     return res
-      .status(400)
+      .status(status)
       .json({ error: "File upload error", details: err.message });
   }
   if (err.message === "Only PDF files are allowed") {
