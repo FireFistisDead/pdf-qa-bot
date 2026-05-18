@@ -825,34 +825,41 @@ def generate_response(prompt: str, max_new_tokens: int) -> str:
     return text.strip()
 
 
-def upload_basename(client_file_path: str) -> str:
+def sanitize_upload_filename(client_file_path: str) -> str:
     if not client_file_path or not client_file_path.strip():
         raise ValueError("Missing PDF file path.")
 
-    normalized_path = client_file_path.strip().replace("\\", "/")
-    return normalized_path.rsplit("/", 1)[-1]
-
-
-def safe_upload_path(file_name: str) -> Path:
-    safe_name = (file_name or "").strip()
-    if not safe_name or safe_name in {".", ".."}:
+    stripped_path = client_file_path.strip()
+    normalized_path = stripped_path.replace("\\", "/")
+    safe_name = normalized_path.rsplit("/", 1)[-1].strip()
+    if not safe_name:
         raise ValueError("Missing PDF file path.")
+    if safe_name in {".", ".."} or ".." in safe_name:
+        raise ValueError("Invalid upload filename.")
+    if "/" in safe_name or "\\" in safe_name:
+        raise ValueError("Invalid upload filename.")
     if any(character not in UPLOAD_FILENAME_CHARS for character in safe_name):
         raise ValueError("Uploaded filename contains unsupported characters.")
     if not safe_name.lower().endswith(".pdf"):
         raise ValueError("Only PDF files are allowed.")
+    return safe_name
 
-    candidate_path = UPLOADS_DIR.joinpath(safe_name)
-    if candidate_path.parent != UPLOADS_DIR:
+
+def get_trusted_upload_path(file_name: str) -> Path:
+    trusted_path = UPLOADS_DIR.joinpath(file_name)
+    if trusted_path.parent != UPLOADS_DIR:
         raise ValueError("Invalid upload path.")
+    return trusted_path
 
-    if not candidate_path.is_file():
-        raise ValueError("File does not exist or is not a valid file.")
-    if candidate_path.suffix.lower() != ".pdf":
+
+def validate_uploaded_pdf(path: Path) -> Path:
+    if path.suffix.lower() != ".pdf":
         raise ValueError("Only PDF files are allowed.")
-    if candidate_path.stat().st_size == 0:
+    if not path.exists() or not path.is_file():
+        raise ValueError("File does not exist or is not a valid file.")
+    if path.stat().st_size == 0:
         raise ValueError("Uploaded PDF is empty. Please choose a valid PDF file.")
-    return candidate_path
+    return path
 
 
 class PDFPath(BaseModel):
@@ -882,7 +889,9 @@ class SummarizeRequest(BaseModel):
 def process_pdf(data: PDFPath):
     cleanup_expired_sessions()
     try:
-        upload_path = safe_upload_path(upload_basename(data.filePath))
+        safe_name = sanitize_upload_filename(data.filePath)
+        trusted_path = get_trusted_upload_path(safe_name)
+        upload_path = validate_uploaded_pdf(trusted_path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
