@@ -842,14 +842,14 @@ def safe_upload_path(file_name: str) -> Path:
     if not safe_name.lower().endswith(".pdf"):
         raise ValueError("Only PDF files are allowed.")
 
-    candidate_path = (UPLOADS_DIR / safe_name).resolve()
-    try:
-        candidate_path.relative_to(UPLOADS_DIR)
-    except ValueError:
-        raise ValueError("File path is outside the allowed uploads directory.")
+    candidate_path = UPLOADS_DIR.joinpath(safe_name)
+    if candidate_path.parent != UPLOADS_DIR:
+        raise ValueError("Invalid upload path.")
 
     if not candidate_path.is_file():
         raise ValueError("File does not exist or is not a valid file.")
+    if candidate_path.suffix.lower() != ".pdf":
+        raise ValueError("Only PDF files are allowed.")
     if candidate_path.stat().st_size == 0:
         raise ValueError("Uploaded PDF is empty. Please choose a valid PDF file.")
     return candidate_path
