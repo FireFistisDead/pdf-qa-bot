@@ -36,6 +36,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         {"loc": err["loc"], "msg": err["msg"], "type": err["type"]}
         for err in exc.errors()
     ]
+    logger.warning("Request validation failed path=%s errors=%s", request.url.path, errors)
     return JSONResponse(
         status_code=422,
         content={"error": "Validation failed", "details": errors},
@@ -135,10 +136,6 @@ OVERVIEW_QUERY_TERMS = {
     "topics",
 }
 INSUFFICIENT_CONTEXT_MESSAGE = "The uploaded documents do not contain enough information to answer this question."
-
-BASE_DIR = Path(__file__).resolve().parent.parent
-UPLOADS_DIR = (BASE_DIR / "uploads").resolve()
-
 
 def now_ts():
     return time.time()
@@ -797,12 +794,10 @@ class PDFPath(BaseModel):
     @field_validator("filePath")
     @classmethod
     def validate_file_path(cls, v: str) -> str:
-        path = Path(v).resolve()
-        try:
-            path.relative_to(UPLOADS_DIR)
-        except ValueError:
-            raise ValueError("File path is outside the allowed uploads directory.")
+        if not v or not v.strip():
+            raise ValueError("Missing PDF file path.")
 
+        path = Path(v).resolve()
         if not path.is_file():
             raise ValueError("File does not exist or is not a valid file.")
         if path.suffix.lower() != ".pdf":

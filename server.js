@@ -6,7 +6,6 @@ const fs = require("fs/promises");
 const fsSync = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { z } = require("zod");
 
 const app = express();
 app.use(cors());
@@ -68,14 +67,50 @@ const extractServiceDetails = (err) => {
   return upstreamDetails?.detail || upstreamDetails?.error || upstreamDetails || err.message;
 };
 
-const askSchema = z.object({
-  question: z.string().trim().min(1, "Question cannot be empty"),
-  session_id: z.string().uuid("Invalid session ID format"),
-});
+const uuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-const summarizeSchema = z.object({
-  session_id: z.string().uuid("Invalid session ID format"),
-});
+const validateSessionId = (sessionId) => {
+  if (!sessionId || typeof sessionId !== "string") {
+    return "session_id is required.";
+  }
+  if (!uuidPattern.test(sessionId)) {
+    return "Invalid session ID format.";
+  }
+  return null;
+};
+
+const validateAskBody = (body) => {
+  const question = typeof body?.question === "string" ? body.question.trim() : "";
+  if (!question) {
+    return { error: "Question is required." };
+  }
+
+  const sessionError = validateSessionId(body?.session_id);
+  if (sessionError) {
+    return { error: sessionError };
+  }
+
+  return {
+    value: {
+      question,
+      session_id: body.session_id,
+    },
+  };
+};
+
+const validateSummarizeBody = (body) => {
+  const sessionError = validateSessionId(body?.session_id);
+  if (sessionError) {
+    return { error: sessionError };
+  }
+
+  return {
+    value: {
+      session_id: body.session_id,
+    },
+  };
+};
 
 app.post("/upload", upload.single("file"), async (req, res) => {
   const uploadedFilePath = req.file?.path;
@@ -129,16 +164,15 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 });
 
 app.post("/ask", async (req, res) => {
-  const validation = askSchema.safeParse(req.body);
+  const validation = validateAskBody(req.body);
 
-  if (!validation.success) {
+  if (validation.error) {
     return res.status(400).json({
-      error: "Validation failed",
-      details: validation.error.issues,
+      error: validation.error,
     });
   }
 
-  const { question, session_id } = validation.data;
+  const { question, session_id } = validation.value;
 
   try {
     const response = await axios.post("http://localhost:5000/ask", {
@@ -160,19 +194,18 @@ app.post("/ask", async (req, res) => {
 });
 
 app.post("/summarize", async (req, res) => {
-  const validation = summarizeSchema.safeParse(req.body);
+  const validation = validateSummarizeBody(req.body);
 
-  if (!validation.success) {
+  if (validation.error) {
     return res.status(400).json({
-      error: "Validation failed",
-      details: validation.error.issues,
+      error: validation.error,
     });
   }
 
   try {
     const response = await axios.post(
       "http://localhost:5000/summarize",
-      validation.data
+      validation.value
     );
 
     return res.json({

@@ -32,9 +32,7 @@
 
     "multer": "^2.0.2",
 
-    "react-hot-toast": "^2.6.0",
-
-    "zod": "^4.4.3"
+    "react-hot-toast": "^2.6.0"
 
   }
 
