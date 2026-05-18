@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { Card, Button } from "react-bootstrap";
 import PictureAsPdfIcon from "@mui/icons-material/PictureAsPdf";
 import { Document, Page } from "react-pdf";
@@ -6,11 +6,21 @@ import { Document, Page } from "react-pdf";
 const PdfViewer = ({
   darkMode,
   currentPdfUrl,
-  pageNumber,
-  numPages,
-  setPageNumber,
-  onDocumentLoadSuccess,
 }) => {
+  const [numPages, setNumPages] = useState(null);
+  const [pageNumber, setPageNumber] = useState(1);
+
+  // Reset page when document changes
+  useEffect(() => {
+    setPageNumber(1);
+    setNumPages(null);
+  }, [currentPdfUrl]);
+
+  const onDocumentLoadSuccess = ({ numPages }) => {
+    setNumPages(numPages);
+    setPageNumber(1);
+  };
+
   return (
     <Card
   className={`glass-card ${

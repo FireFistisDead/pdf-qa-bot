@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 
 import {
   Box,
@@ -10,13 +10,25 @@ import {
 
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 
-const UploadSection = ({
+const UploadCard = ({
   darkMode,
-  file,
-  handleFileChange,
-  handleUpload,
+  onUpload,
   uploading,
 }) => {
+  const [file, setFile] = useState(null);
+
+  const handleFileChange = (e) => {
+    setFile(e.target.files[0]);
+  };
+
+  const handleUpload = () => {
+    if (file) {
+      onUpload(file);
+      // Wait for parent to handle clear or success, but we can clear it on success if we want,
+      // or let user upload again.
+    }
+  };
+
   return (
     <Paper
       elevation={0}
@@ -243,4 +255,4 @@ overflow: "hidden",
   );
 };
 
-export default UploadSection;
+export default UploadCard;
