@@ -138,6 +138,12 @@ OVERVIEW_QUERY_TERMS = {
 INSUFFICIENT_CONTEXT_MESSAGE = "The uploaded documents do not contain enough information to answer this question."
 BASE_DIR = Path(__file__).resolve().parent.parent
 UPLOADS_DIR = (BASE_DIR / "uploads").resolve()
+UPLOAD_FILENAME_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789"
+    "._-"
+)
 FACTUAL_QUESTION_PREFIXES = (
     ("what", "is"),
     ("what", "are"),
@@ -819,29 +825,40 @@ def generate_response(prompt: str, max_new_tokens: int) -> str:
     return text.strip()
 
 
-def resolve_upload_path(file_path: str) -> Path:
-    if not file_path or not file_path.strip():
+def upload_basename(client_file_path: str) -> str:
+    if not client_file_path or not client_file_path.strip():
         raise ValueError("Missing PDF file path.")
 
-    resolved_path = Path(file_path).resolve()
-    if resolved_path.parent != UPLOADS_DIR:
-        raise ValueError("File path is outside the allowed uploads directory.")
-    if not resolved_path.is_file():
-        raise ValueError("File does not exist or is not a valid file.")
-    if resolved_path.suffix.lower() != ".pdf":
+    normalized_path = client_file_path.strip().replace("\\", "/")
+    return normalized_path.rsplit("/", 1)[-1]
+
+
+def safe_upload_path(file_name: str) -> Path:
+    safe_name = (file_name or "").strip()
+    if not safe_name or safe_name in {".", ".."}:
+        raise ValueError("Missing PDF file path.")
+    if any(character not in UPLOAD_FILENAME_CHARS for character in safe_name):
+        raise ValueError("Uploaded filename contains unsupported characters.")
+    if not safe_name.lower().endswith(".pdf"):
         raise ValueError("Only PDF files are allowed.")
-    return resolved_path
+
+    candidate_path = (UPLOADS_DIR / safe_name).resolve()
+    try:
+        candidate_path.relative_to(UPLOADS_DIR)
+    except ValueError:
+        raise ValueError("File path is outside the allowed uploads directory.")
+
+    if not candidate_path.is_file():
+        raise ValueError("File does not exist or is not a valid file.")
+    if candidate_path.stat().st_size == 0:
+        raise ValueError("Uploaded PDF is empty. Please choose a valid PDF file.")
+    return candidate_path
 
 
 class PDFPath(BaseModel):
     filePath: str
     session_id: str | None = None
     filename: str | None = None
-
-    @field_validator("filePath")
-    @classmethod
-    def validate_file_path(cls, v: str) -> str:
-        return str(resolve_upload_path(v))
 
 
 class Question(BaseModel):
@@ -865,7 +882,7 @@ class SummarizeRequest(BaseModel):
 def process_pdf(data: PDFPath):
     cleanup_expired_sessions()
     try:
-        upload_path = resolve_upload_path(data.filePath)
+        upload_path = safe_upload_path(upload_basename(data.filePath))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -873,8 +890,6 @@ def process_pdf(data: PDFPath):
     requested_session_id = (data.session_id or "").strip() or None
     filename = data.filename or upload_path.name or "uploaded.pdf"
 
-    if upload_path.stat().st_size == 0:
-        raise HTTPException(status_code=400, detail="Uploaded PDF is empty. Please choose a valid PDF file.")
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF documents are supported.")
 
