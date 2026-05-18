@@ -845,21 +845,39 @@ def sanitize_upload_filename(client_file_path: str) -> str:
     return safe_name
 
 
-def get_trusted_upload_path(file_name: str) -> Path:
-    trusted_path = UPLOADS_DIR.joinpath(file_name)
-    if trusted_path.parent != UPLOADS_DIR:
+def get_trusted_upload_path(file_name: str) -> str:
+    """
+    Construct a trusted server-owned upload path.
+
+    Only validated filenames are allowed here.
+    """
+    trusted_path = os.path.join(str(UPLOADS_DIR), file_name)
+
+    normalized_uploads_dir = os.path.abspath(str(UPLOADS_DIR))
+    normalized_path = os.path.abspath(trusted_path)
+
+    if os.path.dirname(normalized_path) != normalized_uploads_dir:
         raise ValueError("Invalid upload path.")
-    return trusted_path
+
+    return normalized_path
 
 
-def validate_uploaded_pdf(path: Path) -> Path:
-    if path.suffix.lower() != ".pdf":
+def validate_uploaded_pdf(file_path: str) -> str:
+    """
+    Validate trusted upload path.
+    """
+    if not file_path.lower().endswith(".pdf"):
         raise ValueError("Only PDF files are allowed.")
-    if not path.exists() or not path.is_file():
+
+    if not os.path.isfile(file_path):
         raise ValueError("File does not exist or is not a valid file.")
-    if path.stat().st_size == 0:
-        raise ValueError("Uploaded PDF is empty. Please choose a valid PDF file.")
-    return path
+
+    if os.path.getsize(file_path) == 0:
+        raise ValueError(
+            "Uploaded PDF is empty. Please choose a valid PDF file."
+        )
+
+    return file_path
 
 
 class PDFPath(BaseModel):
