@@ -6,13 +6,14 @@ const fs = require("fs");
 const fsPromises = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
+const { z } = require("zod");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const MAX_PDF_SIZE_BYTES = 20 * 1024 * 1024;
-const UPLOADS_DIR = path.resolve("uploads");
+const UPLOADS_DIR = path.join(__dirname, "uploads");
 const isDevelopment = process.env.NODE_ENV !== "production";
 
 if (!fs.existsSync(UPLOADS_DIR)) {
@@ -32,15 +33,21 @@ const upload = multer({
   storage,
   limits: { fileSize: MAX_PDF_SIZE_BYTES },
   fileFilter: (req, file, cb) => {
-    const isPdfMime = file.mimetype === "application/pdf";
-    const isPdfExtension = file.originalname.toLowerCase().endsWith(".pdf");
-
-    if (!isPdfMime || !isPdfExtension) {
+    if (!file.originalname.toLowerCase().endsWith(".pdf")) {
       return cb(new Error("Only PDF files are allowed."));
     }
 
     cb(null, true);
   },
+});
+
+const askSchema = z.object({
+  question: z.string().trim().min(1, "Question cannot be empty"),
+  session_id: z.string().uuid("Invalid session ID format"),
+});
+
+const summarizeSchema = z.object({
+  session_id: z.string().uuid("Invalid session ID format"),
 });
 
 const cleanupFile = async (filePath) => {
@@ -68,51 +75,6 @@ const extractServiceDetails = (err) => {
   return upstreamDetails?.detail || upstreamDetails?.error || upstreamDetails || err.message;
 };
 
-const uuidPattern =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-const validateSessionId = (sessionId) => {
-  if (!sessionId || typeof sessionId !== "string") {
-    return "session_id is required.";
-  }
-  if (!uuidPattern.test(sessionId)) {
-    return "Invalid session ID format.";
-  }
-  return null;
-};
-
-const validateAskBody = (body) => {
-  const question = typeof body?.question === "string" ? body.question.trim() : "";
-  if (!question) {
-    return { error: "Question is required." };
-  }
-
-  const sessionError = validateSessionId(body?.session_id);
-  if (sessionError) {
-    return { error: sessionError };
-  }
-
-  return {
-    value: {
-      question,
-      session_id: body.session_id,
-    },
-  };
-};
-
-const validateSummarizeBody = (body) => {
-  const sessionError = validateSessionId(body?.session_id);
-  if (sessionError) {
-    return { error: sessionError };
-  }
-
-  return {
-    value: {
-      session_id: body.session_id,
-    },
-  };
-};
-
 app.post("/upload", upload.single("file"), async (req, res) => {
   const uploadedFilePath = req.file?.path;
   const absoluteFilePath = uploadedFilePath ? path.resolve(uploadedFilePath) : null;
@@ -120,11 +82,9 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
   try {
     if (!req.file) {
-      return sendUploadError(
-        res,
-        400,
-        "No PDF uploaded. Please choose a PDF file and try again."
-      );
+      return res.status(400).json({
+        error: "No file uploaded. Use form field name 'file'.",
+      });
     }
 
     if (req.file.size === 0) {
@@ -165,15 +125,16 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 });
 
 app.post("/ask", async (req, res) => {
-  const validation = validateAskBody(req.body);
+  const validation = askSchema.safeParse(req.body);
 
-  if (validation.error) {
+  if (!validation.success) {
     return res.status(400).json({
-      error: validation.error,
+      error: "Validation failed",
+      details: validation.error.issues,
     });
   }
 
-  const { question, session_id } = validation.value;
+  const { question, session_id } = validation.data;
 
   try {
     const response = await axios.post("http://localhost:5000/ask", {
@@ -198,18 +159,19 @@ app.post("/ask", async (req, res) => {
 });
 
 app.post("/summarize", async (req, res) => {
-  const validation = validateSummarizeBody(req.body);
+  const validation = summarizeSchema.safeParse(req.body);
 
-  if (validation.error) {
+  if (!validation.success) {
     return res.status(400).json({
-      error: validation.error,
+      error: "Validation failed",
+      details: validation.error.issues,
     });
   }
 
   try {
     const response = await axios.post(
       "http://localhost:5000/summarize",
-      validation.value
+      validation.data
     );
 
     return res.json({
