@@ -22,6 +22,7 @@ function App() {
   const [file, setFile] = useState(null);
   const [pdfs, setPdfs] = useState([]); // {name, url, chat: []}
   const [selectedPdf, setSelectedPdf] = useState(null);
+  const [sessionId, setSessionId] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [question, setQuestion] = useState("");
  
@@ -30,7 +31,8 @@ function App() {
   const [numPages, setNumPages] = useState(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [summarizing, setSummarizing] = useState(false);
-  const isProcessing = uploading || asking || summarizing;
+  // const isProcessing = uploading || asking || summarizing;
+
 
   // Multi-PDF upload
   const uploadPDF = async () => {
@@ -38,6 +40,10 @@ function App() {
     toast.error("Please select a PDF file first.");
     return;
   }
+
+  // Reset session state for a new upload attempt (prevents reusing old sessions)
+  setSessionId(null);
+
 
   // Validate file type
   if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
@@ -65,21 +71,26 @@ function App() {
 
     const url = URL.createObjectURL(file);
 
+    const newSessionId = res?.data?.session_id;
+
     setPdfs(prev => [
       ...prev,
       {
         name: file.name,
         url,
         chat: [],
-        session_id: res.data.session_id
+        session_id: newSessionId,
       }
     ]);
 
-    setSelectedPdf(file.name);
+    setSelectedPdf(newSessionId);
+    setSessionId(newSessionId);
+
     setFile(null);
     toast.success("PDF uploaded successfully!", {
       id: loadingToast,
     });
+
 
   } catch (e) {
     let message = "Upload failed. Please try again.";
@@ -111,27 +122,24 @@ function App() {
       toast.error("Please enter a question before submitting.");
       return;
     }
-    
-    if (!selectedPdf) {
-      toast.error("Please upload and select a PDF document first.");
-      return;
-    }
-    
-    const currentPdf = pdfs.find(p => p.name === selectedPdf);
-    if (!currentPdf || !currentPdf.session_id) {
-      toast.error("Invalid session. Please upload the PDF again.");
+
+    // Prevent asking before a successful upload (production-safe)
+    if (!selectedPdf || !sessionId) {
+      toast.error("Please upload a PDF document first.");
       return;
     }
     
     setAsking(true);
-    setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "user", text: question }] } : pdf));
+
+    setPdfs(prev => prev.map(pdf => pdf.session_id === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "user", text: question }] } : pdf));
     
     try {
-      const res = await axios.post(`${API_BASE}/ask`, { question, session_id: currentPdf.session_id }, {
+      const res = await axios.post(`${API_BASE}/ask`, { question, session_id: sessionId }, {
         timeout: 60000, // 60 second timeout for AI responses
       });
-      setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: res.data.answer }] } : pdf));
+      setPdfs(prev => prev.map(pdf => pdf.session_id === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: res.data.answer }] } : pdf));
     } catch (e) {
+
       let errorMessage = "Error getting answer. Please try again.";
       
       if (e.code === "ECONNABORTED") {
@@ -147,7 +155,7 @@ function App() {
       }
       
       toast.error(errorMessage);
-      setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: errorMessage }] } : pdf));
+      setPdfs(prev => prev.map(pdf => pdf.session_id === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: errorMessage }] } : pdf));
     }
     setQuestion("");
     setAsking(false);
@@ -160,7 +168,7 @@ function App() {
       return;
     }
     
-    const currentPdf = pdfs.find(p => p.name === selectedPdf);
+    const currentPdf = pdfs.find(p => p.session_id === selectedPdf);
     if (!currentPdf || !currentPdf.session_id) {
       toast.error("Invalid session. Please upload the PDF again.");
       return;
@@ -173,7 +181,7 @@ function App() {
       const res = await axios.post(`${API_BASE}/summarize`, { pdf: selectedPdf, session_id: currentPdf.session_id }, {
         timeout: 60000, // 60 second timeout for summarization
       });
-      setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: res.data.summary }] } : pdf));
+      setPdfs(prev => prev.map(pdf => pdf.session_id === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: res.data.summary }] } : pdf));
       toast.success("PDF summarized successfully!", {
         id: loadingToast,
       });
@@ -195,7 +203,7 @@ function App() {
       toast.error(errorMessage, {
         id: loadingToast,
       });
-      setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: errorMessage }] } : pdf));
+      setPdfs(prev => prev.map(pdf => pdf.session_id === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: errorMessage }] } : pdf));
     }
     setSummarizing(false);
   };
@@ -203,7 +211,7 @@ function App() {
   // Export chat
   const exportChat = (type) => {
     if (!selectedPdf) return;
-    const chat = pdfs.find(pdf => pdf.name === selectedPdf)?.chat || [];
+    const chat = pdfs.find(pdf => pdf.session_id === selectedPdf)?.chat || [];
     if (type === "csv") {
       const csv = Papa.unparse(chat);
       const blob = new Blob([csv], { type: "text/csv" });
@@ -224,8 +232,8 @@ function App() {
 
   const themeClass = darkMode ? "bg-dark text-light" : "bg-light text-dark";
 
-  const currentChat = pdfs.find(pdf => pdf.name === selectedPdf)?.chat || [];
-  const currentPdfUrl = pdfs.find(pdf => pdf.name === selectedPdf)?.url || null;
+  const currentChat = pdfs.find(pdf => pdf.session_id === selectedPdf)?.chat || [];
+  const currentPdfUrl = pdfs.find(pdf => pdf.session_id === selectedPdf)?.url || null;
   return (
     <>
     <Toaster
@@ -296,8 +304,10 @@ function App() {
   summarizePDF={summarizePDF}
   summarizing={summarizing}
   selectedPdf={selectedPdf}
+  sessionId={sessionId}
   exportChat={exportChat}
 />
+
       </Col>
 
     </Row>

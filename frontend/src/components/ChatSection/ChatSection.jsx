@@ -22,6 +22,7 @@ const ChatSection = ({
   summarizePDF,
   summarizing,
   selectedPdf,
+  sessionId,
   exportChat,
 }) => {
     const messagesEndRef = useRef(null);
@@ -427,7 +428,7 @@ letterSpacing: "-0.5px",
     disabled={
       asking ||
       !question.trim() ||
-      !selectedPdf
+      !sessionId
     }
     style={{
       width: "48px",
