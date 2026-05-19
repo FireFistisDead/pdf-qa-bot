@@ -52,8 +52,9 @@ const cleanupFile = async (filePath) => {
   if (!filePath) return;
 
   try {
-    await fsPromises.unlink(filePath);
-    console.log(`Deleted temp file: ${filePath}`);
+    const safePath = path.join(UPLOADS_DIR, path.basename(filePath));
+    await fsPromises.unlink(safePath);
+    console.log(`Deleted temp file: ${safePath}`);
   } catch (err) {
     console.error(`Failed to delete temp file ${filePath}:`, err.message);
   }
