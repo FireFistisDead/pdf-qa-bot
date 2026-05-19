@@ -21,7 +21,7 @@ const ChatSection = ({
   asking,
   summarizePDF,
   summarizing,
-  selectedPdf,
+  hasSession,
   exportChat,
 }) => {
     const messagesEndRef = useRef(null);
@@ -86,7 +86,7 @@ useEffect(() => {
               variant="warning"
               size="sm"
               onClick={summarizePDF}
-              disabled={summarizing || !selectedPdf}
+              disabled={summarizing || !hasSession}
             >
               {summarizing ? (
                 <Spinner animation="border" size="sm" />
@@ -99,7 +99,7 @@ useEffect(() => {
               variant="outline-secondary"
               size="sm"
               onClick={() => exportChat("pdf")}
-              disabled={!selectedPdf}
+              disabled={!hasSession}
             >
               Export
             </Button>
@@ -153,7 +153,7 @@ useEffect(() => {
       Hi! I am your document assistant.
       <br />
       <br />
-      Upload a PDF and ask me anything about it.
+      Upload PDFs and ask me anything across the session.
       I can:
       <ul style={{ marginTop: "10px" }}>
         <li>Summarize complex sections</li>
@@ -320,9 +320,9 @@ letterSpacing: "-0.5px",
         marginBottom: 0,
       }}
     >
-      Upload a document and ask intelligent questions
-      about its contents. Generate summaries, explore
-      insights, and interact naturally with your PDF files.
+      Upload documents and ask questions across their
+      shared context. Generate summaries, explore insights,
+      and compare ideas naturally.
     </p>
     <div
   style={{
@@ -362,7 +362,7 @@ letterSpacing: "-0.5px",
       lineHeight: 1.6,
     }}
   >
-    Please upload a PDF document first to begin
+    Please upload one or more PDF documents first to begin
     the conversation.
   </div>
 </div>
@@ -427,7 +427,7 @@ letterSpacing: "-0.5px",
     disabled={
       asking ||
       !question.trim() ||
-      !selectedPdf
+      !hasSession
     }
     style={{
       width: "48px",
