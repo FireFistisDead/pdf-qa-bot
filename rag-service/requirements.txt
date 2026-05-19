@@ -11,3 +11,4 @@ faiss-cpu
 pypdf
 requests
 numpy
+rank-bm25==0.2.2
