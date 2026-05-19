@@ -9,6 +9,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from dotenv import load_dotenv
+from rank_bm25 import BM25Okapi
+import numpy as np
 import os
 import uuid
 import uvicorn
@@ -106,7 +108,7 @@ def get_valid_session(session_id: str):
             del sessions[session_id]
             return None
         meta["last_accessed"] = now_ts()
-        return meta["vectorstore"]
+        return meta
 
 
 HF_GENERATION_MODEL = os.getenv("HF_GENERATION_MODEL", "google/flan-t5-base")
@@ -210,40 +212,94 @@ class SummarizeRequest(BaseModel):
 @app.post("/process-pdf")
 def process_pdf(data: PDFPath):
     cleanup_expired_sessions()
+
     loader = PyPDFLoader(data.filePath)
     docs = loader.load()
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=100
+    )
+
     chunks = splitter.split_documents(docs)
+
     if not chunks:
         raise HTTPException(
-            status_code=400, detail="No text chunks generated from the PDF."
+            status_code=400,
+            detail="No text chunks generated from the PDF."
         )
 
     session_id = str(uuid.uuid4())
+
     vectorstore = FAISS.from_documents(chunks, embedding_model)
+
+    chunk_texts = [doc.page_content for doc in chunks]
+
+    tokenized_chunks = [text.split() for text in chunk_texts]
+
+    bm25 = BM25Okapi(tokenized_chunks)
+
     now = now_ts()
+
     with sessions_lock:
-        # Enforce max cap before insert
         while len(sessions) >= MAX_ACTIVE_SESSIONS:
-            oldest = min(sessions.items(), key=lambda x: x[1]["created_at"])[0]
+            oldest = min(
+                sessions.items(),
+                key=lambda x: x[1]["created_at"]
+            )[0]
+
             del sessions[oldest]
+
         sessions[session_id] = {
             "vectorstore": vectorstore,
+            "bm25": bm25,
+            "chunks": chunks,
+            "chunk_texts": chunk_texts,
             "created_at": now,
             "last_accessed": now,
         }
-    return {"message": "PDF processed successfully", "session_id": session_id}
+
+    return {
+        "message": "PDF processed successfully",
+        "session_id": session_id
+    }
 
 
 @app.post("/ask")
 def ask_question(data: Question):
     cleanup_expired_sessions()
-    vectorstore = get_valid_session(str(data.session_id))
-    if not vectorstore:
+
+    session = get_valid_session(str(data.session_id))
+
+    if not session:
         return {"answer": "Session expired or invalid. Please re-upload the PDF!"}
 
-    docs = vectorstore.similarity_search(data.question, k=4)
+    vectorstore = session["vectorstore"]
+    bm25 = session["bm25"]
+    chunks = session["chunks"]
+
+    # Semantic retrieval
+    semantic_docs = vectorstore.similarity_search(data.question, k=4)
+
+    # Keyword retrieval using BM25
+    tokenized_query = data.question.split()
+    bm25_scores = bm25.get_scores(tokenized_query)
+
+    top_bm25_indices = np.argsort(bm25_scores)[-4:][::-1]
+
+    keyword_docs = [chunks[i] for i in top_bm25_indices]
+
+    # Merge results without duplicates
+    combined_docs = []
+    seen_content = set()
+
+    for doc in semantic_docs + keyword_docs:
+        if doc.page_content not in seen_content:
+            combined_docs.append(doc)
+            seen_content.add(doc.page_content)
+
+    docs = combined_docs[:4]
+
     if not docs:
         return {"answer": "No relevant context found."}
 
@@ -258,18 +314,24 @@ def ask_question(data: Question):
     )
 
     answer = generate_response(prompt, max_new_tokens=256)
-    return {"answer": answer}
+
+    return {
+        "answer": answer,
+        "retrieval_type": "hybrid",
+        "documents_used": len(docs),
+    }
 
 
 @app.post("/summarize")
 def summarize_pdf(data: SummarizeRequest):
     cleanup_expired_sessions()
-    vectorstore = get_valid_session(str(data.session_id))
-    if not vectorstore:
+    session = get_valid_session(str(data.session_id))
+    if not session:
         raise HTTPException(
             status_code=404,
             detail="Session expired or invalid. Please re-upload the PDF!",
         )
+    vectorstore = session["vectorstore"]
 
     docs = vectorstore.similarity_search("Give a concise summary of the document.", k=6)
     if not docs:
