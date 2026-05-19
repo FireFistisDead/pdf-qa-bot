@@ -10,7 +10,9 @@
 
   "scripts": {
 
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+
+    "build": "npm --prefix frontend run build"
 
   },
 
@@ -32,9 +34,7 @@
 
     "multer": "^2.0.2",
 
-    "react-hot-toast": "^2.6.0",
-
-    "zod": "^4.4.3"
+    "react-hot-toast": "^2.6.0"
 
   }
 
