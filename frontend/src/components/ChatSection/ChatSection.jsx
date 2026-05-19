@@ -213,7 +213,48 @@ useEffect(() => {
           }}
         >
           {msg.role === "bot" ? (
-            <ReactMarkdown>{msg.text}</ReactMarkdown>
+            <>
+              <ReactMarkdown>{msg.text}</ReactMarkdown>
+              {msg.sources && msg.sources.length > 0 && (
+                <div
+                  style={{
+                    marginTop: "10px",
+                    display: "flex",
+                    flexWrap: "wrap",
+                    alignItems: "center",
+                    gap: "6px",
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: "11px",
+                      opacity: 0.65,
+                      fontWeight: 600,
+                      letterSpacing: "0.03em",
+                    }}
+                  >
+                    📄 Source pages:
+                  </span>
+                  {msg.sources.map((page) => (
+                    <span
+                      key={page}
+                      style={{
+                        display: "inline-block",
+                        padding: "2px 9px",
+                        borderRadius: "999px",
+                        fontSize: "11px",
+                        fontWeight: 600,
+                        background: "rgba(139,92,246,0.15)",
+                        border: "1px solid rgba(139,92,246,0.35)",
+                        color: darkMode ? "#C4B5FD" : "#6D28D9",
+                      }}
+                    >
+                      p. {page}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </>
           ) : (
             <span>{msg.text}</span>
           )}

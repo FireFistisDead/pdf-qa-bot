@@ -181,7 +181,10 @@ app.post("/ask", async (req, res) => {
       session_id,
     });
 
-    return res.json({ answer: response.data.answer });
+    return res.json({
+      answer: response.data.answer,
+      sources: response.data.sources ?? [],
+    });
   } catch (err) {
     const statusCode = err.response?.status || 500;
     const details = extractServiceDetails(err);
