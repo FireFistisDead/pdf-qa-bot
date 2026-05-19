@@ -9,6 +9,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from dotenv import load_dotenv
+from rank_bm25 import BM25Okapi
+import numpy as np
 import os
 import uuid
 import uvicorn
@@ -947,8 +949,13 @@ def process_pdf(data: PDFPath):
     if not docs:
         raise HTTPException(status_code=400, detail="No readable pages were found in the PDF.")
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=100
+    )
+
     chunks = splitter.split_documents(docs)
+
     if not chunks:
         raise HTTPException(status_code=400, detail="No text chunks generated from the PDF. Please check your file.")
 
@@ -1090,7 +1097,12 @@ def ask_question(data: Question):
         retrieved_sources,
     )
     answer = generate_response(prompt, max_new_tokens=256)
-    return {"answer": answer}
+
+    return {
+        "answer": answer,
+        "retrieval_type": "hybrid",
+        "documents_used": len(docs),
+    }
 
 
 @app.post("/summarize")
