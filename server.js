@@ -2,7 +2,8 @@ const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const axios = require("axios");
-const fs = require("fs/promises");
+const fs = require("fs");
+const fsPromises = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
 const { z } = require("zod");
@@ -14,8 +15,8 @@ app.use(express.json());
 const UPLOADS_DIR = path.resolve("uploads");
 const isDevelopment = process.env.NODE_ENV !== "production";
 
-if (!fsSync.existsSync(UPLOADS_DIR)) {
-  fsSync.mkdirSync(UPLOADS_DIR, { recursive: true });
+if (!fs.existsSync(UPLOADS_DIR)) {
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
 
 // Storage for uploaded PDFs with validation
@@ -51,8 +52,9 @@ const cleanupFile = async (filePath) => {
   if (!filePath) return;
 
   try {
-    await fs.unlink(filePath);
-    console.log(`Deleted temp file: ${filePath}`);
+    const safePath = path.join(UPLOADS_DIR, path.basename(filePath));
+    await fsPromises.unlink(safePath);
+    console.log(`Deleted temp file: ${safePath}`);
   } catch (err) {
     console.error(`Failed to delete temp file ${filePath}:`, err.message);
   }
@@ -192,4 +194,8 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: "Internal server error" });
 });
 
-app.listen(4000, () => console.log("Backend running on http://localhost:4000"));
+if (require.main === module) {
+  app.listen(4000, () => console.log("Backend running on http://localhost:4000"));
+}
+
+module.exports = { app, askSchema, summarizeSchema };
