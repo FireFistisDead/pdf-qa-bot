@@ -9,14 +9,21 @@ import {
 } from "@mui/material";
 
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
+import PictureAsPdfIcon from "@mui/icons-material/PictureAsPdf";
 
 const UploadSection = ({
   darkMode,
-  file,
+  files,
+  fileInputRef,
+  uploadedDocuments,
+  selectedDocumentId,
+  setSelectedDocumentId,
   handleFileChange,
   handleUpload,
   uploading,
 }) => {
+  const hasSelectedFiles = files && files.length > 0;
+
   return (
     <Paper
       elevation={0}
@@ -166,11 +173,13 @@ overflow: "hidden",
           transition: "all 0.25s ease",
         }}
       >
-        Choose File
+        Choose PDFs
 
         <input
+          ref={fileInputRef}
           hidden
           type="file"
+          multiple
           accept="application/pdf"
           onChange={handleFileChange}
         />
@@ -179,7 +188,7 @@ overflow: "hidden",
       <Button
         variant="contained"
         onClick={handleUpload}
-        disabled={uploading || !file}
+        disabled={uploading || !hasSelectedFiles}
         sx={{
           background: "#8B5CF6",
           color: "#fff",
@@ -220,12 +229,12 @@ overflow: "hidden",
             Uploading...
           </>
         ) : (
-          "Upload PDF"
+          hasSelectedFiles && files.length > 1 ? "Upload PDFs" : "Upload PDF"
         )}
       </Button>
     </Box>
 
-    {file && (
+    {hasSelectedFiles && (
       <Typography
         sx={{
           mt: 2,
@@ -233,12 +242,81 @@ overflow: "hidden",
           fontSize: "14px",
         }}
       >
-        Selected: {file.name}
+        Selected: {files.map((selectedFile) => selectedFile.name).join(", ")}
       </Typography>
     )}
   </Box>
 </Box>
       </Box>
+      {uploadedDocuments.length > 0 && (
+        <Box
+          sx={{
+            mt: 3,
+            display: "grid",
+            gap: 1.25,
+          }}
+        >
+          <Typography
+            sx={{
+              fontWeight: 700,
+              color: darkMode ? "#F9FAFB" : "#111827",
+              fontSize: "15px",
+            }}
+          >
+            Uploaded Documents
+          </Typography>
+
+          <Box
+            sx={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 1,
+            }}
+          >
+            {uploadedDocuments.map((document) => {
+              const isSelected = document.document_id === selectedDocumentId;
+
+              return (
+                <Button
+                  key={document.document_id || document.name}
+                  onClick={() => setSelectedDocumentId(document.document_id)}
+                  startIcon={<PictureAsPdfIcon />}
+                  variant={isSelected ? "contained" : "outlined"}
+                  sx={{
+                    maxWidth: "100%",
+                    justifyContent: "flex-start",
+                    borderRadius: "14px",
+                    textTransform: "none",
+                    fontWeight: 600,
+                    color: isSelected ? "#fff" : darkMode ? "#E5E7EB" : "#374151",
+                    background: isSelected ? "#8B5CF6" : "transparent",
+                    borderColor: darkMode ? "rgba(255,255,255,0.14)" : "rgba(0,0,0,0.12)",
+                    "&:hover": {
+                      background: isSelected
+                        ? "#7C4DFF"
+                        : darkMode
+                        ? "rgba(255,255,255,0.06)"
+                        : "rgba(139,92,246,0.06)",
+                    },
+                  }}
+                >
+                  <Box
+                    component="span"
+                    sx={{
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      maxWidth: { xs: "220px", md: "320px" },
+                    }}
+                  >
+                    {document.name}
+                  </Box>
+                </Button>
+              );
+            })}
+          </Box>
+        </Box>
+      )}
     </Paper>
   );
 };
