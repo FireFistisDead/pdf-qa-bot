@@ -1,16 +1,33 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Card, Button } from "react-bootstrap";
 import PictureAsPdfIcon from "@mui/icons-material/PictureAsPdf";
-import { Document, Page } from "react-pdf";
+import { Document, Page, pdfjs } from "react-pdf";
+
+// Set PDF.js worker to local file
+pdfjs.GlobalWorkerOptions.workerSrc = `${process.env.PUBLIC_URL}/pdf.worker.min.mjs`;
 
 const PdfViewer = ({
   darkMode,
+  currentPdfFile,
   currentPdfUrl,
   pageNumber,
   numPages,
   setPageNumber,
   onDocumentLoadSuccess,
 }) => {
+  const [loadError, setLoadError] = useState("");
+  const pdfSource = currentPdfFile || currentPdfUrl;
+
+  useEffect(() => {
+    setLoadError("");
+    setPageNumber(1);
+  }, [pdfSource, setPageNumber]);
+
+  const handleLoadError = (error) => {
+    console.error("PDF preview failed:", error);
+    setLoadError("Preview unavailable for this PDF. The document was uploaded, so chat and summarization can still use it.");
+  };
+
   return (
     <Card
   className={`glass-card ${
@@ -83,13 +100,13 @@ const PdfViewer = ({
 
 </div>
 
-          {currentPdfUrl && (
+          {pdfSource && (
             <div className="d-flex gap-2">
               
               <Button
                 variant={darkMode ? "outline-light" : "outline-dark"}
                 size="sm"
-                disabled={pageNumber <= 1}
+                disabled={pageNumber <= 1 || Boolean(loadError)}
                 onClick={() => setPageNumber(pageNumber - 1)}
               >
                 Prev
@@ -98,7 +115,7 @@ const PdfViewer = ({
               <Button
                 variant={darkMode ? "outline-light" : "outline-dark"}
                 size="sm"
-                disabled={pageNumber >= numPages}
+                disabled={!numPages || pageNumber >= numPages || Boolean(loadError)}
                 onClick={() => setPageNumber(pageNumber + 1)}
               >
                 Next
@@ -107,17 +124,31 @@ const PdfViewer = ({
           )}
         </div>
 
-        {currentPdfUrl ? (
+        {pdfSource ? (
           <div style={{ textAlign: "center" }}>
             
             <Document
-              file={currentPdfUrl}
+              file={pdfSource}
               onLoadSuccess={onDocumentLoadSuccess}
+              onLoadError={handleLoadError}
+              loading={<div style={{ padding: "32px" }}>Loading preview...</div>}
+              error={
+                <div
+                  style={{
+                    padding: "32px",
+                    color: darkMode ? "#FCA5A5" : "#B91C1C",
+                    fontWeight: 600,
+                  }}
+                >
+                  {loadError || "Failed to load PDF preview."}
+                </div>
+              }
             >
-              <Page pageNumber={pageNumber} />
+              {!loadError && <Page pageNumber={pageNumber} />}
             </Document>
 
-            <div
+            {!loadError && numPages && (
+              <div
   className="mt-4"
   style={{
     fontSize: "14px",
@@ -127,6 +158,7 @@ const PdfViewer = ({
 >
   Page {pageNumber} of {numPages}
 </div>
+            )}
           </div>
         ) : (
           <div
