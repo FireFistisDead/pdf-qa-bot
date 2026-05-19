@@ -2,6 +2,16 @@ import axios from "axios";
 
 const API_BASE = process.env.REACT_APP_API_URL || "";
 
+export const extractApiErrorMessage = (error, fallbackMessage) => {
+  return (
+    error?.response?.data?.detail ||
+    error?.response?.data?.error ||
+    error?.response?.data?.message ||
+    error?.message ||
+    fallbackMessage
+  );
+};
+
 /**
  * Uploads a PDF file to the server.
  * @param {File} file 
