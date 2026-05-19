@@ -5,7 +5,7 @@ import toast from "react-hot-toast";
 
 import MessageBubble from "./MessageBubble";
 import ExportMenu from "./ExportMenu";
-import { askQuestionApi, summarizePdfApi } from "../../services/api";
+import { askQuestionApi, extractApiErrorMessage, summarizePdfApi } from "../../services/api";
 
 const ChatPanel = ({
   darkMode,
@@ -55,8 +55,8 @@ const ChatPanel = ({
         errorMessage = "Session not found. Please upload the PDF again.";
       } else if (e.response?.status === 500) {
         errorMessage = "Server error. Please try again later.";
-      } else if (e.response?.data?.error) {
-        errorMessage = e.response.data.error;
+      } else {
+        errorMessage = extractApiErrorMessage(e, errorMessage);
       }
 
       toast.error(errorMessage);
@@ -94,8 +94,8 @@ const ChatPanel = ({
         errorMessage = "Session not found. Please upload the PDF again.";
       } else if (e.response?.status === 500) {
         errorMessage = "Server error. Please try again later.";
-      } else if (e.response?.data?.error) {
-        errorMessage = e.response.data.error;
+      } else {
+        errorMessage = extractApiErrorMessage(e, errorMessage);
       }
 
       toast.error(errorMessage, {
