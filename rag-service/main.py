@@ -69,6 +69,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 sessions = {}
 sessions_lock = threading.Lock()
 model_load_lock = threading.Lock()
+generation_lock = threading.Lock()
 logger = logging.getLogger("pdf_qa_rag")
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -831,13 +832,16 @@ def generate_response(prompt: str, max_new_tokens: int) -> str:
         else tokenizer.eos_token_id
     )
 
-    with torch.no_grad():
-        generated_ids = model.generate(
-            **encoded,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            pad_token_id=pad_token_id,
-        )
+    logger.debug("Acquiring generation lock")
+    with generation_lock:
+        with torch.no_grad():
+            generated_ids = model.generate(
+                **encoded,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=pad_token_id,
+            )
+    logger.debug("Generation completed")
 
     if is_encoder_decoder:
         text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
@@ -947,7 +951,7 @@ def process_pdf(data: PDFPath):
 
     file_path = str(upload_path)
     requested_session_id = (data.session_id or "").strip() or None
-    filename = data.filename or upload_path.name or "uploaded.pdf"
+    filename = data.filename or safe_name or "uploaded.pdf"
 
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF documents are supported.")
