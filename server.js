@@ -6,13 +6,66 @@ const fs = require("fs");
 const fsPromises = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
+const { rateLimit } = require("express-rate-limit");
 
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
 const PORT = process.env.PORT || 4000;
 
 const app = express();
+
+// ─── Trust Proxy ────────────────────────────────────────────────────────────
+// Critical for cloud deployments (AWS ALB, Cloudflare, Nginx). Without this,
+// Express only sees the load-balancer IP, so the rate limiter would lock out
+// ALL users the moment a single attacker spams the API.
+// Set to the number of reverse proxies in front of this server.
+const PROXY_COUNT = parseInt(process.env.PROXY_COUNT || "0", 10);
+if (PROXY_COUNT > 0) {
+  app.set("trust proxy", PROXY_COUNT);
+}
+
 app.use(cors());
 app.use(express.json());
+
+// ─── Rate Limiters ───────────────────────────────────────────────────────────
+// Global baseline limiter — broad protection against bots/scrapers.
+// 200 requests per 15 minutes per IP across all routes.
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 200,
+  standardHeaders: "draft-7", // Sends `RateLimit-*` headers (RFC-compliant)
+  legacyHeaders: false,
+  message: {
+    error: "Too many requests. Please slow down and try again later.",
+  },
+});
+
+// Upload limiter — uploading triggers PyPDF parsing + FAISS embedding which
+// is very expensive on CPU/GPU. Limit to 10 uploads per hour per IP.
+const uploadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: parseInt(process.env.RATE_LIMIT_UPLOAD_MAX || "10", 10),
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: {
+    error: "Upload limit reached. You can upload up to 10 PDFs per hour. Please try again later.",
+  },
+});
+
+// Inference limiter — /ask and /summarize hit the LLM inference pipeline.
+// Even a handful of concurrent requests can saturate the GPU.
+// 30 requests per 5 minutes per IP.
+const inferenceLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000, // 5 minutes
+  max: parseInt(process.env.RATE_LIMIT_INFERENCE_MAX || "30", 10),
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: {
+    error: "Inference limit reached. Please wait a few minutes before asking more questions.",
+  },
+});
+
+// Apply global limiter to every route
+app.use(globalLimiter);
 
 const MAX_PDF_SIZE_BYTES = 20 * 1024 * 1024;
 const UPLOADS_DIR = path.resolve("uploads");
@@ -127,7 +180,7 @@ const summarizeSchema = {
   }
 };
 
-app.post("/upload", upload.single("file"), async (req, res) => {
+app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
   const uploadedFilePath = req.file?.path;
   const absoluteFilePath = uploadedFilePath
     ? path.resolve(uploadedFilePath)
@@ -181,7 +234,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-app.post("/ask", async (req, res) => {
+app.post("/ask", inferenceLimiter, async (req, res) => {
   const validation = askSchema.safeParse(req.body);
 
   if (!validation.success) {
@@ -214,7 +267,7 @@ app.post("/ask", async (req, res) => {
   }
 });
 
-app.post("/summarize", async (req, res) => {
+app.post("/summarize", inferenceLimiter, async (req, res) => {
   const validation = summarizeSchema.safeParse(req.body);
 
   if (!validation.success) {

@@ -78,6 +78,8 @@ logging.basicConfig(
 # Configurable session TTL and max cap
 SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "30"))
 MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "100"))
+MAX_DOCUMENTS_PER_SESSION = int(os.getenv("MAX_DOCUMENTS_PER_SESSION", "5"))
+MAX_CHUNKS_PER_SESSION = int(os.getenv("MAX_CHUNKS_PER_SESSION", "2000"))
 ASK_RETRIEVAL_CANDIDATES = int(os.getenv("ASK_RETRIEVAL_CANDIDATES", "12"))
 ASK_MAX_CONTEXT_CHUNKS = int(os.getenv("ASK_MAX_CONTEXT_CHUNKS", "6"))
 ASK_CHUNKS_PER_DOCUMENT = int(os.getenv("ASK_CHUNKS_PER_DOCUMENT", "2"))
@@ -816,8 +818,13 @@ def process_pdf(data: PDFPath):
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF documents are supported.")
 
-    if requested_session_id and not validate_existing_session(requested_session_id):
-        raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+    if requested_session_id:
+        with sessions_lock:
+            session = _touch_session_unlocked(requested_session_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+            if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
+                raise HTTPException(status_code=400, detail="Maximum number of documents per session reached.")
 
     logger.info(
         "Processing PDF filename=%s existing_session=%s",
@@ -840,6 +847,14 @@ def process_pdf(data: PDFPath):
 
     if not chunks:
         raise HTTPException(status_code=400, detail="No text chunks generated from the PDF. Please check your file.")
+
+    if requested_session_id:
+        with sessions_lock:
+            session = _touch_session_unlocked(requested_session_id)
+            if session:
+                current_chunks = sum(doc.get("chunk_count", 0) for doc in session.get("documents", []))
+                if current_chunks + len(chunks) > MAX_CHUNKS_PER_SESSION:
+                    raise HTTPException(status_code=400, detail="Maximum number of chunks per session exceeded.")
 
     document_id = str(uuid.uuid4())
     now = now_ts()

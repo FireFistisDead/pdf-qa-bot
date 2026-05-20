@@ -11,6 +11,7 @@
   "scripts": {
 
     "test": "node --test server.test.js",
+
     "build": "npm --prefix frontend run build"
 
   },
@@ -30,6 +31,8 @@
     "cors": "^2.8.5",
 
     "express": "^5.1.0",
+
+    "express-rate-limit": "^8.5.2",
 
     "multer": "^2.0.2",
 
