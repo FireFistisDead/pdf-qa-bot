@@ -11,6 +11,7 @@ const ChatPanel = ({
   darkMode,
   currentChat,
   selectedPdf,
+  currentPdfName,
   currentPdfSessionId,
   onAppendMessage,
 }) => {
@@ -76,7 +77,7 @@ const ChatPanel = ({
     const loadingToast = toast.loading("Summarizing PDF...");
 
     try {
-      const data = await summarizePdfApi(selectedPdf, currentPdfSessionId);
+      const data = await summarizePdfApi(currentPdfName, currentPdfSessionId);
       onAppendMessage({ role: "bot", text: data.summary });
       toast.success("PDF summarized successfully!", {
         id: loadingToast,
@@ -165,7 +166,7 @@ const ChatPanel = ({
               )}
             </Button>
 
-            <ExportMenu currentChat={currentChat} selectedPdf={selectedPdf} />
+            <ExportMenu currentChat={currentChat} selectedPdfName={currentPdfName} />
           </div>
         </div>
 
