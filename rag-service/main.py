@@ -32,6 +32,15 @@ load_dotenv()
 app = FastAPI()
 
 
+def standard_error_response(status_code: int, detail: str, **extra):
+    payload = {
+        "error": detail,
+        "detail": detail,
+        **extra,
+    }
+    return JSONResponse(status_code=status_code, content=payload)
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     errors = [
@@ -39,19 +48,21 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         for err in exc.errors()
     ]
     logger.warning("Request validation failed path=%s errors=%s", request.url.path, errors)
-    return JSONResponse(
-        status_code=422,
-        content={"error": "Validation failed", "details": errors},
-    )
+    return standard_error_response(422, "Validation failed", details=errors)
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    detail = exc.detail
+    if not isinstance(detail, str):
+        detail = str(detail)
+    return standard_error_response(exc.status_code, detail)
 
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     print(f"Unhandled exception: {exc}")
-    return JSONResponse(
-        status_code=500,
-        content={"error": "Internal server error. Please try again later."},
-    )
+    return standard_error_response(500, "Internal server error. Please try again later.")
 
 
 # Session storage with metadata and thread safety

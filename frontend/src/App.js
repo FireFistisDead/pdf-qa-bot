@@ -8,7 +8,7 @@ import PdfViewer from "./components/PdfViewer/PdfViewer";
 import ChatPanel from "./components/ChatPanel/ChatPanel";
 import toast, { Toaster } from "react-hot-toast";
 
-import { uploadPdfApi } from "./services/api";
+import { extractApiErrorMessage, uploadPdfApi } from "./services/api";
 
 pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
 
@@ -56,7 +56,7 @@ function App() {
         },
       ]);
 
-      setSelectedPdf(file.name);
+      setSelectedPdf(data.session_id);
       toast.success("PDF uploaded successfully!", {
         id: loadingToast,
       });
@@ -73,8 +73,8 @@ function App() {
         message = "File too large. Please choose a file under 20MB.";
       } else if (e.response?.status === 500) {
         message = "Server error. Please try again later.";
-      } else if (e.response?.data?.error) {
-        message = e.response.data.error;
+      } else {
+        message = extractApiErrorMessage(e, message);
       }
 
       toast.error(message, {
@@ -88,7 +88,7 @@ function App() {
   const handleAppendMessage = (message) => {
     setPdfs((prev) =>
       prev.map((pdf) =>
-        pdf.name === selectedPdf
+        pdf.session_id === selectedPdf
           ? { ...pdf, chat: [...pdf.chat, message] }
           : pdf,
       ),
@@ -97,10 +97,11 @@ function App() {
 
   const themeClass = darkMode ? "bg-dark text-light" : "bg-light text-dark";
 
-  const currentPdf = pdfs.find((pdf) => pdf.name === selectedPdf);
+  const currentPdf = pdfs.find((pdf) => pdf.session_id === selectedPdf);
   const currentChat = currentPdf?.chat || [];
   const currentPdfUrl = currentPdf?.url || null;
   const currentPdfSessionId = currentPdf?.session_id || null;
+  const currentPdfName = currentPdf?.name || null;
 
   return (
     <>
@@ -161,6 +162,7 @@ function App() {
                     darkMode={darkMode}
                     currentChat={currentChat}
                     selectedPdf={selectedPdf}
+                    currentPdfName={currentPdfName}
                     currentPdfSessionId={currentPdfSessionId}
                     onAppendMessage={handleAppendMessage}
                   />
