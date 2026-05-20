@@ -78,6 +78,8 @@ logging.basicConfig(
 # Configurable session TTL and max cap
 SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "30"))
 MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "100"))
+MAX_DOCUMENTS_PER_SESSION = int(os.getenv("MAX_DOCUMENTS_PER_SESSION", "5"))
+MAX_CHUNKS_PER_SESSION = int(os.getenv("MAX_CHUNKS_PER_SESSION", "2000"))
 ASK_RETRIEVAL_CANDIDATES = int(os.getenv("ASK_RETRIEVAL_CANDIDATES", "12"))
 ASK_MAX_CONTEXT_CHUNKS = int(os.getenv("ASK_MAX_CONTEXT_CHUNKS", "6"))
 ASK_CHUNKS_PER_DOCUMENT = int(os.getenv("ASK_CHUNKS_PER_DOCUMENT", "2"))
@@ -164,6 +166,25 @@ def _touch_session_unlocked(session_id: str):
         logger.info("Session expired session_id=%s", session_id)
         return None
     meta["last_accessed"] = now_ts()
+    return meta
+
+
+def _peek_session_unlocked(session_id: str):
+    """Read session metadata without refreshing last_accessed.
+
+    Use this for validation and quota checks where we must not side-effect the
+    TTL. An attacker who is rejected at the quota boundary should NOT be able
+    to keep an at-cap session alive by spamming the error response.
+    Only call _touch_session_unlocked once all checks pass and the operation
+    is actually going to succeed.
+    """
+    meta = sessions.get(session_id)
+    if not meta:
+        return None
+    if _is_session_expired(meta):
+        del sessions[session_id]
+        logger.info("Session expired session_id=%s", session_id)
+        return None
     return meta
 
 
@@ -816,8 +837,28 @@ def process_pdf(data: PDFPath):
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF documents are supported.")
 
-    if requested_session_id and not validate_existing_session(requested_session_id):
-        raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+    # ─── Quota pre-flight checks ──────────────────────────────────────────────────
+    # We intentionally use _peek_session_unlocked (read-only, no TTL refresh)
+    # for all quota rejections. _touch_session_unlocked is only called later
+    # inside the merge block, after every check has passed. This prevents an
+    # attacker from spamming quota errors to keep an at-cap session alive
+    # indefinitely and avoid its 30-minute TTL expiry.
+
+    if requested_session_id:
+        with sessions_lock:
+            session = _peek_session_unlocked(requested_session_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+            if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
+                raise HTTPException(status_code=400, detail="Maximum number of documents per session reached.")
+    else:
+        # New session: still enforce the per-session chunk ceiling so a single
+        # enormous PDF cannot create an unbounded FAISS index in one shot.
+        if len(chunks) > MAX_CHUNKS_PER_SESSION:
+            raise HTTPException(
+                status_code=400,
+                detail=f"PDF is too large to index. A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks.",
+            )
 
     logger.info(
         "Processing PDF filename=%s existing_session=%s",
@@ -840,6 +881,14 @@ def process_pdf(data: PDFPath):
 
     if not chunks:
         raise HTTPException(status_code=400, detail="No text chunks generated from the PDF. Please check your file.")
+
+    if requested_session_id:
+        with sessions_lock:
+            session = _peek_session_unlocked(requested_session_id)
+            if session:
+                current_chunks = sum(doc.get("chunk_count", 0) for doc in session.get("documents", []))
+                if current_chunks + len(chunks) > MAX_CHUNKS_PER_SESSION:
+                    raise HTTPException(status_code=400, detail="Maximum number of chunks per session exceeded.")
 
     document_id = str(uuid.uuid4())
     now = now_ts()
