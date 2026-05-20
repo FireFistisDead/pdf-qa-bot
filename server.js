@@ -6,6 +6,7 @@ const fs = require("fs");
 const fsPromises = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
+const { askSchema, summarizeSchema } = require("./validators/schemas");
 const { rateLimit } = require("express-rate-limit");
 const slowDown = require("express-slow-down");
 const helmet = require("helmet");
@@ -283,7 +284,7 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
       return sendUploadError(
         res,
         400,
-        "No file uploaded. Use form field name 'file'."
+        "No file uploaded. Use form field name 'file'.",
       );
     }
 
@@ -330,7 +331,8 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
 
   if (!validation.success) {
     return res.status(400).json({
-      error: validation.error.message,
+      error: "Validation failed",
+      details: validation.error.flatten(),
     });
   }
 
@@ -363,14 +365,15 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
 
   if (!validation.success) {
     return res.status(400).json({
-      error: validation.error.message,
+      error: "Validation failed",
+      details: validation.error.flatten(),
     });
   }
 
   try {
     const response = await axios.post(
       `${RAG_SERVICE_URL}/summarize`,
-      validation.data
+      validation.data,
     );
 
     return res.json({
