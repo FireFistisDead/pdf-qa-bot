@@ -89,37 +89,42 @@ const validateSessionId = (sessionId) => {
   return null;
 };
 
-const validateAskBody = (body) => {
-  const question =
-    typeof body?.question === "string" ? body.question.trim() : "";
-  if (!question) {
-    return { error: "Question is required." };
-  }
+const askSchema = {
+  safeParse: (body) => {
+    const question = typeof body?.question === "string" ? body.question.trim() : "";
+    if (!question) {
+      return { success: false, error: new Error("Question is required.") };
+    }
 
-  const sessionError = validateSessionId(body?.session_id);
-  if (sessionError) {
-    return { error: sessionError };
-  }
+    const sessionError = validateSessionId(body?.session_id);
+    if (sessionError) {
+      return { success: false, error: new Error(sessionError) };
+    }
 
-  return {
-    value: {
-      question,
-      session_id: body.session_id,
-    },
-  };
+    return {
+      success: true,
+      data: {
+        question,
+        session_id: body.session_id,
+      },
+    };
+  }
 };
 
-const validateSummarizeBody = (body) => {
-  const sessionError = validateSessionId(body?.session_id);
-  if (sessionError) {
-    return { error: sessionError };
-  }
+const summarizeSchema = {
+  safeParse: (body) => {
+    const sessionError = validateSessionId(body?.session_id);
+    if (sessionError) {
+      return { success: false, error: new Error(sessionError) };
+    }
 
-  return {
-    value: {
-      session_id: body.session_id,
-    },
-  };
+    return {
+      success: true,
+      data: {
+        session_id: body.session_id,
+      },
+    };
+  }
 };
 
 app.post("/upload", upload.single("file"), async (req, res) => {
@@ -134,7 +139,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       return sendUploadError(
         res,
         400,
-        "No PDF uploaded. Please choose a PDF file and try again.",
+        "No file uploaded. Use form field name 'file'."
       );
     }
 
@@ -177,15 +182,15 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 });
 
 app.post("/ask", async (req, res) => {
-  const validation = validateAskBody(req.body);
+  const validation = askSchema.safeParse(req.body);
 
-  if (validation.error) {
+  if (!validation.success) {
     return res.status(400).json({
-      error: validation.error,
+      error: validation.error.message,
     });
   }
 
-  const { question, session_id } = validation.value;
+  const { question, session_id } = validation.data;
 
   try {
     const response = await axios.post(`${RAG_SERVICE_URL}/ask`, {
@@ -210,18 +215,18 @@ app.post("/ask", async (req, res) => {
 });
 
 app.post("/summarize", async (req, res) => {
-  const validation = validateSummarizeBody(req.body);
+  const validation = summarizeSchema.safeParse(req.body);
 
-  if (validation.error) {
+  if (!validation.success) {
     return res.status(400).json({
-      error: validation.error,
+      error: validation.error.message,
     });
   }
 
   try {
     const response = await axios.post(
       `${RAG_SERVICE_URL}/summarize`,
-      validation.value,
+      validation.data
     );
 
     return res.json({
@@ -237,6 +242,10 @@ app.post("/summarize", async (req, res) => {
       details: isDevelopment ? details : "Internal processing error",
     });
   }
+});
+
+app.use((req, res, next) => {
+  res.status(404).json({ error: "Not found" });
 });
 
 app.use((err, req, res, next) => {
