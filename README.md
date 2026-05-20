@@ -441,3 +441,32 @@ We’d love to hear from you — whether you’re setting up the project for the
 ## License
 
 See repository license files and package metadata where applicable. Third-party models are subject to their respective Hugging Face model cards and licenses.
+
+## 🏗️ Architecture Diagram
+
+```mermaid
+flowchart TD
+    A[👤 User] -->|Upload PDF| B[React Frontend :3000]
+    B -->|POST /upload| C[Express API Gateway :4000]
+    C -->|POST /process-pdf| D[FastAPI RAG Service :5000]
+    D -->|Parse & Chunk| E[LangChain PDF Loader]
+    E -->|Embed chunks| F[HuggingFace MiniLM-L6-v2]
+    F -->|Store vectors| G[(FAISS Index)]
+    
+    A -->|Ask Question| B
+    B -->|POST /ask| C
+    C -->|POST /ask + session_id| D
+    D -->|Semantic Search| G
+    G -->|Top-k chunks| H[HuggingFace flan-t5-base]
+    H -->|Generated Answer| D
+    D -->|Answer| C
+    C -->|Answer| B
+    B -->|Display Answer| A
+```
+
+## 👥 Contributors
+
+Thanks to all our amazing contributors! This section updates automatically.
+
+[![Contributors](https://contrib.rocks/image?repo=FireFistisDead/pdf-qa-bot)](https://github.com/FireFistisDead/pdf-qa-bot/graphs/contributors)
+
