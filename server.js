@@ -112,14 +112,15 @@ const globalLimiter = rateLimit({
   },
 });
 
-// Upload limiter — PyPDF parsing + FAISS embedding is very expensive on CPU/GPU.
+// Hard cap: configured uploads / hour per IP. Tripping this triggers the ban system.
+const uploadLimitMax = parseInt(process.env.RATE_LIMIT_UPLOAD_MAX || "10", 10);
 // Hard cap: 10 uploads / hour per IP. Tripping this triggers the ban system.
 const uploadLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
+  max: uploadLimitMax,
   max: parseInt(process.env.RATE_LIMIT_UPLOAD_MAX || "10", 10),
   standardHeaders: "draft-7",
   legacyHeaders: false,
-  handler: (req, res) => {
+    res.locals.rateLimitMessage = `Upload limit reached. You can upload up to ${uploadLimitMax} PDFs per hour. Please try again later.`;
     res.locals.rateLimitMessage = "Upload limit reached. You can upload up to 10 PDFs per hour. Please try again later.";
     rateLimitHandler(req, res);
   },
