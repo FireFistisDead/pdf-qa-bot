@@ -8,7 +8,7 @@ import PdfViewer from "./components/PdfViewer/PdfViewer";
 import ChatPanel from "./components/ChatPanel/ChatPanel";
 import toast, { Toaster } from "react-hot-toast";
 
-import { uploadPdfApi } from "./services/api";
+import { extractApiErrorMessage, uploadPdfApi } from "./services/api";
 
 pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
 
@@ -73,8 +73,8 @@ function App() {
         message = "File too large. Please choose a file under 20MB.";
       } else if (e.response?.status === 500) {
         message = "Server error. Please try again later.";
-      } else if (e.response?.data?.error) {
-        message = e.response.data.error;
+      } else {
+        message = extractApiErrorMessage(e, message);
       }
 
       toast.error(message, {
