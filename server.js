@@ -6,7 +6,6 @@ const fs = require("fs");
 const fsPromises = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
-const { askSchema, summarizeSchema } = require("./validators/schemas");
 const { rateLimit } = require("express-rate-limit");
 const slowDown = require("express-slow-down");
 const helmet = require("helmet");
@@ -115,14 +114,13 @@ const globalLimiter = rateLimit({
 
 // Hard cap: configured uploads / hour per IP. Tripping this triggers the ban system.
 const uploadLimitMax = parseInt(process.env.RATE_LIMIT_UPLOAD_MAX || "10", 10);
-// Hard cap: 10 uploads / hour per IP. Tripping this triggers the ban system.
 const uploadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
   max: uploadLimitMax,
-  max: parseInt(process.env.RATE_LIMIT_UPLOAD_MAX || "10", 10),
   standardHeaders: "draft-7",
   legacyHeaders: false,
+  handler: (req, res) => {
     res.locals.rateLimitMessage = `Upload limit reached. You can upload up to ${uploadLimitMax} PDFs per hour. Please try again later.`;
-    res.locals.rateLimitMessage = "Upload limit reached. You can upload up to 10 PDFs per hour. Please try again later.";
     rateLimitHandler(req, res);
   },
 });
@@ -234,16 +232,30 @@ const validateSessionId = (sessionId) => {
   return null;
 };
 
+class ZodLikeError extends Error {
+  constructor(message, field) {
+    super(message);
+    this.field = field;
+  }
+  flatten() {
+    return {
+      fieldErrors: {
+        [this.field]: [this.message]
+      }
+    };
+  }
+}
+
 const askSchema = {
   safeParse: (body) => {
     const question = typeof body?.question === "string" ? body.question.trim() : "";
     if (!question) {
-      return { success: false, error: new Error("Question is required.") };
+      return { success: false, error: new ZodLikeError("Question is required.", "question") };
     }
 
     const sessionError = validateSessionId(body?.session_id);
     if (sessionError) {
-      return { success: false, error: new Error(sessionError) };
+      return { success: false, error: new ZodLikeError(sessionError, "session_id") };
     }
 
     return {
@@ -260,7 +272,7 @@ const summarizeSchema = {
   safeParse: (body) => {
     const sessionError = validateSessionId(body?.session_id);
     if (sessionError) {
-      return { success: false, error: new Error(sessionError) };
+      return { success: false, error: new ZodLikeError(sessionError, "session_id") };
     }
 
     return {
