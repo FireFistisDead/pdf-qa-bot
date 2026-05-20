@@ -61,12 +61,16 @@ const recordOffence = (ip) => {
 };
 
 // Purge expired bans every 10 minutes so the Map doesn't grow forever.
-setInterval(() => {
+const banCleanupInterval = setInterval(() => {
   const now = Date.now();
   for (const [ip, ban] of bannedIPs.entries()) {
     if (ban.until <= now) bannedIPs.delete(ip);
   }
 }, 10 * 60 * 1000);
+
+if (typeof banCleanupInterval.unref === "function") {
+  banCleanupInterval.unref();
+}
 
 // Ban-check middleware — runs before every route.
 const banGuard = (req, res, next) => {
