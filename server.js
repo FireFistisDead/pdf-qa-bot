@@ -93,12 +93,12 @@ const askSchema = {
   safeParse: (body) => {
     const question = typeof body?.question === "string" ? body.question.trim() : "";
     if (!question) {
-      return { success: false, error: new Error("Validation failed") };
+      return { success: false, error: new Error("Question is required.") };
     }
 
     const sessionError = validateSessionId(body?.session_id);
     if (sessionError) {
-      return { success: false, error: new Error("Validation failed") };
+      return { success: false, error: new Error(sessionError) };
     }
 
     return {
@@ -115,7 +115,7 @@ const summarizeSchema = {
   safeParse: (body) => {
     const sessionError = validateSessionId(body?.session_id);
     if (sessionError) {
-      return { success: false, error: new Error("Validation failed") };
+      return { success: false, error: new Error(sessionError) };
     }
 
     return {
@@ -186,7 +186,7 @@ app.post("/ask", async (req, res) => {
 
   if (!validation.success) {
     return res.status(400).json({
-      error: "Validation failed",
+      error: validation.error.message,
     });
   }
 
@@ -219,7 +219,7 @@ app.post("/summarize", async (req, res) => {
 
   if (!validation.success) {
     return res.status(400).json({
-      error: "Validation failed",
+      error: validation.error.message,
     });
   }
 
