@@ -263,6 +263,8 @@ app.use((err, req, res, next) => {
   next();
 });
 
-app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
+}
 
 module.exports = { app, askSchema, summarizeSchema };
