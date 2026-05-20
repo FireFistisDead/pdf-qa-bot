@@ -38,8 +38,9 @@ app.use(cors());
 app.use(express.json({ limit: "16kb" }));
 
 // ─── IP Ban Registry ─────────────────────────────────────────────────────────
-// In-memory escalating ban system. Each time an IP trips a rate limiter, its
-// offence count increments and the ban window doubles (exponential back-off).
+// In-memory stepped ban system. Each time an IP trips a rate limiter, its
+// offence count increments and the ban window grows on a fixed stepped schedule
+// (not exponential/doubling — see BAN_DURATIONS_MS for the exact policy).
 // Offence 1 → 5 min ban | Offence 2 → 15 min | Offence 3+ → 1 hour
 // This is a lightweight, zero-dependency solution suitable for single-instance
 // deployments. For multi-instance cloud deployments, replace with Redis.
@@ -124,13 +125,18 @@ const uploadLimiter = rateLimit({
   },
 });
 
-// Inference slow-down — adds progressive friction BEFORE the hard block.
-// After 10 requests in 5 min, each subsequent request is delayed by +500ms
-// (capped at 5s). Legit users barely notice; attackers' throughput crumbles.
+// Inference slow-down — adds progressive friction BEFORE the hard block fires.
+// RATE_LIMIT_SLOWDOWN_AFTER (default 10): number of free requests per window.
+// After that, each extra request incurs an additional (hits - delayAfter) * 500ms
+// delay, starting at 500ms and capped at 5s. This gives a genuine linear ramp
+// instead of jumping straight to multi-second delays on the very first hit over
+// the threshold. Kept separate from RATE_LIMIT_INFERENCE_MAX so operators can
+// tune slow-down friction and hard-block quota independently.
+const SLOWDOWN_DELAY_AFTER = parseInt(process.env.RATE_LIMIT_SLOWDOWN_AFTER || "10", 10);
 const inferenceSlowDown = slowDown({
   windowMs: 5 * 60 * 1000,
-  delayAfter: parseInt(process.env.RATE_LIMIT_INFERENCE_MAX || "10", 10),
-  delayMs: (hits) => hits * 500,
+  delayAfter: SLOWDOWN_DELAY_AFTER,
+  delayMs: (hits) => (hits - SLOWDOWN_DELAY_AFTER) * 500,
   maxDelayMs: 5000,
 });
 
