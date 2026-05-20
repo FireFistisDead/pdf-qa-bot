@@ -68,6 +68,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Session storage with metadata and thread safety
 sessions = {}
 sessions_lock = threading.Lock()
+model_load_lock = threading.Lock()
 logger = logging.getLogger("pdf_qa_rag")
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -792,19 +793,29 @@ def load_generation_model():
     if generation_model is not None and generation_tokenizer is not None:
         return generation_tokenizer, generation_model, generation_is_encoder_decoder
 
-    config = AutoConfig.from_pretrained(HF_GENERATION_MODEL)
-    generation_is_encoder_decoder = bool(getattr(config, "is_encoder_decoder", False))
-    generation_tokenizer = AutoTokenizer.from_pretrained(HF_GENERATION_MODEL)
+    logger.info("Acquiring model load lock")
 
-    if generation_is_encoder_decoder:
-        generation_model = AutoModelForSeq2SeqLM.from_pretrained(HF_GENERATION_MODEL)
-    else:
-        generation_model = AutoModelForCausalLM.from_pretrained(HF_GENERATION_MODEL)
+    with model_load_lock:
+        if generation_model is not None and generation_tokenizer is not None:
+            return generation_tokenizer, generation_model, generation_is_encoder_decoder
 
-    if torch.cuda.is_available():
-        generation_model = generation_model.to("cuda")
+        logger.info("Loading generation model")
 
-    generation_model.eval()
+        config = AutoConfig.from_pretrained(HF_GENERATION_MODEL)
+        generation_is_encoder_decoder = bool(getattr(config, "is_encoder_decoder", False))
+        generation_tokenizer = AutoTokenizer.from_pretrained(HF_GENERATION_MODEL)
+
+        if generation_is_encoder_decoder:
+            generation_model = AutoModelForSeq2SeqLM.from_pretrained(HF_GENERATION_MODEL)
+        else:
+            generation_model = AutoModelForCausalLM.from_pretrained(HF_GENERATION_MODEL)
+
+        if torch.cuda.is_available():
+            generation_model = generation_model.to("cuda")
+
+        generation_model.eval()
+        logger.info("Generation model loaded successfully")
+
     return generation_tokenizer, generation_model, generation_is_encoder_decoder
 
 
