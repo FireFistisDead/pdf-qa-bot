@@ -10,7 +10,7 @@
 
   "scripts": {
 
-    "test": "node --test server.test.js"
+    "test": "node --test server.test.js",
     "build": "npm --prefix frontend run build"
 
   },
@@ -32,6 +32,8 @@
     "express": "^5.1.0",
 
     "multer": "^2.0.2",
+
+    "zod": "^3.24.4",
 
     "react-hot-toast": "^2.6.0"
 

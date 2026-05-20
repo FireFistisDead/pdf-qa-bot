@@ -6,6 +6,7 @@ const fs = require("fs");
 const fsPromises = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
+const { z } = require("zod");
 
 const app = express();
 app.use(cors());
@@ -68,48 +69,40 @@ const extractServiceDetails = (err) => {
   return upstreamDetails?.detail || upstreamDetails?.error || upstreamDetails || err.message;
 };
 
-const uuidPattern =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const askSchema = z.object({
+  question: z.string().trim().min(1, "Question is required."),
+  session_id: z.string().uuid("Invalid session ID format."),
+});
 
-const validateSessionId = (sessionId) => {
-  if (!sessionId || typeof sessionId !== "string") {
-    return "session_id is required.";
-  }
-  if (!uuidPattern.test(sessionId)) {
-    return "Invalid session ID format.";
-  }
-  return null;
-};
+const summarizeSchema = z.object({
+  session_id: z.string().uuid("Invalid session ID format."),
+});
 
 const validateAskBody = (body) => {
-  const question = typeof body?.question === "string" ? body.question.trim() : "";
-  if (!question) {
-    return { error: "Question is required." };
-  }
+  const result = askSchema.safeParse(body);
 
-  const sessionError = validateSessionId(body?.session_id);
-  if (sessionError) {
-    return { error: sessionError };
+  if (!result.success) {
+    return {
+      error: "Validation failed",
+    };
   }
 
   return {
-    value: {
-      question,
-      session_id: body.session_id,
-    },
+    value: result.data,
   };
 };
 
 const validateSummarizeBody = (body) => {
-  const sessionError = validateSessionId(body?.session_id);
-  if (sessionError) {
-    return { error: sessionError };
+  const result = summarizeSchema.safeParse(body);
+
+  if (!result.success) {
+    return {
+      error: "Validation failed",
+    };
   }
 
   return {
-    value: {
-      session_id: body.session_id,
-    },
+    value: result.data,
   };
 };
 
@@ -123,7 +116,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       return sendUploadError(
         res,
         400,
-        "No PDF uploaded. Please choose a PDF file and try again."
+        "No file uploaded. Use form field name 'file'."
       );
     }
 
