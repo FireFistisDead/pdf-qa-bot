@@ -7,6 +7,9 @@ const fsPromises = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
 
+const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
+const PORT = process.env.PORT || 4000;
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -65,7 +68,12 @@ const sendUploadError = (res, statusCode, message, details = message) => {
 
 const extractServiceDetails = (err) => {
   const upstreamDetails = err.response?.data;
-  return upstreamDetails?.detail || upstreamDetails?.error || upstreamDetails || err.message;
+  return (
+    upstreamDetails?.detail ||
+    upstreamDetails?.error ||
+    upstreamDetails ||
+    err.message
+  );
 };
 
 const uuidPattern =
@@ -82,7 +90,8 @@ const validateSessionId = (sessionId) => {
 };
 
 const validateAskBody = (body) => {
-  const question = typeof body?.question === "string" ? body.question.trim() : "";
+  const question =
+    typeof body?.question === "string" ? body.question.trim() : "";
   if (!question) {
     return { error: "Question is required." };
   }
@@ -115,7 +124,9 @@ const validateSummarizeBody = (body) => {
 
 app.post("/upload", upload.single("file"), async (req, res) => {
   const uploadedFilePath = req.file?.path;
-  const absoluteFilePath = uploadedFilePath ? path.resolve(uploadedFilePath) : null;
+  const absoluteFilePath = uploadedFilePath
+    ? path.resolve(uploadedFilePath)
+    : null;
   const sessionId = req.body?.session_id || null;
 
   try {
@@ -123,7 +134,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       return sendUploadError(
         res,
         400,
-        "No PDF uploaded. Please choose a PDF file and try again."
+        "No PDF uploaded. Please choose a PDF file and try again.",
       );
     }
 
@@ -132,11 +143,11 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       return sendUploadError(
         res,
         400,
-        "Uploaded PDF is empty. Please choose a valid PDF file."
+        "Uploaded PDF is empty. Please choose a valid PDF file.",
       );
     }
 
-    const response = await axios.post("http://localhost:5000/process-pdf", {
+    const response = await axios.post(`${RAG_SERVICE_URL}/process-pdf`, {
       filePath: absoluteFilePath,
       filename: req.file.originalname,
       session_id: sessionId,
@@ -153,7 +164,8 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   } catch (err) {
     await cleanupFile(uploadedFilePath);
 
-    const statusCode = err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
+    const statusCode =
+      err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
     const details = extractServiceDetails(err);
     console.error("Upload processing failed:", details);
 
@@ -176,7 +188,7 @@ app.post("/ask", async (req, res) => {
   const { question, session_id } = validation.value;
 
   try {
-    const response = await axios.post("http://localhost:5000/ask", {
+    const response = await axios.post(`${RAG_SERVICE_URL}/ask`, {
       question,
       session_id,
     });
@@ -208,8 +220,8 @@ app.post("/summarize", async (req, res) => {
 
   try {
     const response = await axios.post(
-      "http://localhost:5000/summarize",
-      validation.value
+      `${RAG_SERVICE_URL}/summarize`,
+      validation.value,
     );
 
     return res.json({
@@ -252,7 +264,7 @@ app.use((err, req, res, next) => {
 });
 
 if (require.main === module) {
-  app.listen(4000, () => console.log("Backend running on http://localhost:4000"));
+  app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
 }
 
 module.exports = { app, askSchema, summarizeSchema };
