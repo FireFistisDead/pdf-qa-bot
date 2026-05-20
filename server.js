@@ -14,6 +14,7 @@ app.use(express.json());
 const MAX_PDF_SIZE_BYTES = 20 * 1024 * 1024;
 const UPLOADS_DIR = path.resolve("uploads");
 const isDevelopment = process.env.NODE_ENV !== "production";
+const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
 
 if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -136,7 +137,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       );
     }
 
-    const response = await axios.post("http://localhost:5000/process-pdf", {
+    const response = await axios.post(`${RAG_SERVICE_URL}/process-pdf`, {
       filePath: absoluteFilePath,
       filename: req.file.originalname,
       session_id: sessionId,
@@ -176,7 +177,7 @@ app.post("/ask", async (req, res) => {
   const { question, session_id } = validation.value;
 
   try {
-    const response = await axios.post("http://localhost:5000/ask", {
+    const response = await axios.post(`${RAG_SERVICE_URL}/ask`, {
       question,
       session_id,
     });
@@ -208,7 +209,7 @@ app.post("/summarize", async (req, res) => {
 
   try {
     const response = await axios.post(
-      "http://localhost:5000/summarize",
+      `${RAG_SERVICE_URL}/summarize`,
       validation.value
     );
 
@@ -255,4 +256,4 @@ if (require.main === module) {
   app.listen(4000, () => console.log("Backend running on http://localhost:4000"));
 }
 
-module.exports = { app, askSchema, summarizeSchema };
+module.exports = { app };
