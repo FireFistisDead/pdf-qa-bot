@@ -196,6 +196,10 @@ app.post("/summarize", async (req, res) => {
   }
 });
 
+app.use((req, res, next) => {
+  res.status(404).json({ error: "Not found" });
+});
+
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
     const statusCode = err.code === "LIMIT_FILE_SIZE" ? 413 : 400;
