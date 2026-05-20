@@ -4,69 +4,71 @@ const http = require("node:http");
 
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
-let app, askSchema, summarizeSchema;
+let app, validateAskBody, validateSummarizeBody;
 test("module loads without error", () => {
   const mod = require("./server.js");
   app = mod.app;
-  askSchema = mod.askSchema;
-  summarizeSchema = mod.summarizeSchema;
+  validateAskBody = mod.validateAskBody;
+  validateSummarizeBody = mod.validateSummarizeBody;
 
   assert.ok(typeof app === "function", "app should be an Express app");
-  assert.ok(typeof askSchema.safeParse === "function", "askSchema should be a Zod schema");
-  assert.ok(typeof summarizeSchema.safeParse === "function", "summarizeSchema should be a Zod schema");
+  assert.ok(typeof validateAskBody === "function", "validateAskBody should be a function");
+  assert.ok(typeof validateSummarizeBody === "function", "validateSummarizeBody should be a function");
 });
 
-describe("askSchema validation", () => {
+describe("validateAskBody validation", () => {
   test("accepts valid input", () => {
-    const result = askSchema.safeParse({
+    const result = validateAskBody({
       question: "What is this PDF about?",
       session_id: "550e8400-e29b-41d4-a716-446655440000",
     });
-    assert.equal(result.success, true);
+    assert.ok(result.value !== undefined, "Expected value to be populated");
+    assert.strictEqual(result.error, undefined);
   });
 
   test("rejects empty question", () => {
-    const result = askSchema.safeParse({
+    const result = validateAskBody({
       question: "",
       session_id: "550e8400-e29b-41d4-a716-446655440000",
     });
-    assert.equal(result.success, false);
+    assert.strictEqual(result.error, "Question is required.");
   });
 
   test("rejects missing session_id", () => {
-    const result = askSchema.safeParse({
+    const result = validateAskBody({
       question: "What is this PDF about?",
     });
-    assert.equal(result.success, false);
+    assert.strictEqual(result.error, "session_id is required.");
   });
 
   test("rejects non-UUID session_id", () => {
-    const result = askSchema.safeParse({
+    const result = validateAskBody({
       question: "What is this PDF about?",
       session_id: "not-a-uuid",
     });
-    assert.equal(result.success, false);
+    assert.strictEqual(result.error, "Invalid session ID format.");
   });
 });
 
-describe("summarizeSchema validation", () => {
+describe("validateSummarizeBody validation", () => {
   test("accepts valid input", () => {
-    const result = summarizeSchema.safeParse({
+    const result = validateSummarizeBody({
       session_id: "550e8400-e29b-41d4-a716-446655440000",
     });
-    assert.equal(result.success, true);
+    assert.ok(result.value !== undefined, "Expected value to be populated");
+    assert.strictEqual(result.error, undefined);
   });
 
   test("rejects missing session_id", () => {
-    const result = summarizeSchema.safeParse({});
-    assert.equal(result.success, false);
+    const result = validateSummarizeBody({});
+    assert.strictEqual(result.error, "session_id is required.");
   });
 
   test("rejects empty session_id", () => {
-    const result = summarizeSchema.safeParse({
+    const result = validateSummarizeBody({
       session_id: "",
     });
-    assert.equal(result.success, false);
+    assert.strictEqual(result.error, "session_id is required.");
   });
 });
 
@@ -97,7 +99,7 @@ describe("route error responses", () => {
     });
     assert.equal(res.status, 400);
     const data = await res.json();
-    assert.equal(data.error, "Validation failed");
+    assert.equal(data.error, "Question is required.");
   });
 
   test("POST /ask with invalid session_id returns 400", async () => {
@@ -108,7 +110,7 @@ describe("route error responses", () => {
     });
     assert.equal(res.status, 400);
     const data = await res.json();
-    assert.equal(data.error, "Validation failed");
+    assert.equal(data.error, "Invalid session ID format.");
   });
 
   test("POST /summarize with empty body returns 400", async () => {
@@ -119,7 +121,7 @@ describe("route error responses", () => {
     });
     assert.equal(res.status, 400);
     const data = await res.json();
-    assert.equal(data.error, "Validation failed");
+    assert.equal(data.error, "session_id is required.");
   });
 
   test("POST /summarize with missing session_id returns 400", async () => {
@@ -130,7 +132,7 @@ describe("route error responses", () => {
     });
     assert.equal(res.status, 400);
     const data = await res.json();
-    assert.equal(data.error, "Validation failed");
+    assert.equal(data.error, "session_id is required.");
   });
 
   test("POST /upload without file returns 400", async () => {
@@ -141,7 +143,7 @@ describe("route error responses", () => {
     });
     assert.equal(res.status, 400);
     const data = await res.json();
-    assert.equal(data.error, "No file uploaded. Use form field name 'file'.");
+    assert.equal(data.error, "No PDF uploaded. Please choose a PDF file and try again.");
   });
 
   test("GET unknown route returns 404", async () => {
