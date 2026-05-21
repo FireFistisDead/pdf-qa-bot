@@ -24,6 +24,7 @@ class MongoDBConnector:
     collection: str
     query: Mapping[str, Any] = field(default_factory=dict)
     projection: Optional[Mapping[str, Any]] = None
+    limit: Optional[int] = None
 
     def iter_records(self) -> Iterator[Record]:
         try:
@@ -37,6 +38,8 @@ class MongoDBConnector:
         try:
             coll = client[self.database][self.collection]
             cursor = coll.find(dict(self.query), self.projection)
+            if self.limit is not None:
+                cursor = cursor.limit(int(self.limit))
             for doc in cursor:
                 record_id = str(doc.get("_id", ""))
                 fields: Mapping[str, object] = dict(doc)
@@ -48,4 +51,3 @@ class MongoDBConnector:
                 )
         finally:
             client.close()
-

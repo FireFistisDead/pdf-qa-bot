@@ -43,6 +43,22 @@ This PR provides:
 - PDF text extraction support when a record contains a PDF blob (bytes or base64)
 - Minimal tests ensuring we can extract documents safely
 
+## Quick demo (for PR screen recording)
+
+To demonstrate **DB → PDF → RAG** end-to-end locally:
+
+1. Install deps (plus optional MongoDB client):
+   - `python -m pip install -r requirements.txt`
+   - `python -m pip install pymongo`
+2. Set env vars for your MongoDB collection:
+   - `MONGODB_URI=...`
+   - `MONGO_DB=...`
+   - `MONGO_COLLECTION=...`
+3. Run:
+   - `python scripts/demo_mongodb_pdf_rag.py`
+
+The script connects to MongoDB, extracts PDF blobs to text, chunks + embeds into FAISS, then runs a sample similarity query and prints the top match.
+
 Future work:
 - Firebase/Firestore connector (optional deps)
 - Postgres/MySQL connectors (optional deps)
