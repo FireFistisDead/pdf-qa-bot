@@ -7,6 +7,24 @@ const fsPromises = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
 
+const askSchema = {
+  type: "object",
+  properties: {
+    question: { type: "string" },
+    session_id: { type: "string" }
+  },
+  required: ["question", "session_id"]
+};
+
+const summarizeSchema = {
+  type: "object",
+  properties: {
+    pdf: { type: "string" },
+    session_id: { type: "string" }
+  },
+  required: ["pdf", "session_id"]
+};
+
 const app = express();
 app.use(cors());
 app.use(express.json());
