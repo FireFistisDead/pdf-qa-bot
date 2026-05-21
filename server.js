@@ -264,11 +264,14 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
       );
     }
 
-    const response = await axios.post(`${RAG_SERVICE_URL}/process-pdf`, {
-      filePath: absoluteFilePath,
-      filename: req.file.originalname,
-      session_id: sessionId,
-    });
+    const formData = {
+      file: fs.createReadStream(absoluteFilePath),
+    };
+    if (sessionId) {
+      formData.session_id = sessionId;
+    }
+
+    const response = await axios.postForm(`${RAG_SERVICE_URL}/process-pdf`, formData);
 
     await cleanupFile(uploadedFilePath);
 

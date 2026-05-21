@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, File, UploadFile, Form
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field, field_validator
@@ -14,6 +14,7 @@ from langchain_community.vectorstores import FAISS
 from fastapi import UploadFile, File
 import numpy as np
 import os
+import shutil
 import uuid
 import uvicorn
 import torch
@@ -786,33 +787,6 @@ def sanitize_upload_filename(client_file_path: str) -> str:
     return safe_name
 
 
-def get_trusted_upload_path(file_name: str) -> str:
-    trusted_path = os.path.join(str(UPLOADS_DIR), file_name)
-    normalized_uploads_dir = os.path.abspath(str(UPLOADS_DIR))
-    normalized_path = os.path.abspath(trusted_path)
-    if os.path.dirname(normalized_path) != normalized_uploads_dir:
-        raise ValueError("Invalid upload path.")
-    return normalized_path
-
-
-def validate_uploaded_pdf(file_path: str) -> str:
-    trusted_path = os.fspath(file_path)
-    if not trusted_path.lower().endswith(".pdf"):
-        raise ValueError("Only PDF files are allowed.")
-    # CodeQL [py/path-injection]: trusted server-constructed upload path
-    if not os.path.isfile(trusted_path):
-        raise ValueError("File does not exist or is not a valid file.")
-    # CodeQL [py/path-injection]: trusted server-constructed upload path
-    if os.path.getsize(trusted_path) == 0:
-        raise ValueError("Uploaded PDF is empty. Please choose a valid PDF file.")
-    return trusted_path
-
-
-class PDFPath(BaseModel):
-    filePath: str
-    session_id: str | None = None
-    filename: str | None = None
-
 
 class Question(BaseModel):
     question: str = Field(..., min_length=1, description="Question cannot be empty")
@@ -832,28 +806,19 @@ class SummarizeRequest(BaseModel):
 
 
 @app.post("/process-pdf")
-def process_pdf(data: PDFPath):
-    try:
-        safe_name = sanitize_upload_filename(data.filePath)
-        trusted_path = get_trusted_upload_path(safe_name)
-        upload_path = validate_uploaded_pdf(trusted_path)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-    file_path = str(upload_path)
-    requested_session_id = (data.session_id or "").strip() or None
-    filename = data.filename or upload_path.name or "uploaded.pdf"
-
+def process_pdf(
+    file: UploadFile = File(...),
+    session_id: str | None = Form(None)
+):
+    cleanup_expired_sessions()
+    
+    filename = file.filename or "uploaded.pdf"
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF documents are supported.")
 
-    # ─── Quota pre-flight checks ──────────────────────────────────────────────────
-    # We intentionally use _peek_session_unlocked (read-only, no TTL refresh)
-    # for all quota rejections. _touch_session_unlocked is only called later
-    # inside the merge block, after every check has passed. This prevents an
-    # attacker from spamming quota errors to keep an at-cap session alive
-    # indefinitely and avoid its 30-minute TTL expiry.
+    requested_session_id = (session_id or "").strip() or None
 
+    # ─── Quota pre-flight checks ──────────────────────────────────────────────────
     if requested_session_id:
         with sessions_lock:
             session = _peek_session_unlocked(requested_session_id)
@@ -861,14 +826,6 @@ def process_pdf(data: PDFPath):
                 raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
             if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
                 raise HTTPException(status_code=400, detail="Maximum number of documents per session reached.")
-    else:
-        # New session: still enforce the per-session chunk ceiling so a single
-        # enormous PDF cannot create an unbounded FAISS index in one shot.
-        if len(chunks) > MAX_CHUNKS_PER_SESSION:
-            raise HTTPException(
-                status_code=400,
-                detail=f"PDF is too large to index. A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks.",
-            )
 
     logger.info(
         "Processing PDF filename=%s existing_session=%s",
@@ -876,12 +833,28 @@ def process_pdf(data: PDFPath):
         bool(requested_session_id),
     )
 
+    temp_filename = f"temp_{uuid.uuid4().hex}.pdf"
+    temp_path = os.path.join(str(UPLOADS_DIR), temp_filename)
+    
     try:
-        loader = PyPDFLoader(file_path)
-        docs = loader.load()
-    except Exception as exc:
-        logger.warning("Failed to load PDF filename=%s error=%s", filename, exc)
-        raise HTTPException(status_code=400, detail="Unable to read this PDF. It may be corrupted or encrypted.")
+        with open(temp_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+            
+        if os.path.getsize(temp_path) == 0:
+            raise HTTPException(status_code=400, detail="Uploaded PDF is empty. Please choose a valid PDF file.")
+            
+        try:
+            loader = PyPDFLoader(temp_path)
+            docs = loader.load()
+        except Exception as exc:
+            logger.warning("Failed to load PDF filename=%s error=%s", filename, exc)
+            raise HTTPException(status_code=400, detail="Unable to read this PDF. It may be corrupted or encrypted.")
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception as e:
+                logger.error("Failed to delete temp file %s: %s", temp_path, e)
 
     if not docs:
         raise HTTPException(status_code=400, detail="No readable pages were found in the PDF.")
@@ -909,6 +882,12 @@ def process_pdf(data: PDFPath):
                 current_chunks = sum(doc.get("chunk_count", 0) for doc in session.get("documents", []))
                 if current_chunks + len(chunks) > MAX_CHUNKS_PER_SESSION:
                     raise HTTPException(status_code=400, detail="Maximum number of chunks per session exceeded.")
+    else:
+        if len(chunks) > MAX_CHUNKS_PER_SESSION:
+            raise HTTPException(
+                status_code=400,
+                detail=f"PDF is too large to index. A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks.",
+            )
 
     document_id = str(uuid.uuid4())
     now = now_ts()
