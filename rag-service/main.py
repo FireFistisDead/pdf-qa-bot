@@ -28,6 +28,12 @@ import re
 
 load_dotenv()
 
+# ── Logger (must be defined before exception handlers that use it) ─────────────
+logger = logging.getLogger("pdf_qa_rag")
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
 
 app = FastAPI()
 
@@ -69,11 +75,6 @@ async def global_exception_handler(request: Request, exc: Exception):
 sessions = {}
 sessions_lock = threading.Lock()
 generation_lock = threading.Lock()
-logger = logging.getLogger("pdf_qa_rag")
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-)
 
 # Configurable session TTL and max cap
 SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "30"))
@@ -878,6 +879,16 @@ def process_pdf(data: PDFPath):
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     chunks = splitter.split_documents(docs)
+    unique_chunks = []
+    seen_content = set()
+
+    for chunk in chunks:
+        content = chunk.page_content.strip()
+        if content not in seen_content:
+            seen_content.add(content)
+            unique_chunks.append(chunk)
+
+    chunks = unique_chunks
 
     if not chunks:
         raise HTTPException(status_code=400, detail="No text chunks generated from the PDF. Please check your file.")
