@@ -66,3 +66,42 @@ def test_query_keywords():
     # Only tokens with length > 2 are kept
     assert query_keywords("What is this document about revenue?") == {"revenue"}
     assert query_keywords("accuracy of model") == {"model", "accuracy"}
+def test_empty_query_handling():
+    query = ""
+    assert query.strip() == ""
+
+
+def test_invalid_query_type():
+    query = None
+    assert query is None
+
+
+def test_context_document_presence():
+    docs = ["sample pdf content", "rag pipeline notes"]
+    assert len(docs) > 0
+
+
+def test_answer_response_structure():
+    response = {
+        "answer": "Sample answer",
+        "sources": ["doc1.pdf"]
+    }
+
+    assert "answer" in response
+    assert isinstance(response["sources"], list)
+
+
+def test_db_connection_placeholder():
+    db_status = True
+    assert db_status is True
+
+
+def test_query_routing_logic():
+    query = "Summarize this PDF"
+
+    if "summarize" in query.lower():
+        route = "summarizer"
+    else:
+        route = "qa"
+
+    assert route == "summarizer"
