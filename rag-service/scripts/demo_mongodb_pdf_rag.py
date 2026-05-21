@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from typing import Optional
 
-from crawler.agent import CrawlerAgent
-from crawler.mongodb_connector import MongoDBConnector
+# Allow running as: `python scripts/demo_mongodb_pdf_rag.py` from the rag-service folder.
+# (When executed by path, Python puts `scripts/` on sys.path, not the project root.)
+RAG_SERVICE_ROOT = Path(__file__).resolve().parents[1]
+if str(RAG_SERVICE_ROOT) not in sys.path:
+    sys.path.insert(0, str(RAG_SERVICE_ROOT))
+
+from crawler.agent import CrawlerAgent  # noqa: E402
+from crawler.mongodb_connector import MongoDBConnector  # noqa: E402
 
 
 def _env(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -94,4 +101,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
