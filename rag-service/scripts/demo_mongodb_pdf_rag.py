@@ -5,6 +5,19 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# Load .env automatically for local demos (both repo-root and rag-service/.env).
+try:  # pragma: no cover
+    from dotenv import load_dotenv  # type: ignore
+
+    _here = Path(__file__).resolve()
+    _rag_service_root = _here.parents[1]
+    _repo_root = _rag_service_root.parent
+
+    load_dotenv(_repo_root / ".env", override=False)
+    load_dotenv(_rag_service_root / ".env", override=False)
+except Exception:
+    pass
+
 # Allow running as: `python scripts/demo_mongodb_pdf_rag.py` from the rag-service folder.
 # (When executed by path, Python puts `scripts/` on sys.path, not the project root.)
 RAG_SERVICE_ROOT = Path(__file__).resolve().parents[1]
