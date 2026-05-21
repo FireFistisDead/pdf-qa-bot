@@ -10,7 +10,7 @@ import toast, { Toaster } from "react-hot-toast";
 
 import { extractApiErrorMessage, uploadPdfApi } from "./services/api";
 
-pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+pdfjs.GlobalWorkerOptions.workerSrc = `${process.env.PUBLIC_URL}/pdf.worker.min.js`;
 
 function App() {
   const [pdfs, setPdfs] = useState([]); // {name, url, chat: [], session_id: ""}
