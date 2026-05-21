@@ -9,6 +9,7 @@ const crypto = require("crypto");
 const { rateLimit } = require("express-rate-limit");
 const slowDown = require("express-slow-down");
 const helmet = require("helmet");
+const { askSchema, summarizeSchema } = require("./validators/schemas");
 
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
 const PORT = process.env.PORT || 4000;
@@ -219,70 +220,6 @@ const extractServiceDetails = (err) => {
   );
 };
 
-const uuidPattern =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-const validateSessionId = (sessionId) => {
-  if (!sessionId || typeof sessionId !== "string") {
-    return "session_id is required.";
-  }
-  if (!uuidPattern.test(sessionId)) {
-    return "Invalid session ID format.";
-  }
-  return null;
-};
-
-class ZodLikeError extends Error {
-  constructor(message, field) {
-    super(message);
-    this.field = field;
-  }
-  flatten() {
-    return {
-      fieldErrors: {
-        [this.field]: [this.message]
-      }
-    };
-  }
-}
-
-const askSchema = {
-  safeParse: (body) => {
-    const question = typeof body?.question === "string" ? body.question.trim() : "";
-    if (!question) {
-      return { success: false, error: new ZodLikeError("Question is required.", "question") };
-    }
-
-    const sessionError = validateSessionId(body?.session_id);
-    if (sessionError) {
-      return { success: false, error: new ZodLikeError(sessionError, "session_id") };
-    }
-
-    return {
-      success: true,
-      data: {
-        question,
-        session_id: body.session_id,
-      },
-    };
-  }
-};
-
-const summarizeSchema = {
-  safeParse: (body) => {
-    const sessionError = validateSessionId(body?.session_id);
-    if (sessionError) {
-      return { success: false, error: new ZodLikeError(sessionError, "session_id") };
-    }
-
-    return {
-      success: true,
-      data: {
-        session_id: body.session_id,
-      },
-    };
-  }
-};
 
 app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
   const uploadedFilePath = req.file?.path;
