@@ -977,18 +977,28 @@ def ask_question(data: Question):
     session_id = str(data.session_id)
     with sessions_lock:
         session = _touch_session_unlocked(session_id)
+
         if not session or not session.get("vectorstore"):
-            raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-        indexed_documents = collect_index_documents(session["vectorstore"])
-        try:
-            scored_candidates = search_retrieval_candidates(
-                session["vectorstore"],
-                question,
-                ASK_RETRIEVAL_CANDIDATES,
+            raise HTTPException(
+                status_code=404,
+                detail="Session expired or invalid. Please re-upload your PDFs.",
             )
-        except Exception:
-            logger.exception("Similarity search failed session_id=%s", session_id)
-            raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
+
+        vectorstore = session["vectorstore"]
+        indexed_documents = collect_index_documents(vectorstore)
+
+    try:
+        scored_candidates = search_retrieval_candidates(
+            vectorstore,
+            question,
+            ASK_RETRIEVAL_CANDIDATES,
+        )
+    except Exception:
+        logger.exception("Similarity search failed session_id=%s", session_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to search the uploaded documents.",
+        )
 
     docs = (
         representative_documents_by_source(indexed_documents)
