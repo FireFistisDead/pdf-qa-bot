@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, Iterator, List, Optional
+from typing import Iterator
 
-from .base import DatabaseConnector, Record, record_to_text
+from .base import DatabaseConnector, record_to_text
+from .pdf_extractor import extract_pdf_text, maybe_decode_pdf_bytes
 
 
 try:
@@ -19,7 +20,11 @@ class CrawlerAgent:
 
     def iter_documents(self) -> Iterator[Document]:
         for record in self.connector.iter_records():
-            content = record_to_text(record)
+            pdf_bytes = maybe_decode_pdf_bytes(record.fields)
+            if pdf_bytes is not None:
+                content = extract_pdf_text(pdf_bytes)
+            else:
+                content = record_to_text(record)
             if not content:
                 continue
 
@@ -29,4 +34,3 @@ class CrawlerAgent:
                 "record_id": record.record_id,
             }
             yield Document(page_content=content, metadata=metadata)
-

@@ -38,12 +38,14 @@ The agent should be runnable in two modes:
 
 This PR provides:
 - A generic connector interface
+- A `MongoDBConnector` example (optional dependency: `pymongo`) for unstructured docs
 - A simple `SQLiteConnector` example (stdlib `sqlite3`)
+- PDF text extraction support when a record contains a PDF blob (bytes or base64)
 - Minimal tests ensuring we can extract documents safely
 
 Future work:
+- Firebase/Firestore connector (optional deps)
 - Postgres/MySQL connectors (optional deps)
 - Incremental sync (watermarks, updated_at, row hashes)
 - Persistence for vector stores (disk or DB)
 - Endpoints to trigger ingestion
-

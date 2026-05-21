@@ -18,6 +18,9 @@ class DatabaseConnector(Protocol):
 
 
 def safe_str(value: object, max_len: int = 4000) -> str:
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        size = len(value)  # type: ignore[arg-type]
+        return f"[binary {size} bytes]"
     text = "" if value is None else str(value)
     if len(text) > max_len:
         return text[: max_len - 3] + "..."
@@ -33,4 +36,3 @@ def record_to_text(record: Record, field_order: Optional[Iterable[str]] = None) 
 
     lines = [f"{k}: {safe_str(record.fields.get(k))}" for k in keys]
     return "\n".join(lines).strip()
-
