@@ -7,11 +7,11 @@ const { z } = require("zod");
 //   non-UUID string      → "Invalid session ID format."
 //
 // Zod v4 changed how invalid_type_error is surfaced, so we use
-// z.preprocess to convert undefined → "" first, then validate as a
+// z.preprocess to convert non-string values → "" first, then validate as a
 // non-empty string. superRefine stops after the first failing check so
 // an empty string only ever produces one error, not two.
 const uuidSchema = z.preprocess(
-  (val) => (val === undefined ? "" : val),
+  (val) => (typeof val === "string" ? val : ""),
   z.string().superRefine((val, ctx) => {
     if (!val) {
       ctx.addIssue({
