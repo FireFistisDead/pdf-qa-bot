@@ -32,11 +32,11 @@ const uuidSchema = z.preprocess(
 );
 
 // ─── Question schema ──────────────────────────────────────────────────────────
-// Converts undefined → "" so missing question produces "Question is required."
-// rather than Zod's generic "Invalid input: expected string, received undefined".
+// Converts non-string values → "" so missing/invalid question input produces
+// "Question is required." rather than Zod's generic invalid-type message.
 // Trim surrounding whitespace so whitespace-only questions are treated as empty.
 const questionSchema = z.preprocess(
-  (val) => (val === undefined ? "" : val),
+  (val) => (typeof val === "string" ? val : ""),
   z.string().trim().min(1, "Question is required."),
 );
 
