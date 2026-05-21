@@ -241,8 +241,9 @@ const extractServiceDetails = (err) => {
 
 app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
   const uploadedFilePath = req.file?.path;
+  // CodeQL [js/path-injection] Mitigation: Break taint flow by forcing basename
   const absoluteFilePath = uploadedFilePath
-    ? path.resolve(uploadedFilePath)
+    ? path.join(UPLOADS_DIR, path.basename(uploadedFilePath))
     : null;
   const sessionId = req.body?.session_id || null;
 
