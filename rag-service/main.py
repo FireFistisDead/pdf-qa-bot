@@ -833,6 +833,7 @@ def process_pdf(
         bool(requested_session_id),
     )
 
+    os.makedirs(str(UPLOADS_DIR), exist_ok=True)
     temp_filename = f"temp_{uuid.uuid4().hex}.pdf"
     temp_path = os.path.join(str(UPLOADS_DIR), temp_filename)
     
@@ -843,6 +844,9 @@ def process_pdf(
         if os.path.getsize(temp_path) == 0:
             raise HTTPException(status_code=400, detail="Uploaded PDF is empty. Please choose a valid PDF file.")
             
+        if os.path.getsize(temp_path) > 20 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Uploaded PDF exceeds the maximum size of 20MB.")
+            
         try:
             loader = PyPDFLoader(temp_path)
             docs = loader.load()
@@ -850,6 +854,7 @@ def process_pdf(
             logger.warning("Failed to load PDF filename=%s error=%s", filename, exc)
             raise HTTPException(status_code=400, detail="Unable to read this PDF. It may be corrupted or encrypted.")
     finally:
+        file.file.close()
         if os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
