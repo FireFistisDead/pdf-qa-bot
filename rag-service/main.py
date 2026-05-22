@@ -83,6 +83,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Session storage with metadata and thread safety
 sessions = {}
 sessions_lock = threading.Lock()
+model_load_lock = threading.Lock()
 generation_lock = threading.Lock()
 
 # Configurable session TTL and max cap
@@ -723,16 +724,33 @@ def load_generation_model():
     global generation_tokenizer, generation_model, generation_is_encoder_decoder
     if generation_model is not None and generation_tokenizer is not None:
         return generation_tokenizer, generation_model, generation_is_encoder_decoder
-    config = AutoConfig.from_pretrained(HF_GENERATION_MODEL)
-    generation_is_encoder_decoder = bool(getattr(config, "is_encoder_decoder", False))
-    generation_tokenizer = AutoTokenizer.from_pretrained(HF_GENERATION_MODEL)
-    if generation_is_encoder_decoder:
-        generation_model = AutoModelForSeq2SeqLM.from_pretrained(HF_GENERATION_MODEL)
-    else:
-        generation_model = AutoModelForCausalLM.from_pretrained(HF_GENERATION_MODEL)
-    if torch.cuda.is_available():
-        generation_model = generation_model.to("cuda")
-    generation_model.eval()
+
+    logger.info("Acquiring model load lock")
+
+    with model_load_lock:
+        if generation_model is not None and generation_tokenizer is not None:
+            return generation_tokenizer, generation_model, generation_is_encoder_decoder
+
+        logger.info(
+            "Loading generation model model=%s",
+            HF_GENERATION_MODEL,
+        )
+
+        config = AutoConfig.from_pretrained(HF_GENERATION_MODEL)
+        generation_is_encoder_decoder = bool(getattr(config, "is_encoder_decoder", False))
+        generation_tokenizer = AutoTokenizer.from_pretrained(HF_GENERATION_MODEL)
+
+        if generation_is_encoder_decoder:
+            generation_model = AutoModelForSeq2SeqLM.from_pretrained(HF_GENERATION_MODEL)
+        else:
+            generation_model = AutoModelForCausalLM.from_pretrained(HF_GENERATION_MODEL)
+
+        if torch.cuda.is_available():
+            generation_model = generation_model.to("cuda")
+
+        generation_model.eval()
+        logger.info("Generation model loaded successfully")
+
     return generation_tokenizer, generation_model, generation_is_encoder_decoder
 
 
@@ -786,6 +804,27 @@ def sanitize_upload_filename(client_file_path: str) -> str:
     return safe_name
 
 
+def get_trusted_upload_path(file_name: str) -> str:
+    trusted_path = os.path.join(str(UPLOADS_DIR), file_name)
+    normalized_uploads_dir = os.path.abspath(str(UPLOADS_DIR))
+    normalized_path = os.path.abspath(trusted_path)
+    if os.path.dirname(normalized_path) != normalized_uploads_dir:
+        raise ValueError("Invalid upload path.")
+    return normalized_path
+
+
+def validate_uploaded_pdf(file_path: str) -> str:
+    trusted_path = os.fspath(file_path)
+    if not trusted_path.lower().endswith(".pdf"):
+        raise ValueError("Only PDF files are allowed.")
+    # CodeQL [py/path-injection]: trusted server-constructed upload path
+    if not os.path.isfile(trusted_path):
+        raise ValueError("File does not exist or is not a valid file.")
+    # CodeQL [py/path-injection]: trusted server-constructed upload path
+    if os.path.getsize(trusted_path) == 0:
+        raise ValueError("Uploaded PDF is empty. Please choose a valid PDF file.")
+    return trusted_path
+
 
 class Question(BaseModel):
     question: str = Field(..., min_length=1, description="Question cannot be empty")
@@ -810,9 +849,10 @@ def process_pdf(
     session_id: str | None = Form(None)
 ):
     cleanup_expired_sessions()
-    
-    filename = file.filename or "uploaded.pdf"
 
+    filename = file.filename or "uploaded.pdf"
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF documents are supported.")
     requested_session_id = (session_id or "").strip() or None
 
     # ─── Quota pre-flight checks ──────────────────────────────────────────────────
@@ -833,7 +873,7 @@ def process_pdf(
     os.makedirs(str(UPLOADS_DIR), exist_ok=True)
     temp_filename = f"temp_{uuid.uuid4().hex}.pdf"
     temp_path = os.path.join(str(UPLOADS_DIR), temp_filename)
-    
+
     try:
         # Validate actual file magic bytes — extension alone is trivially bypassable.
         # A valid PDF always begins with the 4-byte signature: %PDF (0x25 0x50 0x44 0x46).
@@ -853,10 +893,10 @@ def process_pdf(
                 if bytes_written > max_size:
                     raise HTTPException(status_code=413, detail="Uploaded PDF exceeds the maximum size of 20MB.")
                 f.write(chunk)
-                
+
         if bytes_written == 0:
             raise HTTPException(status_code=400, detail="Uploaded PDF is empty. Please choose a valid PDF file.")
-            
+
         try:
             loader = PyPDFLoader(temp_path)
             docs = loader.load()
@@ -945,10 +985,6 @@ def process_pdf(
                 session["lock"] = threading.Lock()
             session_lock = session["lock"]
             vectorstore = session["vectorstore"]
-
-            session.setdefault("documents", []).append(uploaded_document)
-            session["last_accessed"] = now
-            session_id = requested_session_id
         else:
             _cleanup_expired_sessions_unlocked()
             _enforce_max_sessions_unlocked()
@@ -961,7 +997,12 @@ def process_pdf(
                 "created_at": now,
                 "last_accessed": now,
             }
-            vectorstore = new_vectorstore
+            logger.info(
+                "Created session session_id=%s filename=%s chunks=%s",
+                session_id,
+                filename,
+                len(chunks),
+            )
 
     if requested_session_id:
         with session_lock:
@@ -974,20 +1015,20 @@ def process_pdf(
                     filename,
                 )
                 raise HTTPException(status_code=500, detail="Failed to merge the uploaded PDF into this session.")
-        logger.info(
-            "Merged PDF into session session_id=%s filename=%s documents=%s chunks=%s",
-            session_id,
-            filename,
-            len(session["documents"]),
-            len(chunks),
-        )
-    else:
-        logger.info(
-            "Created session session_id=%s filename=%s chunks=%s",
-            session_id,
-            filename,
-            len(chunks),
-        )
+        with sessions_lock:
+            session = _touch_session_unlocked(requested_session_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+            session.setdefault("documents", []).append(uploaded_document)
+            session["last_accessed"] = now
+            session_id = requested_session_id
+            logger.info(
+                "Merged PDF into session session_id=%s filename=%s documents=%s chunks=%s",
+                session_id,
+                filename,
+                len(session["documents"]),
+                len(chunks),
+            )
 
     with sessions_lock:
         documents = list(sessions[session_id].get("documents", []))
@@ -1017,7 +1058,7 @@ def ask_question(data: Question):
             session["lock"] = threading.Lock()
         session_lock = session["lock"]
         vectorstore = session["vectorstore"]
-        
+
     try:
         with session_lock:
             indexed_documents = collect_index_documents(vectorstore)
@@ -1130,7 +1171,7 @@ def summarize_pdf(data: SummarizeRequest):
         session_lock = session["lock"]
         vectorstore = session["vectorstore"]
         uploaded_documents = list(session.get("documents", []))
-        
+
     with session_lock:
         indexed_documents = collect_index_documents(vectorstore)
 
