@@ -4,6 +4,7 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field, field_validator
 from pathlib import Path
 from uuid import UUID
+from contextlib import contextmanager
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
@@ -12,7 +13,9 @@ from dotenv import load_dotenv
 from rank_bm25 import BM25Okapi
 from langchain_community.vectorstores import FAISS
 import numpy as np
+import json
 import os
+import secrets
 import shutil
 import uuid
 import uvicorn
@@ -27,6 +30,16 @@ import threading
 import time
 import logging
 import re
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
 
 load_dotenv()
 
@@ -117,6 +130,9 @@ OVERVIEW_QUERY_TERMS = {
 INSUFFICIENT_CONTEXT_MESSAGE = "The uploaded documents do not contain enough information to answer this question."
 BASE_DIR = Path(__file__).resolve().parent.parent
 UPLOADS_DIR = (BASE_DIR / "uploads").resolve()
+PERSIST_PATH = (BASE_DIR / PERSIST_DIR).resolve()
+SESSION_REGISTRY_FILE = PERSIST_PATH / "session_registry.json"
+SESSION_REGISTRY_LOCK_FILE = PERSIST_PATH / "session_registry.lock"
 UPLOAD_FILENAME_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyz"
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -135,11 +151,181 @@ def now_ts():
     return time.time()
 
 
+def session_expires_at(last_accessed: float) -> float:
+    return last_accessed + (SESSION_TTL_MINUTES * 60)
+
+
+def get_session_dir(session_id: str) -> str:
+    return os.fspath(PERSIST_PATH / session_id)
+
+
+@contextmanager
+def session_registry_lock():
+    PERSIST_PATH.mkdir(parents=True, exist_ok=True)
+    with open(SESSION_REGISTRY_LOCK_FILE, "a+b") as lock_file:
+        if fcntl:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        elif msvcrt:
+            lock_file.seek(0)
+            lock_file.write(b"0")
+            lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            if fcntl:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            elif msvcrt:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def read_session_registry_unlocked() -> dict:
+    if not SESSION_REGISTRY_FILE.exists():
+        return {}
+    try:
+        with open(SESSION_REGISTRY_FILE, "r", encoding="utf-8") as registry_file:
+            registry = json.load(registry_file)
+            return registry if isinstance(registry, dict) else {}
+    except Exception:
+        logger.exception("Failed to read session registry")
+        return {}
+
+
+def read_session_registry() -> dict:
+    with session_registry_lock():
+        return read_session_registry_unlocked()
+
+
+def write_session_registry_unlocked(registry: dict):
+    PERSIST_PATH.mkdir(parents=True, exist_ok=True)
+    temp_path = SESSION_REGISTRY_FILE.with_suffix(".tmp")
+    with open(temp_path, "w", encoding="utf-8") as registry_file:
+        json.dump(registry, registry_file, separators=(",", ":"), sort_keys=True)
+    os.replace(temp_path, SESSION_REGISTRY_FILE)
+
+
+def write_session_registry(registry: dict):
+    with session_registry_lock():
+        write_session_registry_unlocked(registry)
+
+
+def persist_session_registry_entry(session_id: str, meta: dict):
+    with session_registry_lock():
+        registry = read_session_registry_unlocked()
+        last_accessed = meta.get("last_accessed", now_ts())
+        registry[session_id] = {
+            "created_at": meta.get("created_at", last_accessed),
+            "last_accessed": last_accessed,
+            "expires_at": session_expires_at(last_accessed),
+            "documents": list(meta.get("documents", [])),
+            "session_dir": meta.get("session_dir") or get_session_dir(session_id),
+            "session_secret": meta.get("session_secret"),
+        }
+        write_session_registry_unlocked(registry)
+
+
+def remove_persisted_session(session_id: str, session_dir: str | None = None):
+    with session_registry_lock():
+        registry = read_session_registry_unlocked()
+        registry_entry = registry.pop(session_id, None)
+        write_session_registry_unlocked(registry)
+
+    target_dir = session_dir or (registry_entry or {}).get("session_dir")
+    if not target_dir:
+        target_dir = get_session_dir(session_id)
+    try:
+        target_path = Path(target_dir).resolve()
+        if target_path.is_dir() and PERSIST_PATH in target_path.parents:
+            shutil.rmtree(target_path)
+    except Exception:
+        logger.exception("Failed to remove persisted session session_id=%s", session_id)
+
+
+def cleanup_expired_persisted_sessions(extra_session_dirs: dict | None = None):
+    now = now_ts()
+    expired_dirs = {}
+    with session_registry_lock():
+        registry = read_session_registry_unlocked()
+        expired_ids = [
+            sid
+            for sid, entry in registry.items()
+            if now > float(entry.get("expires_at", 0) or 0)
+        ]
+        for sid in extra_session_dirs or {}:
+            if sid not in expired_ids:
+                expired_ids.append(sid)
+
+        for sid in expired_ids:
+            expired_dirs[sid] = (extra_session_dirs or {}).get(sid) or registry.get(sid, {}).get("session_dir")
+            registry.pop(sid, None)
+
+        if expired_ids:
+            write_session_registry_unlocked(registry)
+
+    for sid, session_dir in expired_dirs.items():
+        try:
+            target_path = Path(session_dir or get_session_dir(sid)).resolve()
+            if target_path.is_dir() and PERSIST_PATH in target_path.parents:
+                shutil.rmtree(target_path)
+        except Exception:
+            logger.exception("Failed to remove persisted session session_id=%s", sid)
+
+
+def persist_vectorstore(session_id: str, vectorstore):
+    session_dir = get_session_dir(session_id)
+    os.makedirs(session_dir, exist_ok=True)
+    vectorstore.save_local(session_dir)
+    return session_dir
+
+
+def _recover_session_unlocked(session_id: str):
+    registry = read_session_registry()
+    entry = registry.get(session_id)
+    if not entry:
+        return None
+
+    last_accessed = float(entry.get("last_accessed", 0) or 0)
+    if now_ts() > float(entry.get("expires_at", session_expires_at(last_accessed))):
+        remove_persisted_session(session_id, entry.get("session_dir"))
+        return None
+
+    session_dir = entry.get("session_dir") or get_session_dir(session_id)
+    if not os.path.isdir(session_dir):
+        remove_persisted_session(session_id, session_dir)
+        return None
+
+    try:
+        vectorstore = FAISS.load_local(
+            session_dir,
+            embedding_model,
+            allow_dangerous_deserialization=True,
+        )
+    except Exception:
+        logger.exception("Failed to recover persisted session session_id=%s", session_id)
+        return None
+
+    meta = {
+        "vectorstore": vectorstore,
+        "lock": threading.Lock(),
+        "documents": list(entry.get("documents", [])),
+        "session_secret": entry.get("session_secret"),
+        "session_dir": session_dir,
+        "created_at": float(entry.get("created_at", last_accessed) or last_accessed),
+        "last_accessed": last_accessed,
+    }
+    sessions[session_id] = meta
+    logger.info("Recovered persisted session session_id=%s", session_id)
+    return meta
+
+
 def cleanup_expired_sessions():
     """
     Remove expired sessions and enforce max session cap.
     """
     expired = []
+    expired_dirs = {}
     evicted_count = 0
     active_sessions = 0
     with sessions_lock:
@@ -147,13 +333,17 @@ def cleanup_expired_sessions():
         for sid, meta in list(sessions.items()):
             if now_ts() - meta["last_accessed"] > ttl_seconds:
                 expired.append(sid)
+                expired_dirs[sid] = meta.get("session_dir")
         for sid in expired:
             del sessions[sid]
         while len(sessions) > MAX_ACTIVE_SESSIONS:
             oldest = min(sessions.items(), key=lambda x: x[1]["created_at"])[0]
+            expired_dirs[oldest] = sessions[oldest].get("session_dir")
             del sessions[oldest]
+            expired.append(oldest)
             evicted_count += 1
         active_sessions = len(sessions)
+    cleanup_expired_persisted_sessions(expired_dirs)
     if expired or evicted_count:
         logger.info(
             "Session cleanup completed expired=%s evicted=%s active=%s",
@@ -171,12 +361,17 @@ def _is_session_expired(meta: dict) -> bool:
 def _touch_session_unlocked(session_id: str):
     meta = sessions.get(session_id)
     if not meta:
-        return None
+        meta = _recover_session_unlocked(session_id)
+        if not meta:
+            return None
     if _is_session_expired(meta):
+        session_dir = meta.get("session_dir")
         del sessions[session_id]
+        remove_persisted_session(session_id, session_dir)
         logger.info("Session expired session_id=%s", session_id)
         return None
     meta["last_accessed"] = now_ts()
+    persist_session_registry_entry(session_id, meta)
     return meta
 
 
@@ -191,9 +386,13 @@ def _peek_session_unlocked(session_id: str):
     """
     meta = sessions.get(session_id)
     if not meta:
-        return None
+        meta = _recover_session_unlocked(session_id)
+        if not meta:
+            return None
     if _is_session_expired(meta):
+        session_dir = meta.get("session_dir")
         del sessions[session_id]
+        remove_persisted_session(session_id, session_dir)
         logger.info("Session expired session_id=%s", session_id)
         return None
     return meta
@@ -207,7 +406,9 @@ def _cleanup_expired_sessions_unlocked():
         if now_ts() - meta["last_accessed"] > ttl_seconds
     ]
     for sid in expired:
+        session_dir = sessions[sid].get("session_dir")
         del sessions[sid]
+        remove_persisted_session(sid, session_dir)
     if expired:
         logger.info("Expired sessions removed count=%s", len(expired))
 
@@ -215,7 +416,9 @@ def _cleanup_expired_sessions_unlocked():
 def _enforce_max_sessions_unlocked():
     while len(sessions) >= MAX_ACTIVE_SESSIONS:
         oldest = min(sessions.items(), key=lambda x: x[1]["created_at"])[0]
+        session_dir = sessions[oldest].get("session_dir")
         del sessions[oldest]
+        remove_persisted_session(oldest, session_dir)
         logger.info("Evicted oldest session session_id=%s", oldest)
 
 
@@ -989,14 +1192,17 @@ def process_pdf(
             _cleanup_expired_sessions_unlocked()
             _enforce_max_sessions_unlocked()
             session_id = str(uuid.uuid4())
+            session_dir = persist_vectorstore(session_id, new_vectorstore)
             session_lock = threading.Lock()
             sessions[session_id] = {
                 "vectorstore": new_vectorstore,
                 "lock": session_lock,
                 "documents": [uploaded_document],
+                "session_dir": session_dir,
                 "created_at": now,
                 "last_accessed": now,
             }
+            persist_session_registry_entry(session_id, sessions[session_id])
             logger.info(
                 "Created session session_id=%s filename=%s chunks=%s",
                 session_id,
@@ -1008,6 +1214,7 @@ def process_pdf(
         with session_lock:
             try:
                 vectorstore.merge_from(new_vectorstore)
+                persist_vectorstore(requested_session_id, vectorstore)
             except Exception:
                 logger.exception(
                     "Failed to merge vectorstore session_id=%s filename=%s",
@@ -1022,6 +1229,7 @@ def process_pdf(
             session.setdefault("documents", []).append(uploaded_document)
             session["last_accessed"] = now
             session_id = requested_session_id
+            persist_session_registry_entry(session_id, session)
             logger.info(
                 "Merged PDF into session session_id=%s filename=%s documents=%s chunks=%s",
                 session_id,
@@ -1204,14 +1412,23 @@ async def upload_pdf(file: UploadFile = File(...)):
 
     # 3. Generate a new session_id and unique folder
     session_id = str(uuid.uuid4())
-    session_dir = os.path.join(PERSIST_DIR, session_id)
+    session_dir = get_session_dir(session_id)
 
     # 4. Build FAISS index for this session
     vectorstore = FAISS.from_documents(docs, embeddings)
     vectorstore.save_local(session_dir)
 
     # 5. Store session reference
-    sessions[session_id] = {"vectorstore": vectorstore}
+    now = now_ts()
+    sessions[session_id] = {
+        "vectorstore": vectorstore,
+        "lock": threading.Lock(),
+        "documents": [],
+        "session_dir": session_dir,
+        "created_at": now,
+        "last_accessed": now,
+    }
+    persist_session_registry_entry(session_id, sessions[session_id])
 
     # 6. Return both message and session_id
     return {
