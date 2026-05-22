@@ -31,7 +31,7 @@ import re
 
 load_dotenv()
 
- feature/session-based-faiss
+
 PERSIST_DIR = "faiss_store"
 embeddings = HuggingFaceEmbeddings(
     model_name="sentence-transformers/all-MiniLM-L6-v2"
@@ -980,62 +980,53 @@ def process_pdf(
 
 @app.post("/ask")
 def ask_question(data: Question):
-    # 1. Validate question
+    cleanup_expired_sessions()
     question = (data.question or "").strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question is required.")
 
-    # 2. Validate session_id
+    intent = detect_question_intent(question)
     session_id = str(data.session_id)
     with sessions_lock:
         session = _touch_session_unlocked(session_id)
         if not session or not session.get("vectorstore"):
             raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-        vectorstore = session["vectorstore"]
-        indexed_documents = collect_index_documents(vectorstore)
-        
-    try:
-        scored_candidates = search_retrieval_candidates(
-            vectorstore,
-            question,
-            ASK_RETRIEVAL_CANDIDATES,
-        )
-    except Exception:
-        logger.exception("Similarity search failed session_id=%s", session_id)
-        raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
+        indexed_documents = collect_index_documents(session["vectorstore"])
+        try:
+            scored_candidates = search_retrieval_candidates(
+                session["vectorstore"],
+                question,
+                ASK_RETRIEVAL_CANDIDATES,
+            )
+        except Exception:
+            logger.exception("Similarity search failed session_id=%s", session_id)
+            raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
 
+    docs = (
+        representative_documents_by_source(indexed_documents)
+        if intent == "overview"
+        else diversify_retrieved_documents(scored_candidates, question)
+    )
     if not docs:
         return {"answer": "No relevant context found."}
 
-feature/session-based-faiss
-    # 5. Extract page numbers
-master
     pages = sorted(set(
-        doc.metadata.get("page", 0) + 1
+        doc.metadata["page"] + 1
         for doc in docs
         if "page" in doc.metadata
     ))
 
-    # 6. Format context and build answer
     context = format_context(docs, max_chars=6500)
-    grounded_answer = build_answer_from_documents(question, docs, "factual")
-
+    retrieved_sources = sorted({document_display_name(doc) for doc in docs})
+    grounded_answer = build_answer_from_documents(question, docs, intent)
     if grounded_answer:
- feature/session-based-faiss
         logger.info(
             "Returning grounded answer session_id=%s intent=%s retrieved_chunks=%s sources=%s",
             session_id, intent, len(docs), retrieved_sources,
         )
-  master
         return {"answer": grounded_answer, "sources": pages}
 
-    # 7. Fallback: generate response from context
     prompt = (
- feature/session-based-faiss
-        "You are a careful assistant answering questions over uploaded PDF documents. "
-        "Use only the provided context. If the context does not contain enough information, "
-        "say that briefly and do not invent details.\n\n"
-
         "You are a careful assistant answering questions over one or more uploaded PDF documents. "
         "Use only the provided context. The context may include excerpts from multiple PDFs. "
         "When the question asks for a relationship, comparison, or synthesis, connect the relevant facts across documents. "
@@ -1044,19 +1035,15 @@ master
         "Give clear, conversational, human-friendly answers.\n"
         "Do not return raw PDF text or chunks.\n"
         "Summarize properly in readable sentences.\n\n"
- master
         f"Context:\n{context}\n\n"
         f"Question: {question}\n"
         "Answer:"
     )
- feature/session-based-faiss
-
 
     logger.info(
         "Executing query session_id=%s retrieved_chunks=%s sources=%s",
         session_id, len(docs), retrieved_sources,
     )
-  master
     answer = generate_response(prompt, max_new_tokens=256)
     return {"answer": answer, "sources": pages}
 
