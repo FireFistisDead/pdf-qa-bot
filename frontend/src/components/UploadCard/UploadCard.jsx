@@ -75,9 +75,11 @@ const handleDrop = (e) => {
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         sx={{
-          border: darkMode
-            ? "2px dashed rgba(255,255,255,0.12)"
-            : "2px dashed rgba(0,0,0,0.12)",
+          border: isDragging
+          ? "2px dashed rgba(139,92,246,0.75)"
+          : darkMode
+          ? "2px dashed rgba(255,255,255,0.12)"
+          : "2px dashed rgba(0,0,0,0.12)",
 
           position: "relative",
           overflow: "hidden",
