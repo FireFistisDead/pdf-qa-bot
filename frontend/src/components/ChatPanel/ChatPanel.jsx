@@ -14,6 +14,7 @@ const ChatPanel = ({
   currentPdfName,
   currentPdfSessionId,
   onAppendMessage,
+  handleClearChat,
 }) => {
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
@@ -171,6 +172,12 @@ const ChatPanel = ({
             </Button>
 
             <ExportMenu currentChat={currentChat} selectedPdfName={currentPdfName} />
+            <Button
+            variant="danger"
+            size="sm"
+            onClick={handleClearChat}>
+            Clear Chat
+            </Button>
           </div>
         </div>
 

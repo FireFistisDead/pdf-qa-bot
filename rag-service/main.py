@@ -892,7 +892,14 @@ def process_pdf(
 
     if not chunks:
         raise HTTPException(status_code=400, detail="No text chunks generated from the PDF. Please check your file.")
-
+    if not requested_session_id and len(chunks) > MAX_CHUNKS_PER_SESSION:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"PDF is too large to index. "
+                f"A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks."
+            ),
+        )
     if requested_session_id:
         with sessions_lock:
             session = _peek_session_unlocked(requested_session_id)
@@ -938,9 +945,33 @@ def process_pdf(
             session.setdefault("retrieval_cache", {})
             if not session:
                 raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+            if "lock" not in session:
+                session["lock"] = threading.Lock()
+            session_lock = session["lock"]
+            vectorstore = session["vectorstore"]
+
+            session.setdefault("documents", []).append(uploaded_document)
+            session["last_accessed"] = now
+            session_id = requested_session_id
+        else:
+            _cleanup_expired_sessions_unlocked()
+            _enforce_max_sessions_unlocked()
+            session_id = str(uuid.uuid4())
+            session_lock = threading.Lock()
+            sessions[session_id] = {
+                "vectorstore": new_vectorstore,
+                "lock": session_lock,
+                "documents": [uploaded_document],
+                "created_at": now,
+                "last_accessed": now,
+                "retrieval_cache": {},
+            }
+            vectorstore = new_vectorstore
+
+    if requested_session_id:
+        with session_lock:
             try:
-                session["vectorstore"].merge_from(new_vectorstore)
-                session["retrieval_cache"] = {}
+                vectorstore.merge_from(new_vectorstore)
             except Exception:
                 logger.exception(
                     "Failed to merge vectorstore session_id=%s filename=%s",
@@ -948,34 +979,22 @@ def process_pdf(
                     filename,
                 )
                 raise HTTPException(status_code=500, detail="Failed to merge the uploaded PDF into this session.")
-            session.setdefault("documents", []).append(uploaded_document)
-            session["last_accessed"] = now
-            session_id = requested_session_id
-            logger.info(
-                "Merged PDF into session session_id=%s filename=%s documents=%s chunks=%s",
-                session_id,
-                filename,
-                len(session["documents"]),
-                len(chunks),
-            )
-        else:
-            _cleanup_expired_sessions_unlocked()
-            _enforce_max_sessions_unlocked()
-            session_id = str(uuid.uuid4())
-            sessions[session_id] = {
-                "vectorstore": new_vectorstore,
-                "documents": [uploaded_document],
-                "created_at": now,
-                "last_accessed": now,
-                "retrieval_cache": {},
-            }
-            logger.info(
-                "Created session session_id=%s filename=%s chunks=%s",
-                session_id,
-                filename,
-                len(chunks),
-            )
+        logger.info(
+            "Merged PDF into session session_id=%s filename=%s documents=%s chunks=%s",
+            session_id,
+            filename,
+            len(session["documents"]),
+            len(chunks),
+        )
+    else:
+        logger.info(
+            "Created session session_id=%s filename=%s chunks=%s",
+            session_id,
+            filename,
+            len(chunks),
+        )
 
+    with sessions_lock:
         documents = list(sessions[session_id].get("documents", []))
 
     return {
@@ -1009,73 +1028,24 @@ def ask_question(data: Question):
         session = _touch_session_unlocked(session_id)
 
         if not session or not session.get("vectorstore"):
-            raise HTTPException(
-                status_code=404,
-                detail="Session expired or invalid. Please re-upload your PDFs."
+            raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+        if "lock" not in session:
+            session["lock"] = threading.Lock()
+        session_lock = session["lock"]
+        vectorstore = session["vectorstore"]
+        
+    try:
+        with session_lock:
+            indexed_documents = collect_index_documents(vectorstore)
+            scored_candidates = search_retrieval_candidates(
+                vectorstore,
+                question,
+                ASK_RETRIEVAL_CANDIDATES,
             )
 
-        indexed_documents = collect_index_documents(
-            session["vectorstore"]
-        )
-
-        # Session-level retrieval cache
-        retrieval_cache = session.setdefault(
-            "retrieval_cache",
-            {}
-        )
-
-        # Cache hit
-        if normalized_query in retrieval_cache:
-
-            logger.info(
-                "Retrieval cache hit session_id=%s query=%s",
-                session_id,
-                normalized_query,
-            )
-
-            scored_candidates = retrieval_cache[
-                normalized_query
-            ]
-
-            cache_hit = True
-
-        # Cache miss
-        else:
-
-            logger.info(
-                "Retrieval cache miss session_id=%s query=%s",
-                session_id,
-                normalized_query,
-            )
-
-            try:
-
-                scored_candidates = search_retrieval_candidates(
-                    session["vectorstore"],
-                    question,
-                    ASK_RETRIEVAL_CANDIDATES,
-                )
-
-            except Exception:
-
-                logger.exception(
-                    "Similarity search failed session_id=%s",
-                    session_id,
-                )
-
-                raise HTTPException(
-                    status_code=500,
-                    detail="Failed to search the uploaded documents."
-                )
-
-            # Prevent unbounded cache growth
-            if len(retrieval_cache) >= RETRIEVAL_CACHE_LIMIT:
-                oldest_key = next(iter(retrieval_cache))
-                del retrieval_cache[oldest_key]
-
-            retrieval_cache[normalized_query] = scored_candidates
-
-            cache_hit = False
+    except Exception:
+        logger.exception("Similarity search failed session_id=%s", session_id)
+        raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
 
     docs = (
         representative_documents_by_source(indexed_documents)
@@ -1200,8 +1170,14 @@ def summarize_pdf(data: SummarizeRequest):
         session = _touch_session_unlocked(session_id)
         if not session or not session.get("vectorstore"):
             raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+        if "lock" not in session:
+            session["lock"] = threading.Lock()
+        session_lock = session["lock"]
+        vectorstore = session["vectorstore"]
         uploaded_documents = list(session.get("documents", []))
-        indexed_documents = collect_index_documents(session["vectorstore"])
+        
+    with session_lock:
+        indexed_documents = collect_index_documents(vectorstore)
 
     if not uploaded_documents or not indexed_documents:
         return {"summary": "No document context available to summarize."}
