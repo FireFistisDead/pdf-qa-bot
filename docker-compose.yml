@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  rag-service:
+    build:
+      context: ./rag-service
+    ports:
+      - "5000:5000"
+    volumes:
+      - shared_uploads:/app/uploads
+      - hf_cache:/root/.cache/huggingface
+    env_file:
+      - .env
+    # Optional: if you have a local GPU, uncomment the lines below to enable GPU for the container
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  backend:
+    build:
+      context: .
+    ports:
+      - "4000:4000"
+    environment:
+      - RAG_SERVICE_URL=http://rag-service:5000
+    volumes:
+      - shared_uploads:/app/uploads
+    depends_on:
+      - rag-service
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      # React app runs in the browser, so it accesses the backend via localhost on the user's host machine.
+      # The backend container is exposed on port 4000 on the host machine.
+      - REACT_APP_API_URL=http://localhost:4000
+    depends_on:
+      - backend
+
+volumes:
+  shared_uploads:
+    name: pdf-qa-bot-uploads
+  hf_cache:
+    name: pdf-qa-bot-hf-cache

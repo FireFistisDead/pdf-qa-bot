@@ -202,6 +202,46 @@ Downloads are cached under your user Hugging Face cache (e.g. `~/.cache/huggingf
 
 ---
 
+## Running with Docker
+
+You can run the entire multi-service application easily using Docker Compose. This ensures reproducibility and eliminates the need to install Python, Node.js, and dependencies manually on your host machine.
+
+### Prerequisites
+- [Docker](https://docs.docker.com/get-docker/)
+- [Docker Compose](https://docs.docker.com/compose/install/)
+
+### Quick Start
+
+1. Clone the repository and navigate to the project root.
+2. Build and start all services in detached mode:
+
+```bash
+docker-compose up -d --build
+```
+
+3. The services will be available at:
+   - **Frontend UI**: http://localhost:3000
+   - **Express API Gateway**: http://localhost:4000
+   - **FastAPI RAG Service**: http://localhost:5000
+
+> **Note on Initial Startup**: On the first run, the RAG service container will download the necessary Hugging Face models (~1GB total). These models are cached in a persistent Docker volume (`pdf-qa-bot-hf-cache`) so they will not be re-downloaded on subsequent restarts.
+
+### Stopping the services
+
+To stop the running containers:
+
+```bash
+docker-compose down
+```
+
+To stop the containers and remove the cached models/volumes:
+
+```bash
+docker-compose down -v
+```
+
+---
+
 ## API Reference
 
 ### Express API (`http://localhost:4000`)

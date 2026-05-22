@@ -98,6 +98,7 @@ describe("route error responses", () => {
     assert.equal(res.status, 400);
     const data = await res.json();
     assert.equal(data.error, "Validation failed");
+    assert.deepEqual(data.details.fieldErrors.question, ["Question is required."]);
   });
 
   test("POST /ask with invalid session_id returns 400", async () => {
@@ -109,6 +110,7 @@ describe("route error responses", () => {
     assert.equal(res.status, 400);
     const data = await res.json();
     assert.equal(data.error, "Validation failed");
+    assert.deepEqual(data.details.fieldErrors.session_id, ["Invalid session ID format."]);
   });
 
   test("POST /summarize with empty body returns 400", async () => {
@@ -120,6 +122,7 @@ describe("route error responses", () => {
     assert.equal(res.status, 400);
     const data = await res.json();
     assert.equal(data.error, "Validation failed");
+    assert.deepEqual(data.details.fieldErrors.session_id, ["session_id is required."]);
   });
 
   test("POST /summarize with missing session_id returns 400", async () => {
@@ -131,6 +134,7 @@ describe("route error responses", () => {
     assert.equal(res.status, 400);
     const data = await res.json();
     assert.equal(data.error, "Validation failed");
+    assert.deepEqual(data.details.fieldErrors.session_id, ["session_id is required."]);
   });
 
   test("POST /upload without file returns 400", async () => {
