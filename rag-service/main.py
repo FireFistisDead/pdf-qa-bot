@@ -97,6 +97,17 @@ ASK_CHUNKS_PER_DOCUMENT = int(os.getenv("ASK_CHUNKS_PER_DOCUMENT", "2"))
 ASK_DIVERSITY_RANK_LIMIT = int(os.getenv("ASK_DIVERSITY_RANK_LIMIT", "8"))
 ASK_DIVERSITY_SCORE_MULTIPLIER = float(os.getenv("ASK_DIVERSITY_SCORE_MULTIPLIER", "1.8"))
 ASK_DIVERSITY_SCORE_MARGIN = float(os.getenv("ASK_DIVERSITY_SCORE_MARGIN", "0.35"))
+ASK_EVIDENCE_MAX_DISTANCE = float(os.getenv("ASK_EVIDENCE_MAX_DISTANCE", "0.85"))
+ASK_EVIDENCE_MIN_KEYWORD_OVERLAP = int(os.getenv("ASK_EVIDENCE_MIN_KEYWORD_OVERLAP", "2"))
+ASK_EVIDENCE_MIN_KEYWORD_OVERLAP_SHORT_QUERY = int(
+    os.getenv("ASK_EVIDENCE_MIN_KEYWORD_OVERLAP_SHORT_QUERY", "1")
+)
+ASK_REQUIRE_CITATIONS = os.getenv("ASK_REQUIRE_CITATIONS", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 QUERY_STOPWORDS = {
     "about", "according", "also", "and", "are", "between", "compare",
     "describe", "does", "document", "documents", "explain", "from", "give",
@@ -397,11 +408,80 @@ def has_grounded_keyword_overlap(question, documents):
     return False
 
 
+def best_keyword_overlap_count(question, documents):
+    keywords = query_keywords(question)
+    if not keywords:
+        return 0
+    best = 0
+    for document in documents:
+        document_text = " ".join(
+            [
+                document.page_content,
+                document.metadata.get("filename", ""),
+                document.metadata.get("source", ""),
+            ]
+        )
+        overlap = len(keywords.intersection(tokenize_text(document_text)))
+        best = max(best, overlap)
+    return best
+
+
+def passes_evidence_gate(question, documents, best_score, intent):
+    if not documents:
+        return False
+    if intent == "overview":
+        return True
+
+    keywords = query_keywords(question)
+    if not keywords:
+        return True
+
+    required_overlap = (
+        ASK_EVIDENCE_MIN_KEYWORD_OVERLAP_SHORT_QUERY
+        if len(keywords) < 4
+        else ASK_EVIDENCE_MIN_KEYWORD_OVERLAP
+    )
+    if best_keyword_overlap_count(question, documents) < required_overlap:
+        return False
+
+    if best_score is None:
+        return True
+    return best_score <= ASK_EVIDENCE_MAX_DISTANCE
+
+
+def citation_suffix_for_documents(documents, source_id_by_key):
+    if not source_id_by_key:
+        return ""
+    ids = sorted(
+        {
+            source_id_by_key.get(document_dedupe_key(document))
+            for document in documents
+            if document is not None
+        }
+    )
+    ids = [value for value in ids if isinstance(value, int)]
+    if not ids:
+        return ""
+    if len(ids) == 1:
+        return f" (Source {ids[0]})"
+    joined = ", ".join(str(value) for value in ids)
+    return f" (Sources {joined})"
+
+
+def answer_contains_citation(answer, max_source_id):
+    if not answer or not isinstance(answer, str):
+        return False
+    if not max_source_id or max_source_id < 1:
+        return False
+    # We accept either "Source 1" or "Sources 1, 2".
+    return bool(re.search(r"\bSources?\s+\d+", answer))
+
+
 def markdown_bullets(sentences):
     return "\n".join(f"* {sentence}" for sentence in sentences)
 
 
-def build_relationship_answer(documents, question):
+def build_relationship_answer(documents, question, source_id_by_key=None):
     grouped_documents = group_documents_by_source(documents)
     if len(grouped_documents) < 2:
         return None
@@ -409,7 +489,8 @@ def build_relationship_answer(documents, question):
     for source_name, source_documents in grouped_documents.items():
         sentences = best_sentences_for_document(source_documents, question, max_sentences=2)
         if sentences:
-            answer_parts.append(f"* **{source_name}**: {' '.join(sentences)}")
+            citation_suffix = citation_suffix_for_documents(source_documents, source_id_by_key)
+            answer_parts.append(f"* **{source_name}**{citation_suffix}: {' '.join(sentences)}")
     source_list = ", ".join(grouped_documents.keys())
     answer_parts.append(
         f"\nTogether, these points show the relationship across {source_list} without using information outside the uploaded documents."
@@ -417,7 +498,7 @@ def build_relationship_answer(documents, question):
     return "\n".join(answer_parts)
 
 
-def build_comparison_answer(documents, question):
+def build_comparison_answer(documents, question, source_id_by_key=None):
     grouped_documents = group_documents_by_source(documents)
     if len(grouped_documents) < 2:
         return None
@@ -425,14 +506,15 @@ def build_comparison_answer(documents, question):
     for source_name, source_documents in grouped_documents.items():
         sentences = best_sentences_for_document(source_documents, question, max_sentences=2)
         if sentences:
-            answer_parts.append(f"* **{source_name}**: {' '.join(sentences)}")
+            citation_suffix = citation_suffix_for_documents(source_documents, source_id_by_key)
+            answer_parts.append(f"* **{source_name}**{citation_suffix}: {' '.join(sentences)}")
     answer_parts.append(
         "\nIn comparison, each document describes a different role or focus, and the contrast above is limited to the retrieved PDF content."
     )
     return "\n".join(answer_parts)
 
 
-def build_overview_answer(documents, question):
+def build_overview_answer(documents, question, source_id_by_key=None):
     grouped_documents = group_documents_by_source(documents)
     if not grouped_documents:
         return None
@@ -440,7 +522,8 @@ def build_overview_answer(documents, question):
     for source_name, source_documents in grouped_documents.items():
         sentences = best_sentences_for_document(source_documents, question, max_sentences=2)
         if sentences:
-            answer_parts.append(f"* **{source_name}**: {' '.join(sentences)}")
+            citation_suffix = citation_suffix_for_documents(source_documents, source_id_by_key)
+            answer_parts.append(f"* **{source_name}**{citation_suffix}: {' '.join(sentences)}")
     return "\n".join(answer_parts)
 
 
@@ -462,7 +545,7 @@ def extract_factual_subject(question):
     return subject or None
 
 
-def build_factual_answer(documents, question):
+def build_factual_answer(documents, question, source_id_by_key=None):
     if not has_grounded_keyword_overlap(question, documents):
         return None
     subject = extract_factual_subject(question)
@@ -478,13 +561,14 @@ def build_factual_answer(documents, question):
     if not supporting_sentences:
         return None
     source_name, first_sentence = supporting_sentences[0]
+    citation_suffix = citation_suffix_for_documents(grouped_documents.get(source_name, []), source_id_by_key)
     if subject:
         if "document" in subject.lower() and "about" in subject.lower():
-            answer = f"Based on **{source_name}**, {first_sentence}"
+            answer = f"Based on **{source_name}**{citation_suffix}, {first_sentence}"
         else:
-            answer = f"Based on **{source_name}**, {subject} is mentioned in this context: {first_sentence}"
+            answer = f"Based on **{source_name}**{citation_suffix}, {subject} is mentioned in this context: {first_sentence}"
     else:
-        answer = f"Based on **{source_name}**, {first_sentence}"
+        answer = f"Based on **{source_name}**{citation_suffix}, {first_sentence}"
     additional_sentences = [
         sentence
         for _source, sentence in supporting_sentences[1:3]
@@ -495,17 +579,17 @@ def build_factual_answer(documents, question):
     return answer
 
 
-def build_answer_from_documents(question, documents, intent):
+def build_answer_from_documents(question, documents, intent, source_id_by_key=None):
     if not has_grounded_keyword_overlap(question, documents) and intent != "overview":
         return INSUFFICIENT_CONTEXT_MESSAGE
     if intent == "relationship":
-        return build_relationship_answer(documents, question) or INSUFFICIENT_CONTEXT_MESSAGE
+        return build_relationship_answer(documents, question, source_id_by_key=source_id_by_key) or INSUFFICIENT_CONTEXT_MESSAGE
     if intent == "comparison":
-        return build_comparison_answer(documents, question) or INSUFFICIENT_CONTEXT_MESSAGE
+        return build_comparison_answer(documents, question, source_id_by_key=source_id_by_key) or INSUFFICIENT_CONTEXT_MESSAGE
     if intent == "overview":
-        return build_overview_answer(documents, question) or INSUFFICIENT_CONTEXT_MESSAGE
+        return build_overview_answer(documents, question, source_id_by_key=source_id_by_key) or INSUFFICIENT_CONTEXT_MESSAGE
     if intent == "factual":
-        return build_factual_answer(documents, question) or INSUFFICIENT_CONTEXT_MESSAGE
+        return build_factual_answer(documents, question, source_id_by_key=source_id_by_key) or INSUFFICIENT_CONTEXT_MESSAGE
     return INSUFFICIENT_CONTEXT_MESSAGE
 
 
@@ -1080,6 +1164,21 @@ def ask_question(data: Question):
     if not docs:
         return {"answer": "No relevant context found."}
 
+    best_score = scored_candidates[0][1] if scored_candidates else None
+    if not passes_evidence_gate(question, docs, best_score, intent):
+        logger.info(
+            "Evidence gate refused answer session_id=%s intent=%s best_score=%s retrieved_chunks=%s",
+            session_id,
+            intent,
+            best_score,
+            len(docs),
+        )
+        return {
+            "answer": INSUFFICIENT_CONTEXT_MESSAGE,
+            "sources": [],
+            "retrieval_type": "refusal",
+        }
+
     pages = sorted(set(
         doc.metadata["page"] + 1
         for doc in docs
@@ -1115,8 +1214,49 @@ def ask_question(data: Question):
             ),
             "preview": concise_excerpt(doc.page_content, 180),
         })
-    grounded_answer = build_answer_from_documents(question, docs, intent)
+
+    source_id_by_key = {
+        document_dedupe_key(doc): idx + 1
+        for idx, doc in enumerate(docs)
+    }
+
+    grounded_answer = build_answer_from_documents(
+        question,
+        docs,
+        intent,
+        source_id_by_key=source_id_by_key,
+    )
+
+    if grounded_answer == INSUFFICIENT_CONTEXT_MESSAGE:
+        logger.info(
+            "Refusing due to insufficient context session_id=%s intent=%s best_score=%s retrieved_chunks=%s sources=%s",
+            session_id,
+            intent,
+            best_score,
+            len(docs),
+            retrieved_sources,
+        )
+        return {
+            "answer": grounded_answer,
+            "sources": citation_sources,
+            "retrieval_type": "refusal",
+        }
+
     if grounded_answer:
+        if ASK_REQUIRE_CITATIONS and not answer_contains_citation(grounded_answer, len(docs)):
+            logger.info(
+                "Refusing due to missing citations session_id=%s intent=%s best_score=%s retrieved_chunks=%s sources=%s",
+                session_id,
+                intent,
+                best_score,
+                len(docs),
+                retrieved_sources,
+            )
+            return {
+                "answer": INSUFFICIENT_CONTEXT_MESSAGE,
+                "sources": citation_sources,
+                "retrieval_type": "refusal",
+            }
         logger.info(
             "Returning grounded answer session_id=%s intent=%s retrieved_chunks=%s sources=%s",
             session_id, intent, len(docs), retrieved_sources,
