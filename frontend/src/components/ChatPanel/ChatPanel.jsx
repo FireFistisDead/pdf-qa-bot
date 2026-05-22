@@ -14,6 +14,7 @@ const ChatPanel = ({
   currentPdfName,
   currentPdfSessionId,
   onAppendMessage,
+  handleClearChat,
 }) => {
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
@@ -42,7 +43,11 @@ const ChatPanel = ({
 
     try {
       const data = await askQuestionApi(question, currentPdfSessionId);
-      onAppendMessage({ role: "bot", text: data.answer });
+      onAppendMessage({
+      role: "bot",
+      text: data.answer,
+      sources: data.sources || [],
+    });
     } catch (e) {
       let errorMessage = "Error getting answer. Please try again.";
 
@@ -167,6 +172,12 @@ const ChatPanel = ({
             </Button>
 
             <ExportMenu currentChat={currentChat} selectedPdfName={currentPdfName} />
+            <Button
+            variant="danger"
+            size="sm"
+            onClick={handleClearChat}>
+            Clear Chat
+            </Button>
           </div>
         </div>
 
