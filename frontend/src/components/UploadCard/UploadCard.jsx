@@ -12,6 +12,27 @@ import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 
 const UploadCard = ({ darkMode, onUpload, uploading }) => {
   const [files, setFiles] = useState([]);
+  const [isDragging, setIsDragging] = useState(false);
+
+const handleDragOver = (e) => {
+  e.preventDefault();
+  setIsDragging(true);
+};
+
+const handleDragLeave = () => {
+  setIsDragging(false);
+};
+
+const handleDrop = (e) => {
+  e.preventDefault();
+  setIsDragging(false);
+  const droppedFiles = Array.from(e.dataTransfer.files).filter(
+    (file) => file.type === "application/pdf"
+  );
+  if (droppedFiles.length > 0) {
+    setFiles(droppedFiles);
+  }
+};
 
   const hasSelectedFiles = files.length > 0;
 
@@ -50,6 +71,9 @@ const UploadCard = ({ darkMode, onUpload, uploading }) => {
       }}
     >
       <Box
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
         sx={{
           border: darkMode
             ? "2px dashed rgba(255,255,255,0.12)"
