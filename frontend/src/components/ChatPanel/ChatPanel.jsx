@@ -42,7 +42,11 @@ const ChatPanel = ({
 
     try {
       const data = await askQuestionApi(question, currentPdfSessionId);
-      onAppendMessage({ role: "bot", text: data.answer });
+      onAppendMessage({
+      role: "bot",
+      text: data.answer,
+      sources: data.sources || [],
+    });
     } catch (e) {
       let errorMessage = "Error getting answer. Please try again.";
 

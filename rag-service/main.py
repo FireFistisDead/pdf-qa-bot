@@ -1018,25 +1018,61 @@ def ask_question(data: Question):
         if "page" in doc.metadata
     ))
 
-    context = format_context(docs, max_chars=6500)
+    formatted_context = ""
+
+    for idx, doc in enumerate(docs):
+        page = (
+            doc.metadata.get("page", 0) + 1
+            if "page" in doc.metadata
+            else "unknown"
+        )
+
+        formatted_context += (
+            f"[Source {idx+1} | Page {page}]\n"
+            f"{doc.page_content}\n\n"
+        )
+
+    context = formatted_context[:6500]
     retrieved_sources = sorted({document_display_name(doc) for doc in docs})
+    citation_sources = []
+
+    for idx, doc in enumerate(docs):
+        citation_sources.append({
+            "source_id": idx + 1,
+            "document": document_display_name(doc),
+            "page": (
+                doc.metadata.get("page", 0) + 1
+                if "page" in doc.metadata
+                else "unknown"
+            ),
+            "preview": concise_excerpt(doc.page_content, 180),
+        })
     grounded_answer = build_answer_from_documents(question, docs, intent)
     if grounded_answer:
         logger.info(
             "Returning grounded answer session_id=%s intent=%s retrieved_chunks=%s sources=%s",
             session_id, intent, len(docs), retrieved_sources,
         )
-        return {"answer": grounded_answer, "sources": pages}
+        return {
+            "answer": grounded_answer,
+            "sources": citation_sources,
+            "retrieval_type": "citation-aware"
+        }
 
     prompt = (
         "You are a careful assistant answering questions over one or more uploaded PDF documents. "
         "Use only the provided context. The context may include excerpts from multiple PDFs. "
         "When the question asks for a relationship, comparison, or synthesis, connect the relevant facts across documents. "
         "If the context does not contain enough information, say that briefly and do not invent details.\n\n"
+
+        "Reference the provided source numbers naturally whenever the answer is directly supported by the context.\n"
+        "Cite sources using formats like 'According to Source 1' or 'Source 2 explains that...'\n"
+
         "You are a helpful AI assistant.\n"
         "Give clear, conversational, human-friendly answers.\n"
         "Do not return raw PDF text or chunks.\n"
         "Summarize properly in readable sentences.\n\n"
+
         f"Context:\n{context}\n\n"
         f"Question: {question}\n"
         "Answer:"
@@ -1047,7 +1083,11 @@ def ask_question(data: Question):
         session_id, len(docs), retrieved_sources,
     )
     answer = generate_response(prompt, max_new_tokens=256)
-    return {"answer": answer, "sources": pages}
+    return {
+    "answer": answer,
+    "sources": citation_sources,
+    "retrieval_type": "citation-aware"
+}
 
 
 @app.post("/summarize")
