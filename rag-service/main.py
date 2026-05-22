@@ -1024,7 +1024,7 @@ def ask_question(data: Question):
         page = (
             doc.metadata.get("page", 0) + 1
             if "page" in doc.metadata
-            else "unknown"
+            else None
         )
 
         formatted_context += (
@@ -1043,7 +1043,7 @@ def ask_question(data: Question):
             "page": (
                 doc.metadata.get("page", 0) + 1
                 if "page" in doc.metadata
-                else "unknown"
+                else None
             ),
             "preview": concise_excerpt(doc.page_content, 180),
         })
