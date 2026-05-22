@@ -13,6 +13,7 @@ from rank_bm25 import BM25Okapi
 from langchain_community.vectorstores import FAISS
 import numpy as np
 import os
+import secrets
 import shutil
 import uuid
 import uvicorn
@@ -224,6 +225,14 @@ def validate_existing_session(session_id: str):
         return None
     with sessions_lock:
         return _touch_session_unlocked(session_id)
+
+
+def is_authorized_session_update(session: dict, session_secret: str | None) -> bool:
+    expected_secret = session.get("session_secret")
+    provided_secret = (session_secret or "").strip()
+    if not expected_secret or not provided_secret:
+        return False
+    return secrets.compare_digest(expected_secret, provided_secret)
 
 
 def get_session_documents(session_id: str):
@@ -846,7 +855,8 @@ class SummarizeRequest(BaseModel):
 @app.post("/process-pdf")
 def process_pdf(
     file: UploadFile = File(...),
-    session_id: str | None = Form(None)
+    session_id: str | None = Form(None),
+    session_secret: str | None = Form(None),
 ):
     cleanup_expired_sessions()
 
@@ -854,13 +864,16 @@ def process_pdf(
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF documents are supported.")
     requested_session_id = (session_id or "").strip() or None
+    requested_session_secret = (session_secret or "").strip() or None
+    if requested_session_id and not requested_session_secret:
+        requested_session_id = None
 
     # ─── Quota pre-flight checks ──────────────────────────────────────────────────
     if requested_session_id:
         with sessions_lock:
             session = _peek_session_unlocked(requested_session_id)
-            if not session:
-                raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+            if not session or not is_authorized_session_update(session, requested_session_secret):
+                raise HTTPException(status_code=403, detail="Unauthorized session modification.")
             if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
                 raise HTTPException(status_code=400, detail="Maximum number of documents per session reached.")
 
@@ -940,10 +953,11 @@ def process_pdf(
     if requested_session_id:
         with sessions_lock:
             session = _peek_session_unlocked(requested_session_id)
-            if session:
-                current_chunks = sum(doc.get("chunk_count", 0) for doc in session.get("documents", []))
-                if current_chunks + len(chunks) > MAX_CHUNKS_PER_SESSION:
-                    raise HTTPException(status_code=400, detail="Maximum number of chunks per session exceeded.")
+            if not session or not is_authorized_session_update(session, requested_session_secret):
+                raise HTTPException(status_code=403, detail="Unauthorized session modification.")
+            current_chunks = sum(doc.get("chunk_count", 0) for doc in session.get("documents", []))
+            if current_chunks + len(chunks) > MAX_CHUNKS_PER_SESSION:
+                raise HTTPException(status_code=400, detail="Maximum number of chunks per session exceeded.")
     else:
         if len(chunks) > MAX_CHUNKS_PER_SESSION:
             raise HTTPException(
@@ -979,8 +993,8 @@ def process_pdf(
     with sessions_lock:
         if requested_session_id:
             session = _touch_session_unlocked(requested_session_id)
-            if not session:
-                raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+            if not session or not is_authorized_session_update(session, requested_session_secret):
+                raise HTTPException(status_code=403, detail="Unauthorized session modification.")
             if "lock" not in session:
                 session["lock"] = threading.Lock()
             session_lock = session["lock"]
@@ -989,11 +1003,13 @@ def process_pdf(
             _cleanup_expired_sessions_unlocked()
             _enforce_max_sessions_unlocked()
             session_id = str(uuid.uuid4())
+            session_secret = secrets.token_urlsafe(32)
             session_lock = threading.Lock()
             sessions[session_id] = {
                 "vectorstore": new_vectorstore,
                 "lock": session_lock,
                 "documents": [uploaded_document],
+                "session_secret": session_secret,
                 "created_at": now,
                 "last_accessed": now,
             }
@@ -1017,8 +1033,8 @@ def process_pdf(
                 raise HTTPException(status_code=500, detail="Failed to merge the uploaded PDF into this session.")
         with sessions_lock:
             session = _touch_session_unlocked(requested_session_id)
-            if not session:
-                raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+            if not session or not is_authorized_session_update(session, requested_session_secret):
+                raise HTTPException(status_code=403, detail="Unauthorized session modification.")
             session.setdefault("documents", []).append(uploaded_document)
             session["last_accessed"] = now
             session_id = requested_session_id
@@ -1031,11 +1047,14 @@ def process_pdf(
             )
 
     with sessions_lock:
-        documents = list(sessions[session_id].get("documents", []))
+        session = sessions[session_id]
+        documents = list(session.get("documents", []))
+        response_session_secret = session.get("session_secret")
 
     return {
         "message": "PDF processed successfully",
         "session_id": session_id,
+        "session_secret": response_session_secret,
         "document": uploaded_document,
         "documents": documents,
     }

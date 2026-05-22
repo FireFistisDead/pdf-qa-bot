@@ -227,6 +227,7 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
     ? path.join(UPLOADS_DIR, path.basename(uploadedFilePath))
     : null;
   const sessionId = req.body?.session_id || null;
+  const sessionSecret = req.body?.session_secret || null;
 
   try {
     if (!req.file) {
@@ -249,8 +250,9 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
     const formData = {
       file: fs.createReadStream(absoluteFilePath),
     };
-    if (sessionId) {
+    if (sessionId && sessionSecret) {
       formData.session_id = sessionId;
+      formData.session_secret = sessionSecret;
     }
 
     const response = await axios.postForm(`${RAG_SERVICE_URL}/process-pdf`, formData);
@@ -260,6 +262,7 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
     return res.json({
       message: "PDF uploaded & processed successfully!",
       session_id: response.data.session_id,
+      session_secret: response.data.session_secret,
       document: response.data.document,
       documents: response.data.documents || [],
     });
