@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, File, UploadFile, Form
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field, field_validator
@@ -10,8 +10,10 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from dotenv import load_dotenv
 from rank_bm25 import BM25Okapi
+from langchain_community.vectorstores import FAISS
 import numpy as np
 import os
+import shutil
 import uuid
 import uvicorn
 import torch
@@ -28,6 +30,11 @@ import re
 
 load_dotenv()
 
+
+PERSIST_DIR = "faiss_store"
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
 # ── Logger (must be defined before exception handlers that use it) ─────────────
 logger = logging.getLogger("pdf_qa_rag")
 logging.basicConfig(
@@ -36,6 +43,8 @@ logging.basicConfig(
 )
 
 app = FastAPI()
+# Global session store
+sessions = {}
 
 
 def standard_error_response(status_code: int, detail: str, **extra):
@@ -817,12 +826,6 @@ def validate_uploaded_pdf(file_path: str) -> str:
     return trusted_path
 
 
-class PDFPath(BaseModel):
-    filePath: str
-    session_id: str | None = None
-    filename: str | None = None
-
-
 class Question(BaseModel):
     question: str = Field(..., min_length=1, description="Question cannot be empty")
     session_id: UUID
@@ -841,28 +844,18 @@ class SummarizeRequest(BaseModel):
 
 
 @app.post("/process-pdf")
-def process_pdf(data: PDFPath):
-    try:
-        safe_name = sanitize_upload_filename(data.filePath)
-        trusted_path = get_trusted_upload_path(safe_name)
-        upload_path = validate_uploaded_pdf(trusted_path)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+def process_pdf(
+    file: UploadFile = File(...),
+    session_id: str | None = Form(None)
+):
+    cleanup_expired_sessions()
 
-    file_path = str(upload_path)
-    requested_session_id = (data.session_id or "").strip() or None
-    filename = data.filename or safe_name or "uploaded.pdf"
-
+    filename = file.filename or "uploaded.pdf"
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF documents are supported.")
+    requested_session_id = (session_id or "").strip() or None
 
     # ─── Quota pre-flight checks ──────────────────────────────────────────────────
-    # We intentionally use _peek_session_unlocked (read-only, no TTL refresh)
-    # for all quota rejections. _touch_session_unlocked is only called later
-    # inside the merge block, after every check has passed. This prevents an
-    # attacker from spamming quota errors to keep an at-cap session alive
-    # indefinitely and avoid its 30-minute TTL expiry.
-
     if requested_session_id:
         with sessions_lock:
             session = _peek_session_unlocked(requested_session_id)
@@ -870,18 +863,53 @@ def process_pdf(data: PDFPath):
                 raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
             if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
                 raise HTTPException(status_code=400, detail="Maximum number of documents per session reached.")
+
     logger.info(
         "Processing PDF filename=%s existing_session=%s",
         filename,
         bool(requested_session_id),
     )
 
+    os.makedirs(str(UPLOADS_DIR), exist_ok=True)
+    temp_filename = f"temp_{uuid.uuid4().hex}.pdf"
+    temp_path = os.path.join(str(UPLOADS_DIR), temp_filename)
+
     try:
-        loader = PyPDFLoader(file_path)
-        docs = loader.load()
-    except Exception as exc:
-        logger.warning("Failed to load PDF filename=%s error=%s", filename, exc)
-        raise HTTPException(status_code=400, detail="Unable to read this PDF. It may be corrupted or encrypted.")
+        # Validate actual file magic bytes — extension alone is trivially bypassable.
+        # A valid PDF always begins with the 4-byte signature: %PDF (0x25 0x50 0x44 0x46).
+        magic = file.file.read(5)
+        if magic[:4] != b"%PDF":
+            raise HTTPException(
+                status_code=415,
+                detail="Invalid file type. Only real PDF documents are accepted."
+            )
+        file.file.seek(0)  # Reset stream so we can copy the full file
+
+        max_size = 20 * 1024 * 1024
+        bytes_written = 0
+        with open(temp_path, "wb") as f:
+            while chunk := file.file.read(65536):
+                bytes_written += len(chunk)
+                if bytes_written > max_size:
+                    raise HTTPException(status_code=413, detail="Uploaded PDF exceeds the maximum size of 20MB.")
+                f.write(chunk)
+
+        if bytes_written == 0:
+            raise HTTPException(status_code=400, detail="Uploaded PDF is empty. Please choose a valid PDF file.")
+
+        try:
+            loader = PyPDFLoader(temp_path)
+            docs = loader.load()
+        except Exception as exc:
+            logger.warning("Failed to load PDF filename=%s error=%s", filename, exc)
+            raise HTTPException(status_code=400, detail="Unable to read this PDF. It may be corrupted or encrypted.")
+    finally:
+        file.file.close()
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception as e:
+                logger.error("Failed to delete temp file %s: %s", temp_path, e)
 
     if not docs:
         raise HTTPException(status_code=400, detail="No readable pages were found in the PDF.")
@@ -901,13 +929,14 @@ def process_pdf(data: PDFPath):
 
     if not chunks:
         raise HTTPException(status_code=400, detail="No text chunks generated from the PDF. Please check your file.")
-
     if not requested_session_id and len(chunks) > MAX_CHUNKS_PER_SESSION:
         raise HTTPException(
             status_code=400,
-            detail=f"PDF is too large to index. A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks.",
+            detail=(
+                f"PDF is too large to index. "
+                f"A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks."
+            ),
         )
-
     if requested_session_id:
         with sessions_lock:
             session = _peek_session_unlocked(requested_session_id)
@@ -915,6 +944,12 @@ def process_pdf(data: PDFPath):
                 current_chunks = sum(doc.get("chunk_count", 0) for doc in session.get("documents", []))
                 if current_chunks + len(chunks) > MAX_CHUNKS_PER_SESSION:
                     raise HTTPException(status_code=400, detail="Maximum number of chunks per session exceeded.")
+    else:
+        if len(chunks) > MAX_CHUNKS_PER_SESSION:
+            raise HTTPException(
+                status_code=400,
+                detail=f"PDF is too large to index. A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks.",
+            )
 
     document_id = str(uuid.uuid4())
     now = now_ts()
@@ -1032,6 +1067,7 @@ def ask_question(data: Question):
                 question,
                 ASK_RETRIEVAL_CANDIDATES,
             )
+
     except Exception:
         logger.exception("Similarity search failed session_id=%s", session_id)
         raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
@@ -1050,25 +1086,61 @@ def ask_question(data: Question):
         if "page" in doc.metadata
     ))
 
-    context = format_context(docs, max_chars=6500)
+    formatted_context = ""
+
+    for idx, doc in enumerate(docs):
+        page = (
+            doc.metadata.get("page", 0) + 1
+            if "page" in doc.metadata
+            else None
+        )
+
+        formatted_context += (
+            f"[Source {idx+1} | Page {page}]\n"
+            f"{doc.page_content}\n\n"
+        )
+
+    context = formatted_context[:6500]
     retrieved_sources = sorted({document_display_name(doc) for doc in docs})
+    citation_sources = []
+
+    for idx, doc in enumerate(docs):
+        citation_sources.append({
+            "source_id": idx + 1,
+            "document": document_display_name(doc),
+            "page": (
+                doc.metadata.get("page", 0) + 1
+                if "page" in doc.metadata
+                else None
+            ),
+            "preview": concise_excerpt(doc.page_content, 180),
+        })
     grounded_answer = build_answer_from_documents(question, docs, intent)
     if grounded_answer:
         logger.info(
             "Returning grounded answer session_id=%s intent=%s retrieved_chunks=%s sources=%s",
             session_id, intent, len(docs), retrieved_sources,
         )
-        return {"answer": grounded_answer, "sources": pages}
+        return {
+            "answer": grounded_answer,
+            "sources": citation_sources,
+            "retrieval_type": "citation-aware"
+        }
 
     prompt = (
         "You are a careful assistant answering questions over one or more uploaded PDF documents. "
         "Use only the provided context. The context may include excerpts from multiple PDFs. "
         "When the question asks for a relationship, comparison, or synthesis, connect the relevant facts across documents. "
         "If the context does not contain enough information, say that briefly and do not invent details.\n\n"
+
+        "Reference the provided source numbers naturally whenever the answer is directly supported by the context.\n"
+        "Cite sources using formats like 'According to Source 1' or 'Source 2 explains that...'\n"
+
         "You are a helpful AI assistant.\n"
         "Give clear, conversational, human-friendly answers.\n"
         "Do not return raw PDF text or chunks.\n"
         "Summarize properly in readable sentences.\n\n"
+
         f"Context:\n{context}\n\n"
         f"Question: {question}\n"
         "Answer:"
@@ -1079,7 +1151,11 @@ def ask_question(data: Question):
         session_id, len(docs), retrieved_sources,
     )
     answer = generate_response(prompt, max_new_tokens=256)
-    return {"answer": answer, "sources": pages}
+    return {
+    "answer": answer,
+    "sources": citation_sources,
+    "retrieval_type": "citation-aware"
+}
 
 
 @app.post("/summarize")
@@ -1110,6 +1186,38 @@ def summarize_pdf(data: SummarizeRequest):
 
     return {"summary": build_session_summary(uploaded_documents, indexed_documents)}
 
+
+@app.post("/upload_pdf")
+async def upload_pdf(file: UploadFile = File(...)):
+    # 1. Save the uploaded file
+    file_name = sanitize_upload_filename(file.filename)
+    file_path = get_trusted_upload_path(file_name)
+    with open(file_path, "wb") as f:
+        f.write(await file.read())
+    validated_path = validate_uploaded_pdf(file_path)
+
+    # 2. Load and split the PDF
+    loader = PyPDFLoader(validated_path)
+    pages = loader.load()
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    docs = splitter.split_documents(pages)
+
+    # 3. Generate a new session_id and unique folder
+    session_id = str(uuid.uuid4())
+    session_dir = os.path.join(PERSIST_DIR, session_id)
+
+    # 4. Build FAISS index for this session
+    vectorstore = FAISS.from_documents(docs, embeddings)
+    vectorstore.save_local(session_dir)
+
+    # 5. Store session reference
+    sessions[session_id] = {"vectorstore": vectorstore}
+
+    # 6. Return both message and session_id
+    return {
+        "message": f"{file_name} uploaded and indexed successfully",
+        "session_id": session_id
+    }
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=5000, reload=True)
