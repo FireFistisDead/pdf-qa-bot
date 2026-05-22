@@ -28,6 +28,12 @@ import re
 
 load_dotenv()
 
+# ── Logger (must be defined before exception handlers that use it) ─────────────
+logger = logging.getLogger("pdf_qa_rag")
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
 
 app = FastAPI()
 
@@ -70,15 +76,12 @@ sessions = {}
 sessions_lock = threading.Lock()
 model_load_lock = threading.Lock()
 generation_lock = threading.Lock()
-logger = logging.getLogger("pdf_qa_rag")
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-)
 
 # Configurable session TTL and max cap
 SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "30"))
 MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "100"))
+MAX_DOCUMENTS_PER_SESSION = int(os.getenv("MAX_DOCUMENTS_PER_SESSION", "5"))
+MAX_CHUNKS_PER_SESSION = int(os.getenv("MAX_CHUNKS_PER_SESSION", "2000"))
 ASK_RETRIEVAL_CANDIDATES = int(os.getenv("ASK_RETRIEVAL_CANDIDATES", "12"))
 ASK_MAX_CONTEXT_CHUNKS = int(os.getenv("ASK_MAX_CONTEXT_CHUNKS", "6"))
 ASK_CHUNKS_PER_DOCUMENT = int(os.getenv("ASK_CHUNKS_PER_DOCUMENT", "2"))
@@ -86,69 +89,21 @@ ASK_DIVERSITY_RANK_LIMIT = int(os.getenv("ASK_DIVERSITY_RANK_LIMIT", "8"))
 ASK_DIVERSITY_SCORE_MULTIPLIER = float(os.getenv("ASK_DIVERSITY_SCORE_MULTIPLIER", "1.8"))
 ASK_DIVERSITY_SCORE_MARGIN = float(os.getenv("ASK_DIVERSITY_SCORE_MARGIN", "0.35"))
 QUERY_STOPWORDS = {
-    "about",
-    "according",
-    "also",
-    "and",
-    "are",
-    "between",
-    "compare",
-    "describe",
-    "does",
-    "document",
-    "documents",
-    "explain",
-    "from",
-    "give",
-    "how",
-    "into",
-    "is",
-    "of",
-    "pdf",
-    "pdfs",
-    "related",
-    "summarize",
-    "tell",
-    "the",
-    "their",
-    "these",
-    "this",
-    "to",
-    "uploaded",
-    "what",
-    "with",
+    "about", "according", "also", "and", "are", "between", "compare",
+    "describe", "does", "document", "documents", "explain", "from", "give",
+    "how", "into", "is", "of", "pdf", "pdfs", "related", "summarize",
+    "tell", "the", "their", "these", "this", "to", "uploaded", "what", "with",
 }
 RELATIONSHIP_QUERY_TERMS = {
-    "associated",
-    "connection",
-    "linked",
-    "relation",
-    "relationship",
-    "related",
+    "associated", "connection", "linked", "relation", "relationship", "related",
 }
 COMPARISON_QUERY_TERMS = {
-    "between",
-    "compare",
-    "comparison",
-    "contrast",
-    "difference",
-    "different",
-    "role",
-    "versus",
-    "vs",
+    "between", "compare", "comparison", "contrast", "difference",
+    "different", "role", "versus", "vs",
 }
 OVERVIEW_QUERY_TERMS = {
-    "across",
-    "all",
-    "covered",
-    "coverage",
-    "documents",
-    "files",
-    "multiple",
-    "overall",
-    "overview",
-    "summarize",
-    "topics",
+    "across", "all", "covered", "coverage", "documents", "files",
+    "multiple", "overall", "overview", "summarize", "topics",
 }
 INSUFFICIENT_CONTEXT_MESSAGE = "The uploaded documents do not contain enough information to answer this question."
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -160,23 +115,12 @@ UPLOAD_FILENAME_CHARS = frozenset(
     "._-"
 )
 FACTUAL_QUESTION_PREFIXES = (
-    ("what", "is"),
-    ("what", "are"),
-    ("what", "was"),
-    ("what", "were"),
-    ("who", "is"),
-    ("who", "are"),
-    ("who", "was"),
-    ("who", "were"),
-    ("where", "is"),
-    ("where", "are"),
-    ("where", "was"),
-    ("where", "were"),
-    ("when", "is"),
-    ("when", "are"),
-    ("when", "was"),
-    ("when", "were"),
+    ("what", "is"), ("what", "are"), ("what", "was"), ("what", "were"),
+    ("who", "is"), ("who", "are"), ("who", "was"), ("who", "were"),
+    ("where", "is"), ("where", "are"), ("where", "was"), ("where", "were"),
+    ("when", "is"), ("when", "are"), ("when", "was"), ("when", "were"),
 )
+
 
 def now_ts():
     return time.time()
@@ -190,14 +134,12 @@ def cleanup_expired_sessions():
     evicted_count = 0
     active_sessions = 0
     with sessions_lock:
-        # Expire old sessions
         ttl_seconds = SESSION_TTL_MINUTES * 60
         for sid, meta in list(sessions.items()):
             if now_ts() - meta["last_accessed"] > ttl_seconds:
                 expired.append(sid)
         for sid in expired:
             del sessions[sid]
-        # Enforce max cap (evict oldest)
         while len(sessions) > MAX_ACTIVE_SESSIONS:
             oldest = min(sessions.items(), key=lambda x: x[1]["created_at"])[0]
             del sessions[oldest]
@@ -227,6 +169,38 @@ def _touch_session_unlocked(session_id: str):
         return None
     meta["last_accessed"] = now_ts()
     return meta
+
+
+def _peek_session_unlocked(session_id: str):
+    """Read session metadata without refreshing last_accessed.
+
+    Use this for validation and quota checks where we must not side-effect the
+    TTL. An attacker who is rejected at the quota boundary should NOT be able
+    to keep an at-cap session alive by spamming the error response.
+    Only call _touch_session_unlocked once all checks pass and the operation
+    is actually going to succeed.
+    """
+    meta = sessions.get(session_id)
+    if not meta:
+        return None
+    if _is_session_expired(meta):
+        del sessions[session_id]
+        logger.info("Session expired session_id=%s", session_id)
+        return None
+    return meta
+
+
+def _cleanup_expired_sessions_unlocked():
+    """Must be called with sessions_lock held."""
+    ttl_seconds = SESSION_TTL_MINUTES * 60
+    expired = [
+        sid for sid, meta in list(sessions.items())
+        if now_ts() - meta["last_accessed"] > ttl_seconds
+    ]
+    for sid in expired:
+        del sessions[sid]
+    if expired:
+        logger.info("Expired sessions removed count=%s", len(expired))
 
 
 def _enforce_max_sessions_unlocked():
@@ -420,16 +394,13 @@ def markdown_bullets(sentences):
 
 def build_relationship_answer(documents, question):
     grouped_documents = group_documents_by_source(documents)
-
     if len(grouped_documents) < 2:
         return None
-
     answer_parts = ["Based on the uploaded documents:"]
     for source_name, source_documents in grouped_documents.items():
         sentences = best_sentences_for_document(source_documents, question, max_sentences=2)
         if sentences:
             answer_parts.append(f"* **{source_name}**: {' '.join(sentences)}")
-
     source_list = ", ".join(grouped_documents.keys())
     answer_parts.append(
         f"\nTogether, these points show the relationship across {source_list} without using information outside the uploaded documents."
@@ -441,13 +412,11 @@ def build_comparison_answer(documents, question):
     grouped_documents = group_documents_by_source(documents)
     if len(grouped_documents) < 2:
         return None
-
     answer_parts = ["Based on the uploaded documents:"]
     for source_name, source_documents in grouped_documents.items():
         sentences = best_sentences_for_document(source_documents, question, max_sentences=2)
         if sentences:
             answer_parts.append(f"* **{source_name}**: {' '.join(sentences)}")
-
     answer_parts.append(
         "\nIn comparison, each document describes a different role or focus, and the contrast above is limited to the retrieved PDF content."
     )
@@ -458,7 +427,6 @@ def build_overview_answer(documents, question):
     grouped_documents = group_documents_by_source(documents)
     if not grouped_documents:
         return None
-
     answer_parts = ["The uploaded documents cover:"]
     for source_name, source_documents in grouped_documents.items():
         sentences = best_sentences_for_document(source_documents, question, max_sentences=2)
@@ -478,11 +446,9 @@ def extract_factual_subject(question):
     words = question.strip().split(maxsplit=2)
     if len(words) < 3:
         return None
-
     prefix = (words[0].lower(), words[1].lower())
     if prefix not in FACTUAL_QUESTION_PREFIXES:
         return None
-
     subject = strip_trailing_question_punctuation(words[2])
     return subject or None
 
@@ -490,22 +456,18 @@ def extract_factual_subject(question):
 def build_factual_answer(documents, question):
     if not has_grounded_keyword_overlap(question, documents):
         return None
-
     subject = extract_factual_subject(question)
     keywords = query_keywords(subject or question)
     grouped_documents = group_documents_by_source(documents)
     supporting_sentences = []
-
     for source_name, source_documents in grouped_documents.items():
         sentences = best_sentences_for_document(source_documents, subject or question, max_sentences=2)
         for sentence in sentences:
             if keywords and not keywords.intersection(tokenize_text(sentence)):
                 continue
             supporting_sentences.append((source_name, sentence))
-
     if not supporting_sentences:
         return None
-
     source_name, first_sentence = supporting_sentences[0]
     if subject:
         if "document" in subject.lower() and "about" in subject.lower():
@@ -514,7 +476,6 @@ def build_factual_answer(documents, question):
             answer = f"Based on **{source_name}**, {subject} is mentioned in this context: {first_sentence}"
     else:
         answer = f"Based on **{source_name}**, {first_sentence}"
-
     additional_sentences = [
         sentence
         for _source, sentence in supporting_sentences[1:3]
@@ -528,7 +489,6 @@ def build_factual_answer(documents, question):
 def build_answer_from_documents(question, documents, intent):
     if not has_grounded_keyword_overlap(question, documents) and intent != "overview":
         return INSUFFICIENT_CONTEXT_MESSAGE
-
     if intent == "relationship":
         return build_relationship_answer(documents, question) or INSUFFICIENT_CONTEXT_MESSAGE
     if intent == "comparison":
@@ -537,7 +497,6 @@ def build_answer_from_documents(question, documents, intent):
         return build_overview_answer(documents, question) or INSUFFICIENT_CONTEXT_MESSAGE
     if intent == "factual":
         return build_factual_answer(documents, question) or INSUFFICIENT_CONTEXT_MESSAGE
-
     return INSUFFICIENT_CONTEXT_MESSAGE
 
 
@@ -559,7 +518,6 @@ def shared_terms_between_documents(grouped_documents):
         }
         if terms:
             document_term_sets.append(terms)
-
     if len(document_term_sets) < 2:
         return set()
     shared_terms = set.intersection(*document_term_sets)
@@ -569,45 +527,36 @@ def shared_terms_between_documents(grouped_documents):
 def build_combined_insights(grouped_documents):
     if len(grouped_documents) < 2:
         return []
-
     insights = []
     shared_terms = shared_terms_between_documents(grouped_documents)
     if shared_terms:
         shared_text = ", ".join(sorted(shared_terms)[:5])
         insights.append(f"Shared concepts across documents include {shared_text}.")
-
     source_descriptions = []
     for source_name, source_documents in grouped_documents.items():
         sentences = build_document_summary_bullets(source_documents, max_bullets=1)
         if sentences:
             source_descriptions.append(f"{source_name} focuses on {sentences[0]}")
-
     if source_descriptions:
         insights.append(" ".join(source_descriptions))
-
     if not insights:
         insights.append("The uploaded documents cover distinct but related areas of the session context.")
-
     return insights[:3]
 
 
 def build_session_summary(uploaded_documents, indexed_documents):
     document_summaries = []
     grouped_for_insights = {}
-
     for uploaded_document in uploaded_documents:
         document_chunks = documents_for_upload(indexed_documents, uploaded_document["document_id"])
         document_chunks = unique_documents(document_chunks)
         filename = uploaded_document["filename"]
         grouped_for_insights[filename] = document_chunks
-
         bullets = build_document_summary_bullets(document_chunks)
         document_summaries.append(f"## {filename}\n\n{markdown_bullets(bullets)}")
-
     combined_insights = build_combined_insights(grouped_for_insights)
     if combined_insights:
         document_summaries.append(f"## Combined Insights\n\n{markdown_bullets(combined_insights)}")
-
     return "\n\n".join(document_summaries)
 
 
@@ -622,11 +571,6 @@ def representative_documents_by_source(documents, per_document_limit=2, max_docu
 
 
 def search_retrieval_candidates(vectorstore, question, candidate_count):
-    """
-    Return ranked retrieval candidates as (document, score, rank).
-    FAISS scores are distances, so lower is better. If scores are unavailable,
-    rank is used as a conservative fallback.
-    """
     try:
         scored_documents = vectorstore.similarity_search_with_score(question, k=candidate_count)
         return [
@@ -666,18 +610,11 @@ def group_candidates_by_document(scored_candidates):
     return grouped_candidates, document_order
 
 
-def is_candidate_document_relevant(
-    best_score,
-    document_best_score,
-    document_best_rank,
-    document,
-    keywords,
-):
+def is_candidate_document_relevant(best_score, document_best_score, document_best_rank, document, keywords):
     if document_best_rank <= 1:
         return True
     if document_best_rank > ASK_DIVERSITY_RANK_LIMIT:
         return False
-
     score_cutoff = max(
         best_score + ASK_DIVERSITY_SCORE_MARGIN,
         best_score * ASK_DIVERSITY_SCORE_MULTIPLIER,
@@ -689,42 +626,27 @@ def is_candidate_document_relevant(
 
 
 def diversify_retrieved_documents(scored_candidates, question):
-    """
-    Keep the globally best context, but reserve space for other relevant PDFs.
-    This fixes cross-document questions where one document dominates top-k.
-    """
     unique_candidates = dedupe_scored_candidates(scored_candidates)
     if not unique_candidates:
         return []
-
     grouped_candidates, document_order = group_candidates_by_document(unique_candidates)
     best_score = unique_candidates[0][1]
     keywords = query_keywords(question)
     selected_candidates = []
-
     relevant_document_ids = []
     for document_id in document_order:
         document_best = grouped_candidates[document_id][0]
         if is_candidate_document_relevant(
-            best_score,
-            document_best[1],
-            document_best[2],
-            document_best[0],
-            keywords,
+            best_score, document_best[1], document_best[2], document_best[0], keywords,
         ):
             relevant_document_ids.append(document_id)
-
     per_document_limit = (
         ASK_MAX_CONTEXT_CHUNKS
         if len(relevant_document_ids) == 1
         else ASK_CHUNKS_PER_DOCUMENT
     )
-
     for document_id in relevant_document_ids:
-        selected_candidates.extend(
-            grouped_candidates[document_id][:per_document_limit]
-        )
-
+        selected_candidates.extend(grouped_candidates[document_id][:per_document_limit])
     selected_keys = {
         document_dedupe_key(document)
         for document, _score, _rank in selected_candidates
@@ -740,7 +662,6 @@ def diversify_retrieved_documents(scored_candidates, question):
             continue
         selected_candidates.append(candidate)
         selected_keys.add(document_dedupe_key(document))
-
     selected_candidates.sort(key=lambda candidate: candidate[2])
     return [
         document for document, _score, _rank in selected_candidates[:ASK_MAX_CONTEXT_CHUNKS]
@@ -778,12 +699,13 @@ def documents_for_upload(all_documents, document_id):
         doc for doc in all_documents
         if doc.metadata.get("document_id") == document_id
     ]
+
+
 HF_GENERATION_MODEL = os.getenv("HF_GENERATION_MODEL", "google/flan-t5-base")
 generation_tokenizer = None
 generation_model = None
 generation_is_encoder_decoder = False
 
-# Load local embedding model
 embedding_model = HuggingFaceEmbeddings(
     model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
@@ -800,7 +722,10 @@ def load_generation_model():
         if generation_model is not None and generation_tokenizer is not None:
             return generation_tokenizer, generation_model, generation_is_encoder_decoder
 
-        logger.info("Loading generation model")
+        logger.info(
+            "Loading generation model model=%s",
+            HF_GENERATION_MODEL,
+        )
 
         config = AutoConfig.from_pretrained(HF_GENERATION_MODEL)
         generation_is_encoder_decoder = bool(getattr(config, "is_encoder_decoder", False))
@@ -823,7 +748,6 @@ def load_generation_model():
 def generate_response(prompt: str, max_new_tokens: int) -> str:
     tokenizer, model, is_encoder_decoder = load_generation_model()
     model_device = next(model.parameters()).device
-
     encoded = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
     encoded = {key: value.to(model_device) for key, value in encoded.items()}
     pad_token_id = (
@@ -846,7 +770,6 @@ def generate_response(prompt: str, max_new_tokens: int) -> str:
     if is_encoder_decoder:
         text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
         return text.strip()
-
     input_len = encoded["input_ids"].shape[1]
     new_tokens = generated_ids[0][input_len:]
     text = tokenizer.decode(new_tokens, skip_special_tokens=True)
@@ -856,7 +779,6 @@ def generate_response(prompt: str, max_new_tokens: int) -> str:
 def sanitize_upload_filename(client_file_path: str) -> str:
     if not client_file_path or not client_file_path.strip():
         raise ValueError("Missing PDF file path.")
-
     stripped_path = client_file_path.strip()
     normalized_path = stripped_path.replace("\\", "/")
     safe_name = normalized_path.rsplit("/", 1)[-1].strip()
@@ -874,45 +796,24 @@ def sanitize_upload_filename(client_file_path: str) -> str:
 
 
 def get_trusted_upload_path(file_name: str) -> str:
-    """
-    Construct a trusted server-owned upload path.
-
-    Only validated filenames are allowed here.
-    """
     trusted_path = os.path.join(str(UPLOADS_DIR), file_name)
-
     normalized_uploads_dir = os.path.abspath(str(UPLOADS_DIR))
     normalized_path = os.path.abspath(trusted_path)
-
     if os.path.dirname(normalized_path) != normalized_uploads_dir:
         raise ValueError("Invalid upload path.")
-
     return normalized_path
 
 
 def validate_uploaded_pdf(file_path: str) -> str:
-    """
-    Validate a trusted server-owned upload path.
-
-    SECURITY:
-    This function only accepts paths reconstructed internally via
-    get_trusted_upload_path() and never raw client paths.
-    """
     trusted_path = os.fspath(file_path)
-
     if not trusted_path.lower().endswith(".pdf"):
         raise ValueError("Only PDF files are allowed.")
-
     # CodeQL [py/path-injection]: trusted server-constructed upload path
     if not os.path.isfile(trusted_path):
         raise ValueError("File does not exist or is not a valid file.")
-
     # CodeQL [py/path-injection]: trusted server-constructed upload path
     if os.path.getsize(trusted_path) == 0:
-        raise ValueError(
-            "Uploaded PDF is empty. Please choose a valid PDF file."
-        )
-
+        raise ValueError("Uploaded PDF is empty. Please choose a valid PDF file.")
     return trusted_path
 
 
@@ -941,7 +842,6 @@ class SummarizeRequest(BaseModel):
 
 @app.post("/process-pdf")
 def process_pdf(data: PDFPath):
-    cleanup_expired_sessions()
     try:
         safe_name = sanitize_upload_filename(data.filePath)
         trusted_path = get_trusted_upload_path(safe_name)
@@ -956,9 +856,20 @@ def process_pdf(data: PDFPath):
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF documents are supported.")
 
-    if requested_session_id and not validate_existing_session(requested_session_id):
-        raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+    # ─── Quota pre-flight checks ──────────────────────────────────────────────────
+    # We intentionally use _peek_session_unlocked (read-only, no TTL refresh)
+    # for all quota rejections. _touch_session_unlocked is only called later
+    # inside the merge block, after every check has passed. This prevents an
+    # attacker from spamming quota errors to keep an at-cap session alive
+    # indefinitely and avoid its 30-minute TTL expiry.
 
+    if requested_session_id:
+        with sessions_lock:
+            session = _peek_session_unlocked(requested_session_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+            if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
+                raise HTTPException(status_code=400, detail="Maximum number of documents per session reached.")
     logger.info(
         "Processing PDF filename=%s existing_session=%s",
         filename,
@@ -975,15 +886,35 @@ def process_pdf(data: PDFPath):
     if not docs:
         raise HTTPException(status_code=400, detail="No readable pages were found in the PDF.")
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=100
-    )
-
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     chunks = splitter.split_documents(docs)
+    unique_chunks = []
+    seen_content = set()
+
+    for chunk in chunks:
+        content = chunk.page_content.strip()
+        if content not in seen_content:
+            seen_content.add(content)
+            unique_chunks.append(chunk)
+
+    chunks = unique_chunks
 
     if not chunks:
         raise HTTPException(status_code=400, detail="No text chunks generated from the PDF. Please check your file.")
+
+    if not requested_session_id and len(chunks) > MAX_CHUNKS_PER_SESSION:
+        raise HTTPException(
+            status_code=400,
+            detail=f"PDF is too large to index. A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks.",
+        )
+
+    if requested_session_id:
+        with sessions_lock:
+            session = _peek_session_unlocked(requested_session_id)
+            if session:
+                current_chunks = sum(doc.get("chunk_count", 0) for doc in session.get("documents", []))
+                if current_chunks + len(chunks) > MAX_CHUNKS_PER_SESSION:
+                    raise HTTPException(status_code=400, detail="Maximum number of chunks per session exceeded.")
 
     document_id = str(uuid.uuid4())
     now = now_ts()
@@ -1024,7 +955,6 @@ def process_pdf(data: PDFPath):
                     filename,
                 )
                 raise HTTPException(status_code=500, detail="Failed to merge the uploaded PDF into this session.")
-
             session.setdefault("documents", []).append(uploaded_document)
             session["last_accessed"] = now
             session_id = requested_session_id
@@ -1036,6 +966,7 @@ def process_pdf(data: PDFPath):
                 len(chunks),
             )
         else:
+            _cleanup_expired_sessions_unlocked()
             _enforce_max_sessions_unlocked()
             session_id = str(uuid.uuid4())
             sessions[session_id] = {
@@ -1093,8 +1024,6 @@ def ask_question(data: Question):
     if not docs:
         return {"answer": "No relevant context found."}
 
-    # Extract unique 1-indexed page numbers from retrieved chunk metadata.
-    # PyPDFLoader stores pages as 0-based integers in doc.metadata["page"].
     pages = sorted(set(
         doc.metadata["page"] + 1
         for doc in docs
@@ -1107,10 +1036,7 @@ def ask_question(data: Question):
     if grounded_answer:
         logger.info(
             "Returning grounded answer session_id=%s intent=%s retrieved_chunks=%s sources=%s",
-            session_id,
-            intent,
-            len(docs),
-            retrieved_sources,
+            session_id, intent, len(docs), retrieved_sources,
         )
         return {"answer": grounded_answer, "sources": pages}
 
@@ -1119,6 +1045,10 @@ def ask_question(data: Question):
         "Use only the provided context. The context may include excerpts from multiple PDFs. "
         "When the question asks for a relationship, comparison, or synthesis, connect the relevant facts across documents. "
         "If the context does not contain enough information, say that briefly and do not invent details.\n\n"
+        "You are a helpful AI assistant.\n"
+        "Give clear, conversational, human-friendly answers.\n"
+        "Do not return raw PDF text or chunks.\n"
+        "Summarize properly in readable sentences.\n\n"
         f"Context:\n{context}\n\n"
         f"Question: {question}\n"
         "Answer:"
@@ -1126,9 +1056,7 @@ def ask_question(data: Question):
 
     logger.info(
         "Executing query session_id=%s retrieved_chunks=%s sources=%s",
-        session_id,
-        len(docs),
-        retrieved_sources,
+        session_id, len(docs), retrieved_sources,
     )
     answer = generate_response(prompt, max_new_tokens=256)
     return {"answer": answer, "sources": pages}

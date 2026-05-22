@@ -10,7 +10,7 @@ import toast, { Toaster } from "react-hot-toast";
 
 import { extractApiErrorMessage, uploadPdfApi } from "./services/api";
 
-pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
+pdfjs.GlobalWorkerOptions.workerSrc = `${process.env.PUBLIC_URL}/pdf.worker.min.js`;
 
 function App() {
   const [pdfs, setPdfs] = useState([]); // {name, url, chat: [], session_id: ""}
@@ -46,17 +46,22 @@ function App() {
       const data = await uploadPdfApi(file);
       const url = URL.createObjectURL(file);
 
-      setPdfs((prev) => [
-        ...prev,
-        {
-          name: file.name,
-          url,
-          chat: [],
-          session_id: data.session_id,
-        },
-      ]);
-
-      setSelectedPdf(data.session_id);
+    setPdfs((prev) => {
+  const updated = [
+    ...prev,
+    {
+      name: file.name,
+      url,
+      chat: [],
+      session_id: data.session_id,
+    },
+  ];
+ 
+  if (prev.length === 0) {
+    setSelectedPdf(data.session_id);
+  }
+  return updated;
+});
       toast.success("PDF uploaded successfully!", {
         id: loadingToast,
       });
@@ -146,6 +151,28 @@ function App() {
             darkMode={darkMode}
             onUpload={handleUpload}
           />
+          {/* PDF LIST */}
+{pdfs.length > 0 && (
+  <div style={{ marginBottom: "16px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
+    {pdfs.map((pdf) => (
+      <button
+        key={pdf.session_id}
+        onClick={() => setSelectedPdf(pdf.session_id)}
+        style={{
+          padding: "8px 16px",
+          borderRadius: "12px",
+          border: "none",
+          background: selectedPdf === pdf.session_id ? "#8B5CF6" : "#e0e0e0",
+          color: selectedPdf === pdf.session_id ? "#fff" : "#333",
+          cursor: "pointer",
+          fontWeight: 600,
+        }}
+      >
+        {pdf.name}
+      </button>
+    ))}
+  </div>
+)}
           <Row className="justify-content-center">
             <Col md={11}>
               <Row className="g-4">

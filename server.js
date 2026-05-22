@@ -6,13 +6,157 @@ const fs = require("fs");
 const fsPromises = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
+const { rateLimit } = require("express-rate-limit");
+const slowDown = require("express-slow-down");
+const helmet = require("helmet");
+const { askSchema, summarizeSchema } = require("./validators/schemas");
 
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
 const PORT = process.env.PORT || 4000;
 
 const app = express();
+
+// ─── Trust Proxy ────────────────────────────────────────────────────────────
+// Critical for cloud deployments (AWS ALB, Cloudflare, Nginx). Without this,
+// Express only sees the load-balancer IP, so the rate limiter would lock out
+// ALL users the moment a single attacker spams the API.
+// Set to the number of reverse proxies in front of this server (e.g. PROXY_COUNT=1).
+const PROXY_COUNT = parseInt(process.env.PROXY_COUNT || "0", 10);
+if (PROXY_COUNT > 0) {
+  app.set("trust proxy", PROXY_COUNT);
+}
+
+// ─── Helmet — HTTP Security Headers ─────────────────────────────────────────
+// Hardens the HTTP layer against clickjacking, MIME sniffing, XSS, etc.
+// These headers are your first line of defence before any code even runs.
+app.use(helmet());
+
 app.use(cors());
-app.use(express.json());
+
+// ─── Body Size Limit ─────────────────────────────────────────────────────────
+// Cap JSON payloads at 16 KB. Prevents memory exhaustion from huge JSON bodies
+// sent to /ask or /summarize by an attacker trying to blow out the parser.
+app.use(express.json({ limit: "16kb" }));
+
+// ─── IP Ban Registry ─────────────────────────────────────────────────────────
+// In-memory stepped ban system. Each time an IP trips a rate limiter, its
+// offence count increments and the ban window grows on a fixed stepped schedule
+// (not exponential/doubling — see BAN_DURATIONS_MS for the exact policy).
+// Offence 1 → 5 min ban | Offence 2 → 15 min | Offence 3+ → 1 hour
+// This is a lightweight, zero-dependency solution suitable for single-instance
+// deployments. For multi-instance cloud deployments, replace with Redis.
+const bannedIPs = new Map(); // ip → { until: timestamp, offences: number }
+
+const BAN_DURATIONS_MS = [
+  5 * 60 * 1000,  // Offence 1 → 5 minutes
+  15 * 60 * 1000, // Offence 2 → 15 minutes
+  60 * 60 * 1000, // Offence 3+ → 1 hour
+];
+
+const recordOffence = (ip) => {
+  const existing = bannedIPs.get(ip) || { offences: 0 };
+  const offences = existing.offences + 1;
+  const durationIndex = Math.min(offences - 1, BAN_DURATIONS_MS.length - 1);
+  const until = Date.now() + BAN_DURATIONS_MS[durationIndex];
+  bannedIPs.set(ip, { until, offences });
+  console.warn(`[BAN] IP=${ip} offences=${offences} banned until=${new Date(until).toISOString()}`);
+};
+
+// Purge expired bans every 10 minutes so the Map doesn't grow forever.
+const banCleanupInterval = setInterval(() => {
+  const now = Date.now();
+  for (const [ip, ban] of bannedIPs.entries()) {
+    if (ban.until <= now) bannedIPs.delete(ip);
+  }
+}, 10 * 60 * 1000);
+
+if (typeof banCleanupInterval.unref === "function") {
+  banCleanupInterval.unref();
+}
+
+// Ban-check middleware — runs before every route.
+const banGuard = (req, res, next) => {
+  const ip = req.ip || req.socket.remoteAddress;
+  const ban = bannedIPs.get(ip);
+  if (ban && ban.until > Date.now()) {
+    const retryAfterSec = Math.ceil((ban.until - Date.now()) / 1000);
+    res.set("Retry-After", String(retryAfterSec));
+    return res.status(429).json({
+      error: `Your IP has been temporarily banned due to repeated abuse. Try again in ${Math.ceil(retryAfterSec / 60)} minute(s).`,
+    });
+  }
+  next();
+};
+
+// A handler factory that records an offence then returns 429.
+// Pass this as the `handler` option to any rateLimit() config.
+const rateLimitHandler = (req, res) => {
+  const ip = req.ip || req.socket.remoteAddress;
+  recordOffence(ip);
+  res.status(429).json({
+    error: res.locals.rateLimitMessage || "Too many requests. Please slow down.",
+  });
+};
+
+// ─── Rate Limiters ───────────────────────────────────────────────────────────
+
+// Global baseline — broad bot/scraper protection across every route.
+// 200 req / 15 min per IP. Tripping this triggers the escalating ban.
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 200,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  handler: (req, res) => {
+    res.locals.rateLimitMessage = "Too many requests. Please slow down and try again later.";
+    rateLimitHandler(req, res);
+  },
+});
+
+// Hard cap: configured uploads / hour per IP. Tripping this triggers the ban system.
+const uploadLimitMax = parseInt(process.env.RATE_LIMIT_UPLOAD_MAX || "10", 10);
+const uploadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: uploadLimitMax,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  handler: (req, res) => {
+    res.locals.rateLimitMessage = `Upload limit reached. You can upload up to ${uploadLimitMax} PDFs per hour. Please try again later.`;
+    rateLimitHandler(req, res);
+  },
+});
+
+// Inference slow-down — adds progressive friction BEFORE the hard block fires.
+// RATE_LIMIT_SLOWDOWN_AFTER (default 10): number of free requests per window.
+// After that, each extra request incurs an additional (hits - delayAfter) * 500ms
+// delay, starting at 500ms and capped at 5s. This gives a genuine linear ramp
+// instead of jumping straight to multi-second delays on the very first hit over
+// the threshold. Kept separate from RATE_LIMIT_INFERENCE_MAX so operators can
+// tune slow-down friction and hard-block quota independently.
+const SLOWDOWN_DELAY_AFTER = parseInt(process.env.RATE_LIMIT_SLOWDOWN_AFTER || "10", 10);
+const inferenceSlowDown = slowDown({
+  windowMs: 5 * 60 * 1000,
+  delayAfter: SLOWDOWN_DELAY_AFTER,
+  delayMs: (hits) => (hits - SLOWDOWN_DELAY_AFTER) * 500,
+  maxDelayMs: 5000,
+});
+
+// Inference hard limiter — fires after slow-down window if the attacker still
+// keeps hammering. Triggers the escalating ban on violation.
+const inferenceLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: parseInt(process.env.RATE_LIMIT_INFERENCE_MAX || "30", 10),
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  handler: (req, res) => {
+    res.locals.rateLimitMessage = "Inference limit reached. Please wait a few minutes before sending more requests.";
+    rateLimitHandler(req, res);
+  },
+});
+
+// Apply the ban guard and global limiter to every single route.
+app.use(banGuard);
+app.use(globalLimiter);
 
 const MAX_PDF_SIZE_BYTES = 20 * 1024 * 1024;
 const UPLOADS_DIR = path.resolve("uploads");
@@ -76,53 +220,8 @@ const extractServiceDetails = (err) => {
   );
 };
 
-const uuidPattern =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-const validateSessionId = (sessionId) => {
-  if (!sessionId || typeof sessionId !== "string") {
-    return "session_id is required.";
-  }
-  if (!uuidPattern.test(sessionId)) {
-    return "Invalid session ID format.";
-  }
-  return null;
-};
-
-const validateAskBody = (body) => {
-  const question =
-    typeof body?.question === "string" ? body.question.trim() : "";
-  if (!question) {
-    return { error: "Question is required." };
-  }
-
-  const sessionError = validateSessionId(body?.session_id);
-  if (sessionError) {
-    return { error: sessionError };
-  }
-
-  return {
-    value: {
-      question,
-      session_id: body.session_id,
-    },
-  };
-};
-
-const validateSummarizeBody = (body) => {
-  const sessionError = validateSessionId(body?.session_id);
-  if (sessionError) {
-    return { error: sessionError };
-  }
-
-  return {
-    value: {
-      session_id: body.session_id,
-    },
-  };
-};
-
-app.post("/upload", upload.single("file"), async (req, res) => {
+app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
   const uploadedFilePath = req.file?.path;
   const absoluteFilePath = uploadedFilePath
     ? path.resolve(uploadedFilePath)
@@ -134,7 +233,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       return sendUploadError(
         res,
         400,
-        "No PDF uploaded. Please choose a PDF file and try again.",
+        "No file uploaded. Use form field name 'file'.",
       );
     }
 
@@ -176,16 +275,17 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-app.post("/ask", async (req, res) => {
-  const validation = validateAskBody(req.body);
+app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+  const validation = askSchema.safeParse(req.body);
 
-  if (validation.error) {
+  if (!validation.success) {
     return res.status(400).json({
-      error: validation.error,
+      error: "Validation failed",
+      details: validation.error.flatten(),
     });
   }
 
-  const { question, session_id } = validation.value;
+  const { question, session_id } = validation.data;
 
   try {
     const response = await axios.post(`${RAG_SERVICE_URL}/ask`, {
@@ -209,19 +309,20 @@ app.post("/ask", async (req, res) => {
   }
 });
 
-app.post("/summarize", async (req, res) => {
-  const validation = validateSummarizeBody(req.body);
+app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+  const validation = summarizeSchema.safeParse(req.body);
 
-  if (validation.error) {
+  if (!validation.success) {
     return res.status(400).json({
-      error: validation.error,
+      error: "Validation failed",
+      details: validation.error.flatten(),
     });
   }
 
   try {
     const response = await axios.post(
       `${RAG_SERVICE_URL}/summarize`,
-      validation.value,
+      validation.data,
     );
 
     return res.json({
@@ -237,6 +338,10 @@ app.post("/summarize", async (req, res) => {
       details: isDevelopment ? details : "Internal processing error",
     });
   }
+});
+
+app.use((req, res, next) => {
+  res.status(404).json({ error: "Not found" });
 });
 
 app.use((err, req, res, next) => {
@@ -264,7 +369,16 @@ app.use((err, req, res, next) => {
 });
 
 if (require.main === module) {
-  app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
+  const server = app.listen(PORT, () =>
+    console.log(`Backend running on port ${PORT}`)
+  );
+
+  // ─── Server-Level Timeouts ───────────────────────────────────────────────
+  // Slow-loris and connection-exhaustion attacks open connections and then
+  // trickle data to keep the socket alive forever. These timeouts kill them.
+  server.keepAliveTimeout = 65_000;  // 65 s — slightly above typical LB (60 s)
+  server.headersTimeout = 70_000;    // Must be > keepAliveTimeout
+  server.requestTimeout = 120_000;   // Max time to fully receive a request (2 min)
 }
 
 module.exports = { app, askSchema, summarizeSchema };
