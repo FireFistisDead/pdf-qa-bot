@@ -11,7 +11,6 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from dotenv import load_dotenv
 from rank_bm25 import BM25Okapi
 from langchain_community.vectorstores import FAISS
-from fastapi import UploadFile, File
 import numpy as np
 import os
 import shutil
@@ -42,7 +41,7 @@ logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
- master
+
 app = FastAPI()
 # Global session store
 sessions = {}
@@ -814,16 +813,6 @@ def process_pdf(
     
     filename = file.filename or "uploaded.pdf"
 
-    # Validate actual file magic bytes — extension alone is trivially bypassable.
-    # A valid PDF always begins with the 4-byte signature: %PDF (0x25 0x50 0x44 0x46).
-    magic = file.file.read(5)
-    if magic[:4] != b"%PDF":
-        raise HTTPException(
-            status_code=415,
-            detail="Invalid file type. Only real PDF documents are accepted."
-        )
-    file.file.seek(0)  # Reset stream so copyfileobj gets the full file
-
     requested_session_id = (session_id or "").strip() or None
 
     # ─── Quota pre-flight checks ──────────────────────────────────────────────────
@@ -846,14 +835,27 @@ def process_pdf(
     temp_path = os.path.join(str(UPLOADS_DIR), temp_filename)
     
     try:
+        # Validate actual file magic bytes — extension alone is trivially bypassable.
+        # A valid PDF always begins with the 4-byte signature: %PDF (0x25 0x50 0x44 0x46).
+        magic = file.file.read(5)
+        if magic[:4] != b"%PDF":
+            raise HTTPException(
+                status_code=415,
+                detail="Invalid file type. Only real PDF documents are accepted."
+            )
+        file.file.seek(0)  # Reset stream so we can copy the full file
+
+        max_size = 20 * 1024 * 1024
+        bytes_written = 0
         with open(temp_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
-            
-        if os.path.getsize(temp_path) == 0:
+            while chunk := file.file.read(65536):
+                bytes_written += len(chunk)
+                if bytes_written > max_size:
+                    raise HTTPException(status_code=413, detail="Uploaded PDF exceeds the maximum size of 20MB.")
+                f.write(chunk)
+                
+        if bytes_written == 0:
             raise HTTPException(status_code=400, detail="Uploaded PDF is empty. Please choose a valid PDF file.")
-            
-        if os.path.getsize(temp_path) > 20 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="Uploaded PDF exceeds the maximum size of 20MB.")
             
         try:
             loader = PyPDFLoader(temp_path)
