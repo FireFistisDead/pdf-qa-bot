@@ -15,6 +15,10 @@ from main import (
     clean_sentence,
     query_keywords,
     tokenize_text,
+    build_answer_from_documents,
+    INSUFFICIENT_CONTEXT_MESSAGE,
+    passes_evidence_gate,
+    document_dedupe_key,
 )
 
 
@@ -194,3 +198,47 @@ def test_unstructured_pdf_ingestion_mock():
 
     assert "pdf" in mock_document["filename"]
     assert len(mock_document["content"]) > 0
+
+
+class DummyDocument:
+    def __init__(self, content, filename="doc.pdf", page=0):
+        self.page_content = content
+        self.metadata = {
+            "filename": filename,
+            "page": page,
+            "document_id": filename,
+        }
+
+
+def test_evidence_gate_refuses_when_overlap_missing():
+    docs = [DummyDocument("this is unrelated content", filename="a.pdf", page=0)]
+    assert passes_evidence_gate("What is the revenue?", docs, best_score=0.1, intent="factual") is False
+
+
+def test_evidence_gate_allows_when_overlap_and_score_good():
+    docs = [DummyDocument("Revenue for 2023 was 10 million.", filename="a.pdf", page=0)]
+    assert passes_evidence_gate("What is the revenue for 2023?", docs, best_score=0.2, intent="factual") is True
+
+
+def test_build_answer_includes_citations_for_grounded_answer():
+    doc = DummyDocument("Revenue for 2023 was 10 million.", filename="a.pdf", page=0)
+    source_id_by_key = {document_dedupe_key(doc): 1}
+    answer = build_answer_from_documents(
+        "What is the revenue for 2023?",
+        [doc],
+        "factual",
+        source_id_by_key=source_id_by_key,
+    )
+    assert "Source 1" in answer or "Sources 1" in answer
+
+
+def test_build_answer_refuses_when_unanswerable():
+    doc = DummyDocument("This document is about hiring policies.", filename="a.pdf", page=0)
+    source_id_by_key = {document_dedupe_key(doc): 1}
+    answer = build_answer_from_documents(
+        "What is the revenue for 2023?",
+        [doc],
+        "factual",
+        source_id_by_key=source_id_by_key,
+    )
+    assert answer == INSUFFICIENT_CONTEXT_MESSAGE
