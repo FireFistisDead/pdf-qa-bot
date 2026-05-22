@@ -889,7 +889,14 @@ def process_pdf(
 
     if not chunks:
         raise HTTPException(status_code=400, detail="No text chunks generated from the PDF. Please check your file.")
-
+    if not requested_session_id and len(chunks) > MAX_CHUNKS_PER_SESSION:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"PDF is too large to index. "
+                f"A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks."
+            ),
+        )
     if requested_session_id:
         with sessions_lock:
             session = _peek_session_unlocked(requested_session_id)
