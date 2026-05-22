@@ -99,6 +99,15 @@ function App() {
       ),
     );
   };
+  const handleClearChat = () => {
+  setPdfs((prev) =>
+    prev.map((pdf) =>
+      pdf.session_id === selectedPdf
+        ? { ...pdf, chat: [] }
+        : pdf,
+    ),
+  );
+};
 
   const themeClass = darkMode ? "bg-dark text-light" : "bg-light text-dark";
 
@@ -192,6 +201,7 @@ function App() {
                     currentPdfName={currentPdfName}
                     currentPdfSessionId={currentPdfSessionId}
                     onAppendMessage={handleAppendMessage}
+                    handleClearChat={handleClearChat}
                   />
                 </Col>
               </Row>
