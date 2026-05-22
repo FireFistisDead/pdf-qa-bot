@@ -96,6 +96,7 @@ ASK_CHUNKS_PER_DOCUMENT = int(os.getenv("ASK_CHUNKS_PER_DOCUMENT", "2"))
 ASK_DIVERSITY_RANK_LIMIT = int(os.getenv("ASK_DIVERSITY_RANK_LIMIT", "8"))
 ASK_DIVERSITY_SCORE_MULTIPLIER = float(os.getenv("ASK_DIVERSITY_SCORE_MULTIPLIER", "1.8"))
 ASK_DIVERSITY_SCORE_MARGIN = float(os.getenv("ASK_DIVERSITY_SCORE_MARGIN", "0.35"))
+RETRIEVAL_CACHE_LIMIT = int(os.getenv("RETRIEVAL_CACHE_LIMIT", "25"))
 QUERY_STOPWORDS = {
     "about", "according", "also", "and", "are", "between", "compare",
     "describe", "does", "document", "documents", "explain", "from", "give",
@@ -315,6 +316,8 @@ def detect_question_intent(question):
         return "overview"
     return "factual"
 
+def normalize_query(query: str) -> str:
+    return " ".join(query.lower().strip().split())
 
 def concise_excerpt(text, max_chars=420):
     normalized_text = " ".join(text.split())
@@ -932,10 +935,12 @@ def process_pdf(
     with sessions_lock:
         if requested_session_id:
             session = _touch_session_unlocked(requested_session_id)
+            session.setdefault("retrieval_cache", {})
             if not session:
                 raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
             try:
                 session["vectorstore"].merge_from(new_vectorstore)
+                session["retrieval_cache"] = {}
             except Exception:
                 logger.exception(
                     "Failed to merge vectorstore session_id=%s filename=%s",
@@ -962,6 +967,7 @@ def process_pdf(
                 "documents": [uploaded_document],
                 "created_at": now,
                 "last_accessed": now,
+                "retrieval_cache": {},
             }
             logger.info(
                 "Created session session_id=%s filename=%s chunks=%s",
@@ -983,44 +989,112 @@ def process_pdf(
 @app.post("/ask")
 def ask_question(data: Question):
     cleanup_expired_sessions()
+
     question = (data.question or "").strip()
+
     if not question:
-        raise HTTPException(status_code=400, detail="Question is required.")
+        raise HTTPException(
+            status_code=400,
+            detail="Question is required."
+        )
 
     intent = detect_question_intent(question)
     session_id = str(data.session_id)
+
+    # Normalize query for cache reuse
+    normalized_query = normalize_query(question)
+
     with sessions_lock:
+
         session = _touch_session_unlocked(session_id)
+
         if not session or not session.get("vectorstore"):
-            raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-        indexed_documents = collect_index_documents(session["vectorstore"])
-        try:
-            scored_candidates = search_retrieval_candidates(
-                session["vectorstore"],
-                question,
-                ASK_RETRIEVAL_CANDIDATES,
+            raise HTTPException(
+                status_code=404,
+                detail="Session expired or invalid. Please re-upload your PDFs."
             )
-        except Exception:
-            logger.exception("Similarity search failed session_id=%s", session_id)
-            raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
+
+        indexed_documents = collect_index_documents(
+            session["vectorstore"]
+        )
+
+        # Session-level retrieval cache
+        retrieval_cache = session.setdefault(
+            "retrieval_cache",
+            {}
+        )
+
+        # Cache hit
+        if normalized_query in retrieval_cache:
+
+            logger.info(
+                "Retrieval cache hit session_id=%s query=%s",
+                session_id,
+                normalized_query,
+            )
+
+            scored_candidates = retrieval_cache[
+                normalized_query
+            ]
+
+            cache_hit = True
+
+        # Cache miss
+        else:
+
+            logger.info(
+                "Retrieval cache miss session_id=%s query=%s",
+                session_id,
+                normalized_query,
+            )
+
+            try:
+
+                scored_candidates = search_retrieval_candidates(
+                    session["vectorstore"],
+                    question,
+                    ASK_RETRIEVAL_CANDIDATES,
+                )
+
+            except Exception:
+
+                logger.exception(
+                    "Similarity search failed session_id=%s",
+                    session_id,
+                )
+
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to search the uploaded documents."
+                )
+
+            # Prevent unbounded cache growth
+            if len(retrieval_cache) >= RETRIEVAL_CACHE_LIMIT:
+                oldest_key = next(iter(retrieval_cache))
+                del retrieval_cache[oldest_key]
+
+            retrieval_cache[normalized_query] = scored_candidates
+
+            cache_hit = False
 
     docs = (
         representative_documents_by_source(indexed_documents)
         if intent == "overview"
-        else diversify_retrieved_documents(scored_candidates, question)
+        else diversify_retrieved_documents(
+            scored_candidates,
+            question
+        )
     )
-    if not docs:
-        return {"answer": "No relevant context found."}
 
-    pages = sorted(set(
-        doc.metadata["page"] + 1
-        for doc in docs
-        if "page" in doc.metadata
-    ))
+    if not docs:
+        return {
+            "answer": "No relevant context found."
+        }
 
     formatted_context = ""
 
     for idx, doc in enumerate(docs):
+
         page = (
             doc.metadata.get("page", 0) + 1
             if "page" in doc.metadata
@@ -1033,10 +1107,16 @@ def ask_question(data: Question):
         )
 
     context = formatted_context[:6500]
-    retrieved_sources = sorted({document_display_name(doc) for doc in docs})
+
+    retrieved_sources = sorted({
+        document_display_name(doc)
+        for doc in docs
+    })
+
     citation_sources = []
 
     for idx, doc in enumerate(docs):
+
         citation_sources.append({
             "source_id": idx + 1,
             "document": document_display_name(doc),
@@ -1045,18 +1125,33 @@ def ask_question(data: Question):
                 if "page" in doc.metadata
                 else None
             ),
-            "preview": concise_excerpt(doc.page_content, 180),
+            "preview": concise_excerpt(
+                doc.page_content,
+                180
+            ),
         })
-    grounded_answer = build_answer_from_documents(question, docs, intent)
+
+    grounded_answer = build_answer_from_documents(
+        question,
+        docs,
+        intent
+    )
+
     if grounded_answer:
+
         logger.info(
             "Returning grounded answer session_id=%s intent=%s retrieved_chunks=%s sources=%s",
-            session_id, intent, len(docs), retrieved_sources,
+            session_id,
+            intent,
+            len(docs),
+            retrieved_sources,
         )
+
         return {
             "answer": grounded_answer,
             "sources": citation_sources,
-            "retrieval_type": "citation-aware"
+            "retrieval_type": "citation-aware",
+            "cache_hit": cache_hit
         }
 
     prompt = (
@@ -1080,15 +1175,22 @@ def ask_question(data: Question):
 
     logger.info(
         "Executing query session_id=%s retrieved_chunks=%s sources=%s",
-        session_id, len(docs), retrieved_sources,
+        session_id,
+        len(docs),
+        retrieved_sources,
     )
-    answer = generate_response(prompt, max_new_tokens=256)
-    return {
-    "answer": answer,
-    "sources": citation_sources,
-    "retrieval_type": "citation-aware"
-}
 
+    answer = generate_response(
+        prompt,
+        max_new_tokens=256
+    )
+
+    return {
+        "answer": answer,
+        "sources": citation_sources,
+        "retrieval_type": "citation-aware",
+        "cache_hit": cache_hit
+    }
 
 @app.post("/summarize")
 def summarize_pdf(data: SummarizeRequest):
