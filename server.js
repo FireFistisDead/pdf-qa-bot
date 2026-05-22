@@ -14,6 +14,24 @@ const { askSchema, summarizeSchema } = require("./validators/schemas");
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
 const PORT = process.env.PORT || 4000;
 
+const askSchema = {
+  type: "object",
+  properties: {
+    question: { type: "string" },
+    session_id: { type: "string" }
+  },
+  required: ["question", "session_id"]
+};
+
+const summarizeSchema = {
+  type: "object",
+  properties: {
+    pdf: { type: "string" },
+    session_id: { type: "string" }
+  },
+  required: ["pdf", "session_id"]
+};
+
 const app = express();
 
 // ─── Trust Proxy ────────────────────────────────────────────────────────────

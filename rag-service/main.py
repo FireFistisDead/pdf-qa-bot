@@ -10,6 +10,8 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from dotenv import load_dotenv
 from rank_bm25 import BM25Okapi
+from langchain_community.vectorstores import FAISS
+from fastapi import UploadFile, File
 import numpy as np
 import os
 import uuid
@@ -28,14 +30,21 @@ import re
 
 load_dotenv()
 
+ feature/session-based-faiss
+PERSIST_DIR = "faiss_store"
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
 # ── Logger (must be defined before exception handlers that use it) ─────────────
 logger = logging.getLogger("pdf_qa_rag")
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
-
+ master
 app = FastAPI()
+# Global session store
+sessions = {}
 
 
 def standard_error_response(status_code: int, detail: str, **extra):
@@ -979,53 +988,62 @@ def process_pdf(data: PDFPath):
 
 @app.post("/ask")
 def ask_question(data: Question):
-    cleanup_expired_sessions()
+    # 1. Validate question
     question = (data.question or "").strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question is required.")
 
-    intent = detect_question_intent(question)
+    # 2. Validate session_id
     session_id = str(data.session_id)
-    with sessions_lock:
-        session = _touch_session_unlocked(session_id)
-        if not session or not session.get("vectorstore"):
-            raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-        indexed_documents = collect_index_documents(session["vectorstore"])
-        try:
-            scored_candidates = search_retrieval_candidates(
-                session["vectorstore"],
-                question,
-                ASK_RETRIEVAL_CANDIDATES,
-            )
-        except Exception:
-            logger.exception("Similarity search failed session_id=%s", session_id)
-            raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Session ID is required.")
 
-    docs = (
-        representative_documents_by_source(indexed_documents)
-        if intent == "overview"
-        else diversify_retrieved_documents(scored_candidates, question)
-    )
+    # 3. Load FAISS index for this session
+    session_dir = os.path.join(PERSIST_DIR, session_id)
+    if not os.path.exists(session_dir):
+        raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDF.")
+
+    try:
+        vectorstore = FAISS.load_local(session_dir, embeddings, allow_dangerous_deserialization=True)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to load FAISS index for this session.")
+
+    # 4. Retrieve relevant documents
+    retriever = vectorstore.as_retriever()
+    docs = retriever.invoke(question)
+
     if not docs:
         return {"answer": "No relevant context found."}
 
+feature/session-based-faiss
+    # 5. Extract page numbers
+master
     pages = sorted(set(
-        doc.metadata["page"] + 1
+        doc.metadata.get("page", 0) + 1
         for doc in docs
         if "page" in doc.metadata
     ))
 
+    # 6. Format context and build answer
     context = format_context(docs, max_chars=6500)
-    retrieved_sources = sorted({document_display_name(doc) for doc in docs})
-    grounded_answer = build_answer_from_documents(question, docs, intent)
+    grounded_answer = build_answer_from_documents(question, docs, "factual")
+
     if grounded_answer:
+ feature/session-based-faiss
         logger.info(
             "Returning grounded answer session_id=%s intent=%s retrieved_chunks=%s sources=%s",
             session_id, intent, len(docs), retrieved_sources,
         )
+  master
         return {"answer": grounded_answer, "sources": pages}
 
+    # 7. Fallback: generate response from context
     prompt = (
+ feature/session-based-faiss
+        "You are a careful assistant answering questions over uploaded PDF documents. "
+        "Use only the provided context. If the context does not contain enough information, "
+        "say that briefly and do not invent details.\n\n"
+
         "You are a careful assistant answering questions over one or more uploaded PDF documents. "
         "Use only the provided context. The context may include excerpts from multiple PDFs. "
         "When the question asks for a relationship, comparison, or synthesis, connect the relevant facts across documents. "
@@ -1034,15 +1052,19 @@ def ask_question(data: Question):
         "Give clear, conversational, human-friendly answers.\n"
         "Do not return raw PDF text or chunks.\n"
         "Summarize properly in readable sentences.\n\n"
+ master
         f"Context:\n{context}\n\n"
         f"Question: {question}\n"
         "Answer:"
     )
+ feature/session-based-faiss
+
 
     logger.info(
         "Executing query session_id=%s retrieved_chunks=%s sources=%s",
         session_id, len(docs), retrieved_sources,
     )
+  master
     answer = generate_response(prompt, max_new_tokens=256)
     return {"answer": answer, "sources": pages}
 
@@ -1069,6 +1091,38 @@ def summarize_pdf(data: SummarizeRequest):
 
     return {"summary": build_session_summary(uploaded_documents, indexed_documents)}
 
+
+@app.post("/upload_pdf")
+async def upload_pdf(file: UploadFile = File(...)):
+    # 1. Save the uploaded file
+    file_name = sanitize_upload_filename(file.filename)
+    file_path = get_trusted_upload_path(file_name)
+    with open(file_path, "wb") as f:
+        f.write(await file.read())
+    validated_path = validate_uploaded_pdf(file_path)
+
+    # 2. Load and split the PDF
+    loader = PyPDFLoader(validated_path)
+    pages = loader.load()
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    docs = splitter.split_documents(pages)
+
+    # 3. Generate a new session_id and unique folder
+    session_id = str(uuid.uuid4())
+    session_dir = os.path.join(PERSIST_DIR, session_id)
+
+    # 4. Build FAISS index for this session
+    vectorstore = FAISS.from_documents(docs, embeddings)
+    vectorstore.save_local(session_dir)
+
+    # 5. Store session reference
+    sessions[session_id] = {"vectorstore": vectorstore}
+
+    # 6. Return both message and session_id
+    return {
+        "message": f"{file_name} uploaded and indexed successfully",
+        "session_id": session_id
+    }
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=5000, reload=True)
