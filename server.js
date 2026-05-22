@@ -15,7 +15,6 @@ const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
 const PORT = process.env.PORT || 4000;
 
 
-
 const app = express();
 
 // ─── Trust Proxy ────────────────────────────────────────────────────────────
