@@ -813,8 +813,16 @@ def process_pdf(
     cleanup_expired_sessions()
     
     filename = file.filename or "uploaded.pdf"
-    if not filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF documents are supported.")
+
+    # Validate actual file magic bytes — extension alone is trivially bypassable.
+    # A valid PDF always begins with the 4-byte signature: %PDF (0x25 0x50 0x44 0x46).
+    magic = file.file.read(5)
+    if magic[:4] != b"%PDF":
+        raise HTTPException(
+            status_code=415,
+            detail="Invalid file type. Only real PDF documents are accepted."
+        )
+    file.file.seek(0)  # Reset stream so copyfileobj gets the full file
 
     requested_session_id = (session_id or "").strip() or None
 
@@ -979,22 +987,22 @@ def ask_question(data: Question):
 
     # 2. Validate session_id
     session_id = str(data.session_id)
-    if not session_id:
-        raise HTTPException(status_code=400, detail="Session ID is required.")
-
-    # 3. Load FAISS index for this session
-    session_dir = os.path.join(PERSIST_DIR, session_id)
-    if not os.path.exists(session_dir):
-        raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDF.")
-
+    with sessions_lock:
+        session = _touch_session_unlocked(session_id)
+        if not session or not session.get("vectorstore"):
+            raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+        vectorstore = session["vectorstore"]
+        indexed_documents = collect_index_documents(vectorstore)
+        
     try:
-        vectorstore = FAISS.load_local(session_dir, embeddings, allow_dangerous_deserialization=True)
+        scored_candidates = search_retrieval_candidates(
+            vectorstore,
+            question,
+            ASK_RETRIEVAL_CANDIDATES,
+        )
     except Exception:
-        raise HTTPException(status_code=500, detail="Failed to load FAISS index for this session.")
-
-    # 4. Retrieve relevant documents
-    retriever = vectorstore.as_retriever()
-    docs = retriever.invoke(question)
+        logger.exception("Similarity search failed session_id=%s", session_id)
+        raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
 
     if not docs:
         return {"answer": "No relevant context found."}
