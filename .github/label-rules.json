@@ -177,5 +177,30 @@
       "description": "Low quality AI generated submission",
       "keywords": ["gssoc:ai-slop"]
     }
+    ,
+    {
+      "name": "gssoc:approved",
+      "color": "0075ca",
+      "description": "Approved GSSoC contribution",
+      "keywords": ["gssoc:approved", "approved", "gssoc approved"]
+    },
+    {
+      "name": "level:beginner",
+      "color": "7057ff",
+      "description": "Beginner level issue",
+      "keywords": ["beginner", "easy", "good first issue", "starter"]
+    },
+    {
+      "name": "level:intermediate",
+      "color": "e4e669",
+      "description": "Intermediate level issue",
+      "keywords": ["intermediate", "medium", "moderate"]
+    },
+    {
+      "name": "level:advanced",
+      "color": "d93f0b",
+      "description": "Advanced level issue",
+      "keywords": ["advanced", "hard", "complex", "difficult"]
+    }
   ]
 }

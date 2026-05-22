@@ -5,7 +5,7 @@ import toast from "react-hot-toast";
 
 import MessageBubble from "./MessageBubble";
 import ExportMenu from "./ExportMenu";
-import { askQuestionApi, summarizePdfApi } from "../../services/api";
+import { askQuestionApi, extractApiErrorMessage, summarizePdfApi } from "../../services/api";
 
 const ChatPanel = ({
   darkMode,
@@ -14,6 +14,7 @@ const ChatPanel = ({
   currentPdfName,
   currentPdfSessionId,
   onAppendMessage,
+  handleClearChat,
 }) => {
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
@@ -42,7 +43,11 @@ const ChatPanel = ({
 
     try {
       const data = await askQuestionApi(question, currentPdfSessionId);
-      onAppendMessage({ role: "bot", text: data.answer });
+      onAppendMessage({
+      role: "bot",
+      text: data.answer,
+      sources: data.sources || [],
+    });
     } catch (e) {
       let errorMessage = "Error getting answer. Please try again.";
 
@@ -56,8 +61,8 @@ const ChatPanel = ({
         errorMessage = "Session not found. Please upload the PDF again.";
       } else if (e.response?.status === 500) {
         errorMessage = "Server error. Please try again later.";
-      } else if (e.response?.data?.error) {
-        errorMessage = e.response.data.error;
+      } else {
+        errorMessage = extractApiErrorMessage(e, errorMessage);
       }
 
       toast.error(errorMessage);
@@ -95,8 +100,8 @@ const ChatPanel = ({
         errorMessage = "Session not found. Please upload the PDF again.";
       } else if (e.response?.status === 500) {
         errorMessage = "Server error. Please try again later.";
-      } else if (e.response?.data?.error) {
-        errorMessage = e.response.data.error;
+      } else {
+        errorMessage = extractApiErrorMessage(e, errorMessage);
       }
 
       toast.error(errorMessage, {
@@ -167,6 +172,12 @@ const ChatPanel = ({
             </Button>
 
             <ExportMenu currentChat={currentChat} selectedPdfName={currentPdfName} />
+            <Button
+            variant="danger"
+            size="sm"
+            onClick={handleClearChat}>
+            Clear Chat
+            </Button>
           </div>
         </div>
 
