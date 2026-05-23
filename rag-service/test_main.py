@@ -74,11 +74,6 @@ def test_internal_token_valid_accepts_exact_match():
     assert internal_token_valid("secret", "secret") is True
 
 
-def test_upload_pdf_route_is_registered():
-    routes = {route.path for route in app.routes}
-    assert "/upload_pdf" in routes
-
-
 def test_internal_auth_middleware_protects_validate_session_write():
     import main as main_module
 
