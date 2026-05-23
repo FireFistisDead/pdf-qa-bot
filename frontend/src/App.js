@@ -116,6 +116,27 @@ function App() {
   );
 };
 
+const handleUpdateLastBotMessage = (text, streaming, sources) => {
+  setPdfs((prev) =>
+    prev.map((pdf) => {
+      if (pdf.session_id !== selectedPdf) return pdf;
+      const chat = [...pdf.chat];
+      for (let i = chat.length - 1; i >= 0; i--) {
+        if (chat[i].role === "bot") {
+          chat[i] = {
+            ...chat[i],
+            text: text !== null ? text : chat[i].text,
+            streaming: streaming,
+            sources: sources !== undefined ? sources : chat[i].sources,
+          };
+          break;
+        }
+      }
+      return { ...pdf, chat };
+    }),
+  );
+};
+
   const themeClass = darkMode ? "bg-dark text-light" : "bg-light text-dark";
 
   const currentPdf = pdfs.find((pdf) => pdf.session_id === selectedPdf);
@@ -208,6 +229,7 @@ function App() {
                     currentPdfName={currentPdfName}
                     currentPdfSessionId={currentPdfSessionId}
                     onAppendMessage={handleAppendMessage}
+                    onUpdateLastBotMessage={handleUpdateLastBotMessage}
                     handleClearChat={handleClearChat}
                   />
                 </Col>

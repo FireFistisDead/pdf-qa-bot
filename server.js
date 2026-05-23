@@ -466,6 +466,51 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
     });
   }
 });
+app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+  const validation = askSchema.safeParse(req.body);
+
+  if (!validation.success) {
+    return res.status(400).json({
+      error: "Validation failed",
+      details: validation.error.flatten(),
+    });
+  }
+
+  const { question, session_id } = validation.data;
+
+  try {
+    const ragResponse = await axios.post(
+      `${RAG_SERVICE_URL}/ask/stream`,
+      { question, session_id },
+      { responseType: "stream", timeout: 120000 }
+    );
+
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.setHeader("Transfer-Encoding", "chunked");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+
+    ragResponse.data.pipe(res);
+
+    ragResponse.data.on("error", (err) => {
+      console.error("Stream error from RAG service:", err.message);
+      if (!res.headersSent) {
+        res.status(502).json({ error: "Streaming response failed." });
+      } else {
+        res.end();
+      }
+    });
+  } catch (err) {
+    const statusCode = err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
+    const details = extractServiceDetails(err);
+    console.error("Streaming question answering failed:", details);
+    return res.status(statusCode).json({
+      error: typeof details === "string" ? details : "Error answering question",
+      details: isDevelopment ? details : "Internal processing error",
+    });
+  }
+});
 
 app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => {
   const validation = summarizeSchema.safeParse(req.body);

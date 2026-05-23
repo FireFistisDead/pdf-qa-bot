@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request, HTTPException, File, UploadFile, Form
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field, field_validator
 from pathlib import Path
@@ -21,6 +21,7 @@ from transformers import (
     AutoTokenizer,
     AutoModelForSeq2SeqLM,
     AutoModelForCausalLM,
+    TextIteratorStreamer,
 )
 import threading
 import time
@@ -1367,7 +1368,7 @@ def ask_question(data: Question):
 
     # Normalize query for cache reuse
     normalized_query = normalize_query(question)
-    cache_hit = False
+    
 
     with sessions_lock:
 
@@ -1398,7 +1399,7 @@ def ask_question(data: Question):
 
             return {
                 **cached_result,
-                "cache_hit": True
+            
             }
 
         logger.info(
@@ -1542,7 +1543,7 @@ def ask_question(data: Question):
             "answer": grounded_answer,
             "sources": citation_sources,
             "retrieval_type": "citation-aware",
-            "cache_hit": cache_hit
+            
         }
 
     prompt = (
@@ -1580,7 +1581,7 @@ def ask_question(data: Question):
         "answer": answer,
         "sources": citation_sources,
         "retrieval_type": "citation-aware",
-        "cache_hit": False
+        
     }
 
     with sessions_lock:
