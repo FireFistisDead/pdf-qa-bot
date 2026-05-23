@@ -1065,9 +1065,9 @@ def process_pdf(
     with sessions_lock:
         if requested_session_id:
             session = _touch_session_unlocked(requested_session_id)
-            session.setdefault("retrieval_cache", {})
             if not session:
                 raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+            session.setdefault("retrieval_cache", {})
             if "lock" not in session:
                 session["lock"] = threading.Lock()
             session_lock = session["lock"]
