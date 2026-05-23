@@ -20,7 +20,8 @@ function App() {
   const [darkMode, setDarkMode] = useState(false);
 
   // Router logic to serve new UI on /new
-  if (window.location.pathname === '/new') {
+  const path = window.location.pathname;
+  if (path === '/new' || path === '/new/') {
     return <LandingPage />;
   }
 
