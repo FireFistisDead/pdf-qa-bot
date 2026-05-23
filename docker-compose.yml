@@ -1,6 +1,14 @@
 version: '3.8'
 
 services:
+  # Optional distributed rate-limit / ban store. Enable by setting:
+  #   RATE_LIMIT_STORE=redis
+  #   RATE_LIMIT_REDIS_URL=redis://redis:6379
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    profiles: ["redis"]
+
   rag-service:
     build:
       context: ./rag-service
@@ -29,12 +37,16 @@ services:
     environment:
       - RAG_SERVICE_URL=http://rag-service:5000
       - INTERNAL_RAG_TOKEN=${INTERNAL_RAG_TOKEN}
+      # Uncomment (and enable the `redis` profile) for multi-replica deployments.
+      # - RATE_LIMIT_STORE=redis
+      # - RATE_LIMIT_REDIS_URL=redis://redis:6379
     env_file:
       - .env
     volumes:
       - shared_uploads:/app/uploads
     depends_on:
       - rag-service
+      # - redis
 
   frontend:
     build:

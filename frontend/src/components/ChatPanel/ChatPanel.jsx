@@ -5,7 +5,7 @@ import toast from "react-hot-toast";
 
 import MessageBubble from "./MessageBubble";
 import ExportMenu from "./ExportMenu";
-import { askQuestionApi, extractApiErrorMessage, summarizePdfApi } from "../../services/api";
+import { askQuestionApi, askQuestionStreamApi, extractApiErrorMessage, summarizePdfApi } from "../../services/api";
 
 const ChatPanel = ({
   darkMode,
@@ -13,6 +13,7 @@ const ChatPanel = ({
   selectedPdf,
   currentPdfName,
   currentPdfSessionId,
+  onUpdateLastBotMessage,
   onAppendMessage,
   onOpenSource,
   handleClearChat,
@@ -27,37 +28,38 @@ const ChatPanel = ({
       behavior: "smooth",
     });
   }, [currentChat, asking]);
+const askQuestion = async () => {
+  if (!question.trim()) {
+    toast.error("Please enter a question before submitting.");
+    return;
+  }
+  if (!selectedPdf || !currentPdfSessionId) {
+    toast.error("Please upload and select a PDF document first.");
+    return;
+  }
 
-  const askQuestion = async () => {
-    if (!question.trim()) {
-      toast.error("Please enter a question before submitting.");
-      return;
-    }
+  const trimmedQuestion = question;
+  setAsking(true);
+  setQuestion("");
+  onAppendMessage({ role: "user", text: trimmedQuestion });
+  onAppendMessage({ role: "bot", text: "", streaming: true, sources: [] });
 
-    if (!selectedPdf || !currentPdfSessionId) {
-      toast.error("Please upload and select a PDF document first.");
-      return;
-    }
-
-    setAsking(true);
-    onAppendMessage({ role: "user", text: question });
-
-    try {
-      const data = await askQuestionApi(question, currentPdfSessionId);
-      onAppendMessage({
-      role: "bot",
-      text: data.answer,
-      sources: data.sources || [],
+  try {
+    await askQuestionStreamApi(trimmedQuestion, currentPdfSessionId, (partialText) => {
+      onUpdateLastBotMessage(partialText, true);
     });
+    onUpdateLastBotMessage(null, false);
+  } catch (streamErr) {
+    console.warn("Streaming failed, falling back to /ask:", streamErr.message);
+    try {
+      const data = await askQuestionApi(trimmedQuestion, currentPdfSessionId);
+      onUpdateLastBotMessage(data.answer, false, data.sources || []);
     } catch (e) {
       let errorMessage = "Error getting answer. Please try again.";
-
       if (e.code === "ECONNABORTED") {
-        errorMessage =
-          "Request timed out. The AI is taking too long to respond. Please try a simpler question.";
+        errorMessage = "Request timed out. Please try a simpler question.";
       } else if (!e.response) {
-        errorMessage =
-          "Network error. Please check if the backend server is running.";
+        errorMessage = "Network error. Please check if the backend server is running.";
       } else if (e.response?.status === 404) {
         errorMessage = "Session not found. Please upload the PDF again.";
       } else if (e.response?.status === 500) {
@@ -65,13 +67,12 @@ const ChatPanel = ({
       } else {
         errorMessage = extractApiErrorMessage(e, errorMessage);
       }
-
       toast.error(errorMessage);
-      onAppendMessage({ role: "bot", text: errorMessage });
+      onUpdateLastBotMessage(errorMessage, false);
     }
-    setQuestion("");
-    setAsking(false);
-  };
+  }
+  setAsking(false);
+};
 
   const summarizePDF = async () => {
     if (!selectedPdf || !currentPdfSessionId) {
