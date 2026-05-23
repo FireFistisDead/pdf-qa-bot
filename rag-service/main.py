@@ -42,6 +42,13 @@ logging.basicConfig(
 app = FastAPI()
 # Global session store
 sessions = {}
+processing_progress = {}
+def update_processing_progress(session_id, stage, progress):
+    processing_progress[session_id] = {
+        "stage": stage,
+        "progress": progress,
+        "updated_at": now_ts(),
+    }
 
 INTERNAL_RAG_TOKEN = os.getenv("INTERNAL_RAG_TOKEN", "").strip()
 
@@ -106,7 +113,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 
 # Session storage with metadata and thread safety
-sessions = {}
+
 sessions_lock = threading.Lock()
 model_load_lock = threading.Lock()
 generation_lock = threading.Lock()
@@ -1063,6 +1070,13 @@ def process_pdf(
             )
 
     document_id = str(uuid.uuid4())
+    temp_tracking_id = requested_session_id or str(uuid.uuid4())
+
+    update_processing_progress(
+        temp_tracking_id,
+        "Extracting text from PDF",
+        15
+    )
     now = now_ts()
     uploaded_document = {
         "document_id": document_id,
@@ -1101,6 +1115,7 @@ def process_pdf(
             _cleanup_expired_sessions_unlocked()
             _enforce_max_sessions_unlocked()
             session_id = str(uuid.uuid4())
+            temp_tracking_id = session_id
             session_lock = threading.Lock()
             sessions[session_id] = {
                 "vectorstore": new_vectorstore,
@@ -1134,6 +1149,7 @@ def process_pdf(
                 raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
             session.setdefault("documents", []).append(uploaded_document)
             session["last_accessed"] = now
+            session["retrieval_cache"] = {}
             session_id = requested_session_id
             logger.info(
                 "Merged PDF into session session_id=%s filename=%s documents=%s chunks=%s",
@@ -1145,13 +1161,33 @@ def process_pdf(
 
     with sessions_lock:
         documents = list(sessions[session_id].get("documents", []))
-
+    update_processing_progress(
+        session_id,
+        "Completed",
+        100
+    )
     return {
         "message": "PDF processed successfully",
         "session_id": session_id,
         "document": uploaded_document,
         "documents": documents,
     }
+
+
+
+
+@app.get("/processing-status/{session_id}")
+def processing_status(session_id: str):
+
+    progress = processing_progress.get(session_id)
+
+    if not progress:
+        raise HTTPException(
+            status_code=404,
+            detail="No processing status found."
+        )
+
+    return progress
 
 
 @app.post("/ask")
@@ -1171,18 +1207,44 @@ def ask_question(data: Question):
 
     # Normalize query for cache reuse
     normalized_query = normalize_query(question)
+    cache_hit = False
 
     with sessions_lock:
 
         session = _touch_session_unlocked(session_id)
 
         if not session or not session.get("vectorstore"):
-            raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+            raise HTTPException(
+                status_code=404,
+                detail="Session expired or invalid. Please re-upload your PDFs."
+            )
+
         if "lock" not in session:
             session["lock"] = threading.Lock()
+
         session_lock = session["lock"]
         vectorstore = session["vectorstore"]
 
+        retrieval_cache = session.setdefault("retrieval_cache", {})
+
+        if normalized_query in retrieval_cache:
+
+            logger.info(
+                "Retrieval cache hit session_id=%s",
+                session_id
+            )
+
+            cached_result = retrieval_cache[normalized_query]
+
+            return {
+                **cached_result,
+                "cache_hit": True
+            }
+
+        logger.info(
+            "Retrieval cache miss session_id=%s",
+            session_id
+        )
     try:
         with session_lock:
             indexed_documents = collect_index_documents(vectorstore)
@@ -1354,12 +1416,31 @@ def ask_question(data: Question):
         max_new_tokens=256
     )
 
-    return {
+    response_payload = {
         "answer": answer,
         "sources": citation_sources,
         "retrieval_type": "citation-aware",
-        "cache_hit": cache_hit
+        "cache_hit": False
     }
+
+    with sessions_lock:
+
+        session = sessions.get(session_id)
+
+        if session:
+
+            retrieval_cache = session.setdefault(
+                "retrieval_cache",
+                {}
+            )
+
+            retrieval_cache[normalized_query] = {
+                "answer": answer,
+                "sources": citation_sources,
+                "retrieval_type": "citation-aware",
+            }
+
+    return response_payload
 
 @app.post("/summarize")
 def summarize_pdf(data: SummarizeRequest):
@@ -1407,6 +1488,7 @@ async def upload_pdf(file: UploadFile = File(...)):
 
     # 3. Generate a new session_id and unique folder
     session_id = str(uuid.uuid4())
+    temp_tracking_id = session_id
     session_dir = os.path.join(PERSIST_DIR, session_id)
 
     # 4. Build FAISS index for this session
