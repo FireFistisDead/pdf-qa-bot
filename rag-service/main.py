@@ -1147,7 +1147,7 @@ def process_pdf(
     requested_session_id = (session_id or "").strip() or None
     requested_session_secret = (session_secret or "").strip() or None
     if requested_session_id and not requested_session_secret:
-        requested_session_id = None
+        raise HTTPException(status_code=403, detail="Forbidden")
 
     # ─── Quota pre-flight checks ──────────────────────────────────────────────────
     if requested_session_id:

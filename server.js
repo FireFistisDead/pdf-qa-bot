@@ -277,6 +277,14 @@ if (signatureBuffer.toString() !== "%PDF") {
     if (sessionId && sessionSecret) {
       formData.session_id = sessionId;
       formData.session_secret = sessionSecret;
+    } else if (sessionId || sessionSecret) {
+      await cleanupFile(uploadedFilePath);
+
+      return sendUploadError(
+        res,
+        403,
+        "session_id and session_secret must be provided together to extend an existing session.",
+      );
     }
 
     const response = await axios.postForm(

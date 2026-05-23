@@ -1,6 +1,28 @@
 const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const http = require("node:http");
+const axios = require("axios");
+
+const createPdfUploadBody = ({ sessionId = null, sessionSecret = null } = {}) => {
+  const formData = new FormData();
+  formData.append(
+    "file",
+    new Blob([Buffer.from("%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF")], {
+      type: "application/pdf",
+    }),
+    "sample.pdf",
+  );
+
+  if (sessionId) {
+    formData.append("session_id", sessionId);
+  }
+
+  if (sessionSecret) {
+    formData.append("session_secret", sessionSecret);
+  }
+
+  return formData;
+};
 
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
@@ -146,6 +168,35 @@ describe("route error responses", () => {
     assert.equal(res.status, 400);
     const data = await res.json();
     assert.equal(data.error, "No file uploaded. Use form field name 'file'.");
+  });
+
+  test("POST /upload with session_id but no session_secret returns 403", async () => {
+    const originalPostForm = axios.postForm;
+    let forwarded = false;
+
+    axios.postForm = async () => {
+      forwarded = true;
+      return { data: {} };
+    };
+
+    try {
+      const res = await fetch(`${baseUrl}/upload`, {
+        method: "POST",
+        body: createPdfUploadBody({
+          sessionId: "550e8400-e29b-41d4-a716-446655440000",
+        }),
+      });
+
+      assert.equal(res.status, 403);
+      const data = await res.json();
+      assert.equal(
+        data.error,
+        "session_id and session_secret must be provided together to extend an existing session.",
+      );
+      assert.equal(forwarded, false);
+    } finally {
+      axios.postForm = originalPostForm;
+    }
   });
 
   test("GET unknown route returns 404", async () => {
