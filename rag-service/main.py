@@ -55,6 +55,13 @@ logging.basicConfig(
 app = FastAPI()
 # Global session store
 sessions = {}
+processing_progress = {}
+def update_processing_progress(session_id, stage, progress):
+    processing_progress[session_id] = {
+        "stage": stage,
+        "progress": progress,
+        "updated_at": now_ts(),
+    }
 
 INTERNAL_RAG_TOKEN = os.getenv("INTERNAL_RAG_TOKEN", "").strip()
 
@@ -119,7 +126,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 
 # Session storage with metadata and thread safety
-sessions = {}
+
 sessions_lock = threading.Lock()
 model_load_lock = threading.Lock()
 generation_lock = threading.Lock()
@@ -1267,6 +1274,13 @@ def process_pdf(
             )
 
     document_id = str(uuid.uuid4())
+    temp_tracking_id = requested_session_id or str(uuid.uuid4())
+
+    update_processing_progress(
+        temp_tracking_id,
+        "Extracting text from PDF",
+        15
+    )
     now = now_ts()
     uploaded_document = {
         "document_id": document_id,
@@ -1306,6 +1320,10 @@ def process_pdf(
             _enforce_max_sessions_unlocked()
             session_id = str(uuid.uuid4())
             session_dir = persist_vectorstore(session_id, new_vectorstore)
+            previous_tracking_id = temp_tracking_id
+            temp_tracking_id = session_id
+            if previous_tracking_id != session_id and previous_tracking_id in processing_progress:
+                processing_progress[session_id] = processing_progress.pop(previous_tracking_id)
             session_lock = threading.Lock()
             sessions[session_id] = {
                 "vectorstore": new_vectorstore,
@@ -1355,13 +1373,33 @@ def process_pdf(
 
     with sessions_lock:
         documents = list(sessions[session_id].get("documents", []))
-
+    update_processing_progress(
+        session_id,
+        "Completed",
+        100
+    )
     return {
         "message": "PDF processed successfully",
         "session_id": session_id,
         "document": uploaded_document,
         "documents": documents,
     }
+
+
+
+
+@app.get("/processing-status/{session_id}")
+def processing_status(session_id: str):
+
+    progress = processing_progress.get(session_id)
+
+    if not progress:
+        raise HTTPException(
+            status_code=404,
+            detail="No processing status found."
+        )
+
+    return progress
 
 
 @app.post("/ask")
@@ -1395,6 +1433,7 @@ def ask_question(data: Question):
 
         if "lock" not in session:
             session["lock"] = threading.Lock()
+
         session_lock = session["lock"]
         vectorstore = session["vectorstore"]
 
@@ -1609,12 +1648,31 @@ def ask_question(data: Question):
         max_new_tokens=256
     )
 
-    return {
+    response_payload = {
         "answer": answer,
         "sources": citation_sources,
         "retrieval_type": "citation-aware",
-        "cache_hit": cache_hit
+        "cache_hit": False
     }
+
+    with sessions_lock:
+
+        session = sessions.get(session_id)
+
+        if session:
+
+            retrieval_cache = session.setdefault(
+                "retrieval_cache",
+                {}
+            )
+
+            retrieval_cache[normalized_query] = {
+                "answer": answer,
+                "sources": citation_sources,
+                "retrieval_type": "citation-aware",
+            }
+
+    return response_payload
 
 @app.post("/summarize")
 def summarize_pdf(data: SummarizeRequest):
