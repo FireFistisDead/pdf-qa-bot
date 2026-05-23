@@ -7,6 +7,7 @@ import UploadCard from "./components/UploadCard/UploadCard";
 import PdfViewer from "./components/PdfViewer/PdfViewer";
 import ChatPanel from "./components/ChatPanel/ChatPanel";
 import toast, { Toaster } from "react-hot-toast";
+import LandingPage from "./components/Landing/LandingPage";
 
 import { extractApiErrorMessage, uploadPdfApi } from "./services/api";
 
@@ -17,6 +18,12 @@ function App() {
   const [selectedPdf, setSelectedPdf] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
+
+  // Router logic to serve new UI on /new
+  const path = window.location.pathname;
+  if (path === '/new' || path === '/new/') {
+    return <LandingPage />;
+  }
 
   const handleUpload = async (file) => {
     // Validate file type
