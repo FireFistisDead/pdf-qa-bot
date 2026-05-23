@@ -1,6 +1,7 @@
 import React from 'react';
 import LandingNavbar from './LandingNavbar';
 import Hero from './Hero';
+import Features from './Features';
 import CustomCursor from './CustomCursor';
 import './LandingGlobal.css'; // Isolated global styles for the new UI
 
@@ -10,6 +11,7 @@ const LandingPage = () => {
       <CustomCursor />
       <LandingNavbar />
       <Hero />
+      <Features />
     </div>
   );
 };
