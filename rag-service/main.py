@@ -46,6 +46,14 @@ app = FastAPI()
 # Global session store
 sessions = {}
 
+INTERNAL_RAG_TOKEN = os.getenv("INTERNAL_RAG_TOKEN", "").strip()
+
+def internal_token_valid(provided: str | None, expected: str) -> bool:
+    if not expected:
+        return True
+    candidate = (provided or "").strip()
+    return bool(candidate) and candidate == expected
+
 
 def standard_error_response(status_code: int, detail: str, **extra):
     payload = {
@@ -54,6 +62,26 @@ def standard_error_response(status_code: int, detail: str, **extra):
         **extra,
     }
     return JSONResponse(status_code=status_code, content=payload)
+
+@app.middleware("http")
+async def internal_auth_middleware(request: Request, call_next):
+    """
+    Enforce service-to-service auth for RAG endpoints when INTERNAL_RAG_TOKEN is set.
+
+    This prevents attackers from bypassing the API gateway's rate limits by calling
+    the RAG service directly (for example when port 5000 is accidentally exposed).
+    """
+    if INTERNAL_RAG_TOKEN and request.url.path in {
+        "/process-pdf",
+        "/ask",
+        "/summarize",
+        "/upload_pdf",
+    }:
+        provided = request.headers.get("X-Internal-Token")
+        if not internal_token_valid(provided, INTERNAL_RAG_TOKEN):
+            return standard_error_response(403, "Forbidden")
+
+    return await call_next(request)
 
 
 @app.exception_handler(RequestValidationError)

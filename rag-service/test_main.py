@@ -19,6 +19,7 @@ from main import (
     INSUFFICIENT_CONTEXT_MESSAGE,
     passes_evidence_gate,
     document_dedupe_key,
+    internal_token_valid,
 )
 
 
@@ -50,6 +51,22 @@ def test_sanitize_upload_filename_invalid():
 
     with pytest.raises(ValueError, match="Uploaded filename contains unsupported characters"):
         sanitize_upload_filename("test$file.pdf")
+
+
+def test_internal_token_valid_allows_when_unset():
+    assert internal_token_valid(None, "") is True
+    assert internal_token_valid("", "") is True
+
+
+def test_internal_token_valid_rejects_missing_when_set():
+    assert internal_token_valid(None, "secret") is False
+    assert internal_token_valid("", "secret") is False
+    assert internal_token_valid("   ", "secret") is False
+
+
+def test_internal_token_valid_accepts_exact_match():
+    assert internal_token_valid("secret", "secret") is True
+
 
 
 def test_concise_excerpt():

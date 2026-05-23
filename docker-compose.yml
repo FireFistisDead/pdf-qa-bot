@@ -4,8 +4,9 @@ services:
   rag-service:
     build:
       context: ./rag-service
-    ports:
-      - "5000:5000"
+    # Do NOT publish the RAG service to the host network by default.
+    # It is an internal dependency of the API gateway and publishing it allows
+    # bypassing gateway rate-limits / bans by calling FastAPI endpoints directly.
     volumes:
       - shared_uploads:/app/uploads
       - hf_cache:/root/.cache/huggingface
@@ -27,6 +28,9 @@ services:
       - "4000:4000"
     environment:
       - RAG_SERVICE_URL=http://rag-service:5000
+      - INTERNAL_RAG_TOKEN=${INTERNAL_RAG_TOKEN}
+    env_file:
+      - .env
     volumes:
       - shared_uploads:/app/uploads
     depends_on:
