@@ -26,7 +26,7 @@ const LandingNavbar = () => {
         <button className="navbar-btn-login" id="btn-login">
           Login
         </button>
-        <button className="navbar-btn-cta" id="btn-get-started">
+        <button className="navbar-btn-cta" id="btn-get-started" onClick={() => window.location.href = '/'}>
           Get Started <span>→</span>
         </button>
       </div>

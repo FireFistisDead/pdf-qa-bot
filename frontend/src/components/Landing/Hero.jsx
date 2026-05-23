@@ -52,11 +52,11 @@ const Hero = () => {
           </div>
 
           <div className="hero-actions animate-on-load">
-            <button className="btn-primary">
+            <button className="hero-btn-primary" onClick={() => window.location.href = '/'}>
               <span className="btn-text">GET STARTED</span>
               <span className="btn-glare"></span>
             </button>
-            <button className="btn-secondary">
+            <button className="hero-btn-secondary">
               <span className="btn-text">EXPLORE API</span>
               <div className="btn-border-tracer"></div>
             </button>
