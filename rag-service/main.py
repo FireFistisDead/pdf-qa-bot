@@ -1637,7 +1637,7 @@ async def upload_pdf(file: UploadFile = File(...)):
     session_dir = get_session_dir(session_id)
 
     # 4. Build FAISS index for this session
-    vectorstore = FAISS.from_documents(docs, embeddings_model)
+    vectorstore = FAISS.from_documents(docs, embedding_model)
     vectorstore.save_local(session_dir)
 
     # 5. Store session reference
