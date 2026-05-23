@@ -1935,48 +1935,47 @@ def summarize_pdf(data: SummarizeRequest):
     return {"summary": build_session_summary(uploaded_documents, indexed_documents)}
 
 
-@app.post("/upload_pdf")
-async def upload_pdf(file: UploadFile = File(...)):
-    # 1. Save the uploaded file
-    file_name = sanitize_upload_filename(file.filename)
-    file_path = get_trusted_upload_path(file_name)
-    with open(file_path, "wb") as f:
-        f.write(await file.read())
-    validated_path = validate_uploaded_pdf(file_path)
+    @app.post("/upload_pdf")
+    async def upload_pdf(file: UploadFile = File(...)):
+        # 1. Save the uploaded file
+        file_name = sanitize_upload_filename(file.filename)
+        file_path = get_trusted_upload_path(file_name)
+        with open(file_path, "wb") as f:
+            f.write(await file.read())
+        validated_path = validate_uploaded_pdf(file_path)
 
-    # 2. Load and split the PDF
-    pages = extract_pdf_documents_sandboxed(validated_path, file_name)
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    docs = splitter.split_documents(pages)
+        # 2. Load and split the PDF
+        pages = extract_pdf_documents_sandboxed(validated_path, file_name)
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        docs = splitter.split_documents(pages)
 
-    # 3. Generate a new session_id and unique folder
-    session_id = str(uuid.uuid4())
-    session_secret = generate_session_secret()
-    session_dir = get_session_dir(session_id)
+        # 3. Generate a new session_id and unique folder
+        session_id = str(uuid.uuid4())
+        session_secret = generate_session_secret()
+        session_dir = get_session_dir(session_id)
 
-    # 4. Build FAISS index for this session and persist it under the session lock.
-    vectorstore = FAISS.from_documents(docs, embedding_model)
-    now = now_ts()
-    with session_store_lock(session_id):
-        vectorstore.save_local(session_dir)
-        sessions[session_id] = {
-            "vectorstore": vectorstore,
-            "lock": threading.Lock(),
-            "documents": [],
+        # 4. Build FAISS index for this session and persist it under the session lock.
+        vectorstore = FAISS.from_documents(docs, embedding_model)
+        now = now_ts()
+        with session_store_lock(session_id):
+            vectorstore.save_local(session_dir)
+            sessions[session_id] = {
+                "vectorstore": vectorstore,
+                "lock": threading.Lock(),
+                "documents": [],
+                "session_secret": session_secret,
+                "session_dir": session_dir,
+                "created_at": now,
+                "last_accessed": now,
+            }
+            persist_session_registry_entry(session_id, sessions[session_id])
+
+        # 6. Return both message and session_id
+        return {
+            "message": f"{file_name} uploaded and indexed successfully",
+            "session_id": session_id,
             "session_secret": session_secret,
-            "session_dir": session_dir,
-            "created_at": now,
-            "last_accessed": now,
         }
-        persist_session_registry_entry(session_id, sessions[session_id])
-
-    # 6. Return both message and session_id
-    return {
-        "message": f"{file_name} uploaded and indexed successfully",
-        "session_id": session_id,
-        "session_secret": session_secret,
-    }
-
 if __name__ == "__main__":
     is_production = os.getenv("ENVIRONMENT", "development").lower() == "production"
     host = os.getenv("HOST", "0.0.0.0")
