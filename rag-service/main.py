@@ -13,7 +13,6 @@ from langchain_community.vectorstores import FAISS
 import numpy as np
 import os
 import secrets
-import shutil
 import uuid
 import uvicorn
 import torch
@@ -31,8 +30,6 @@ import re
 
 load_dotenv()
 
-
-PERSIST_DIR = "faiss_store"
 # ── Logger (must be defined before exception handlers that use it) ─────────────
 logger = logging.getLogger("pdf_qa_rag")
 logging.basicConfig(
@@ -237,7 +234,6 @@ async def internal_auth_middleware(request: Request, call_next):
         "/process-pdf",
         "/ask",
         "/summarize",
-        "/upload_pdf",
     }:
         provided = request.headers.get("X-Internal-Token")
         if not internal_token_valid(provided, INTERNAL_RAG_TOKEN):
@@ -1655,39 +1651,6 @@ def summarize_pdf(data: SummarizeRequest):
     )
 
     return {"summary": build_session_summary(uploaded_documents, indexed_documents)}
-
-
-@app.post("/upload_pdf")
-async def upload_pdf(file: UploadFile = File(...)):
-    # 1. Save the uploaded file
-    file_name = sanitize_upload_filename(file.filename)
-    file_path = get_trusted_upload_path(file_name)
-    with open(file_path, "wb") as f:
-        f.write(await file.read())
-    validated_path = validate_uploaded_pdf(file_path)
-
-    # 2. Load and split the PDF
-    pages = extract_pdf_documents_sandboxed(validated_path, file_name)
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    docs = splitter.split_documents(pages)
-
-    # 3. Generate a new session_id and unique folder
-    session_id = str(uuid.uuid4())
-    temp_tracking_id = session_id
-    session_dir = os.path.join(PERSIST_DIR, session_id)
-
-    # 4. Build FAISS index for this session
-    vectorstore = FAISS.from_documents(docs, embedding_model)
-    vectorstore.save_local(session_dir)
-
-    # 5. Store session reference
-    sessions[session_id] = {"vectorstore": vectorstore}
-
-    # 6. Return both message and session_id
-    return {
-        "message": f"{file_name} uploaded and indexed successfully",
-        "session_id": session_id
-    }
 
 if __name__ == "__main__":
     is_production = os.getenv("ENVIRONMENT", "development").lower() == "production"
