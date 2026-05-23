@@ -32,7 +32,10 @@ if (PROXY_COUNT > 0) {
 // These headers are your first line of defence before any code even runs.
 app.use(helmet());
 
-app.use(cors());
+app.use(cors({
+  origin: process.env.ALLOWED_ORIGIN || "http://localhost:3000",
+  methods: ["POST"],
+}));
 
 // ─── Body Size Limit ─────────────────────────────────────────────────────────
 // Cap JSON payloads at 16 KB. Prevents memory exhaustion from huge JSON bodies
@@ -224,6 +227,50 @@ const extractServiceDetails = (err) => {
 const ragAuthHeaders = () =>
   INTERNAL_RAG_TOKEN ? { "X-Internal-Token": INTERNAL_RAG_TOKEN } : {};
 
+const normalizeSessionSecret = (value) =>
+  typeof value === "string" ? value.trim() || null : null;
+
+const validateSessionExtension = async (sessionId, sessionSecret) => {
+  if (!sessionId) {
+    return {
+      allowed: false,
+      statusCode: 400,
+      error: "session_id is required to extend a session.",
+    };
+  }
+
+  if (!sessionSecret) {
+    return {
+      allowed: false,
+      statusCode: 403,
+      error: "session_secret is required to extend an existing session.",
+    };
+  }
+
+  try {
+    await axios.post(
+      `${RAG_SERVICE_URL}/validate-session-write`,
+      {
+        session_id: sessionId,
+        session_secret: sessionSecret,
+      },
+      { headers: ragAuthHeaders() },
+    );
+
+    return { allowed: true };
+  } catch (err) {
+    const statusCode = err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
+    const details = extractServiceDetails(err);
+
+    return {
+      allowed: false,
+      statusCode,
+      error: typeof details === "string" ? details : "Session extension denied.",
+      details,
+    };
+  }
+};
+
 app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
   const uploadedFilePath = req.file?.path;
   // CodeQL [js/path-injection] Mitigation: Break taint flow by forcing basename
@@ -231,6 +278,7 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
     ? path.join(UPLOADS_DIR, path.basename(uploadedFilePath))
     : null;
   const sessionId = req.body?.session_id || null;
+  const sessionSecret = normalizeSessionSecret(req.body?.session_secret);
 
   try {
     if (!req.file) {
@@ -249,6 +297,20 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
         "Uploaded PDF is empty. Please choose a valid PDF file.",
       );
     }
+
+    if (sessionId) {
+      const validation = await validateSessionExtension(sessionId, sessionSecret);
+      if (!validation.allowed) {
+        await cleanupFile(uploadedFilePath);
+        return sendUploadError(
+          res,
+          validation.statusCode,
+          validation.error,
+          validation.details || validation.error,
+        );
+      }
+    }
+
     const fileHandle = await fsPromises.open(absoluteFilePath, "r");
 const signatureBuffer = Buffer.alloc(4);
 
@@ -273,6 +335,9 @@ if (signatureBuffer.toString() !== "%PDF") {
     if (sessionId) {
       formData.session_id = sessionId;
     }
+    if (sessionSecret) {
+      formData.session_secret = sessionSecret;
+    }
 
     const response = await axios.postForm(
       `${RAG_SERVICE_URL}/process-pdf`,
@@ -285,6 +350,7 @@ if (signatureBuffer.toString() !== "%PDF") {
     return res.json({
       message: "PDF uploaded & processed successfully!",
       session_id: response.data.session_id,
+      session_secret: response.data.session_secret,
       document: response.data.document,
       documents: response.data.documents || [],
     });

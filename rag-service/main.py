@@ -5,7 +5,6 @@ from pydantic import BaseModel, Field, field_validator
 from pathlib import Path
 from uuid import UUID
 from contextlib import contextmanager
-from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -20,6 +19,7 @@ import shutil
 import uuid
 import uvicorn
 import torch
+import multiprocessing
 from transformers import (
     AutoConfig,
     AutoTokenizer,
@@ -65,11 +65,24 @@ def update_processing_progress(session_id, stage, progress):
 
 INTERNAL_RAG_TOKEN = os.getenv("INTERNAL_RAG_TOKEN", "").strip()
 
+PDF_PARSE_TIMEOUT_SECONDS = int(os.getenv("PDF_PARSE_TIMEOUT_SECONDS", "20"))
+MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "200"))
+MAX_PDF_EXTRACT_CHARS = int(os.getenv("MAX_PDF_EXTRACT_CHARS", "400000"))
+
+try:
+    from langchain_core.documents import Document  # type: ignore
+except Exception:  # pragma: no cover
+    from langchain.schema import Document  # type: ignore
+
 def internal_token_valid(provided: str | None, expected: str) -> bool:
     if not expected:
         return True
     candidate = (provided or "").strip()
     return bool(candidate) and candidate == expected
+
+
+def generate_session_secret() -> str:
+    return secrets.token_urlsafe(32)
 
 
 def standard_error_response(status_code: int, detail: str, **extra):
@@ -79,6 +92,154 @@ def standard_error_response(status_code: int, detail: str, **extra):
         **extra,
     }
     return JSONResponse(status_code=status_code, content=payload)
+
+def _extract_pdf_text_worker(
+    pdf_path: str,
+    max_pages: int,
+    max_chars: int,
+    out_queue: "multiprocessing.Queue",
+):
+    """
+    Runs in a separate process so the parent can hard-timeout / terminate if PDF parsing
+    becomes pathological (DoS-grade PDFs).
+    """
+    try:
+        from pypdf import PdfReader  # local import to keep startup light
+
+        reader = PdfReader(pdf_path, strict=False)
+
+        # Some PDFs are encrypted (or malformed) and can throw lazily; attempt decrypt best-effort.
+        if getattr(reader, "is_encrypted", False):
+            try:
+                reader.decrypt("")  # type: ignore[attr-defined]
+            except Exception:
+                out_queue.put({"ok": False, "error": "Unable to read this PDF. It may be encrypted."})
+                return
+
+        pages = getattr(reader, "pages", [])
+        page_count = len(pages)
+        if page_count == 0:
+            out_queue.put({"ok": False, "error": "No readable pages were found in the PDF."})
+            return
+        if page_count > max_pages:
+            out_queue.put(
+                {
+                    "ok": False,
+                    "error": f"PDF has too many pages ({page_count}). Max allowed is {max_pages}.",
+                    "page_count": page_count,
+                }
+            )
+            return
+
+        extracted = []
+        used = 0
+        for idx, page in enumerate(pages):
+            if idx >= max_pages:
+                break
+            text = page.extract_text() or ""
+            if not text.strip():
+                continue
+
+            remaining = max_chars - used
+            if remaining <= 0:
+                break
+            if len(text) > remaining:
+                text = text[:remaining]
+            used += len(text)
+            extracted.append({"page": idx, "text": text})
+
+        if not extracted:
+            out_queue.put({"ok": False, "error": "No readable text was found in the PDF."})
+            return
+
+        out_queue.put(
+            {
+                "ok": True,
+                "page_count": page_count,
+                "extracted": extracted,
+                "extracted_chars": used,
+            }
+        )
+    except Exception as exc:
+        out_queue.put({"ok": False, "error": "Unable to read this PDF. It may be corrupted.", "details": str(exc)})
+
+
+def extract_pdf_documents_sandboxed(pdf_path: str, filename: str):
+    """
+    Parse PDF in a separate process with hard timeout and page/size limits.
+
+    Returns: List[Document]
+    Raises: HTTPException on failure.
+    """
+    start = time.time()
+    ctx = multiprocessing.get_context("spawn")
+    out_queue = ctx.Queue(maxsize=1)
+    proc = ctx.Process(
+        target=_extract_pdf_text_worker,
+        args=(pdf_path, MAX_PDF_PAGES, MAX_PDF_EXTRACT_CHARS, out_queue),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(timeout=PDF_PARSE_TIMEOUT_SECONDS)
+
+    if proc.is_alive():
+        logger.warning(
+            "PDF parse timeout filename=%s timeout_seconds=%s",
+            filename,
+            PDF_PARSE_TIMEOUT_SECONDS,
+        )
+        proc.terminate()
+        proc.join(timeout=2)
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "PDF parsing timed out. This PDF may be too complex or malformed. "
+                "Try a smaller/simpler PDF."
+            ),
+        )
+
+    try:
+        result = out_queue.get_nowait()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Unable to read this PDF.")
+
+    if not isinstance(result, dict) or not result.get("ok"):
+        error = (result or {}).get("error") if isinstance(result, dict) else None
+        raise HTTPException(status_code=400, detail=error or "Unable to read this PDF.")
+
+    extracted = result.get("extracted", [])
+    extracted_chars = int(result.get("extracted_chars", 0) or 0)
+    page_count = int(result.get("page_count", 0) or 0)
+    elapsed_ms = int((time.time() - start) * 1000)
+
+    logger.info(
+        "PDF parsed safely filename=%s pages=%s extracted_pages=%s extracted_chars=%s duration_ms=%s",
+        filename,
+        page_count,
+        len(extracted),
+        extracted_chars,
+        elapsed_ms,
+    )
+
+    docs = []
+    for item in extracted:
+        page = item.get("page")
+        text = (item.get("text") or "").strip()
+        if not text:
+            continue
+        docs.append(
+            Document(
+                page_content=text,
+                metadata={
+                    "page": page,
+                    "filename": filename,
+                    "source": filename,
+                },
+            )
+        )
+    if not docs:
+        raise HTTPException(status_code=400, detail="No readable text was found in the PDF.")
+    return docs
 
 @app.middleware("http")
 async def internal_auth_middleware(request: Request, call_next):
@@ -1079,6 +1240,9 @@ def load_generation_model():
 def generate_response(prompt: str, max_new_tokens: int) -> str:
     tokenizer, model, is_encoder_decoder = load_generation_model()
     model_device = next(model.parameters()).device
+
+    # Tokenize and move to device before acquiring the lock so
+    # CPU-bound preprocessing does not block other threads unnecessarily.
     encoded = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
     encoded = {key: value.to(model_device) for key, value in encoded.items()}
     pad_token_id = (
@@ -1087,6 +1251,9 @@ def generate_response(prompt: str, max_new_tokens: int) -> str:
         else tokenizer.eos_token_id
     )
 
+    # Only the model.generate() call is locked — tokenization and device
+    # transfer above happen in parallel across threads. The lock purely
+    # serialises the GPU/CPU forward pass itself which is not thread-safe.
     logger.debug("Acquiring generation lock")
     with generation_lock:
         with torch.no_grad():
@@ -1165,10 +1332,16 @@ class SummarizeRequest(BaseModel):
     session_id: UUID
 
 
+class SessionWriteRequest(BaseModel):
+    session_id: UUID
+    session_secret: str
+
+
 @app.post("/process-pdf")
 def process_pdf(
     file: UploadFile = File(...),
-    session_id: str | None = Form(None)
+    session_id: str | None = Form(None),
+    session_secret: str | None = Form(None),
 ):
     cleanup_expired_sessions()
 
@@ -1176,6 +1349,7 @@ def process_pdf(
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF documents are supported.")
     requested_session_id = (session_id or "").strip() or None
+    requested_session_secret = (session_secret or "").strip() or None
 
     # ─── Quota pre-flight checks ──────────────────────────────────────────────────
     if requested_session_id:
@@ -1183,6 +1357,9 @@ def process_pdf(
             session = _peek_session_unlocked(requested_session_id)
             if not session:
                 raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+            expected_secret = (session.get("session_secret") or "").strip()
+            if not expected_secret or not requested_session_secret or not secrets.compare_digest(requested_session_secret, expected_secret):
+                raise HTTPException(status_code=403, detail="Forbidden")
             if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
                 raise HTTPException(status_code=400, detail="Maximum number of documents per session reached.")
 
@@ -1220,10 +1397,11 @@ def process_pdf(
             raise HTTPException(status_code=400, detail="Uploaded PDF is empty. Please choose a valid PDF file.")
 
         try:
-            loader = PyPDFLoader(temp_path)
-            docs = loader.load()
+            docs = extract_pdf_documents_sandboxed(temp_path, filename)
         except Exception as exc:
             logger.warning("Failed to load PDF filename=%s error=%s", filename, exc)
+            if isinstance(exc, HTTPException):
+                raise
             raise HTTPException(status_code=400, detail="Unable to read this PDF. It may be corrupted or encrypted.")
     finally:
         file.file.close()
@@ -1319,6 +1497,7 @@ def process_pdf(
             _cleanup_expired_sessions_unlocked()
             _enforce_max_sessions_unlocked()
             session_id = str(uuid.uuid4())
+            session_secret = generate_session_secret()
             session_dir = persist_vectorstore(session_id, new_vectorstore)
             previous_tracking_id = temp_tracking_id
             temp_tracking_id = session_id
@@ -1329,6 +1508,7 @@ def process_pdf(
                 "vectorstore": new_vectorstore,
                 "lock": session_lock,
                 "documents": [uploaded_document],
+                "session_secret": session_secret,
                 "session_dir": session_dir,
                 "created_at": now,
                 "last_accessed": now,
@@ -1381,9 +1561,30 @@ def process_pdf(
     return {
         "message": "PDF processed successfully",
         "session_id": session_id,
+        "session_secret": sessions[session_id].get("session_secret"),
         "document": uploaded_document,
         "documents": documents,
     }
+
+
+@app.post("/validate-session-write")
+def validate_session_write(data: SessionWriteRequest):
+    session_id = str(data.session_id)
+    provided_secret = (data.session_secret or "").strip()
+
+    if not provided_secret:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    with sessions_lock:
+        session = _peek_session_unlocked(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+
+        expected_secret = (session.get("session_secret") or "").strip()
+        if not expected_secret or not secrets.compare_digest(provided_secret, expected_secret):
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+    return {"allowed": True}
 
 
 
@@ -1713,13 +1914,13 @@ async def upload_pdf(file: UploadFile = File(...)):
     validated_path = validate_uploaded_pdf(file_path)
 
     # 2. Load and split the PDF
-    loader = PyPDFLoader(validated_path)
-    pages = loader.load()
+    pages = extract_pdf_documents_sandboxed(validated_path, file_name)
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     docs = splitter.split_documents(pages)
 
     # 3. Generate a new session_id and unique folder
     session_id = str(uuid.uuid4())
+    session_secret = generate_session_secret()
     session_dir = get_session_dir(session_id)
 
     # 4. Build FAISS index for this session
@@ -1732,6 +1933,7 @@ async def upload_pdf(file: UploadFile = File(...)):
         "vectorstore": vectorstore,
         "lock": threading.Lock(),
         "documents": [],
+        "session_secret": session_secret,
         "session_dir": session_dir,
         "created_at": now,
         "last_accessed": now,
@@ -1741,7 +1943,8 @@ async def upload_pdf(file: UploadFile = File(...)):
     # 6. Return both message and session_id
     return {
         "message": f"{file_name} uploaded and indexed successfully",
-        "session_id": session_id
+        "session_id": session_id,
+        "session_secret": session_secret,
     }
 
 if __name__ == "__main__":

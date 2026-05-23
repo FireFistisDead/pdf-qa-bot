@@ -61,6 +61,7 @@ function App() {
       url,
       chat: [],
       session_id: data.session_id,
+      session_secret: data.session_secret || null,
     },
   ];
  
