@@ -32,9 +32,6 @@ load_dotenv()
 
 
 PERSIST_DIR = "faiss_store"
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
-)
 # ── Logger (must be defined before exception handlers that use it) ─────────────
 logger = logging.getLogger("pdf_qa_rag")
 logging.basicConfig(
@@ -1385,7 +1382,7 @@ async def upload_pdf(file: UploadFile = File(...)):
     session_dir = os.path.join(PERSIST_DIR, session_id)
 
     # 4. Build FAISS index for this session
-    vectorstore = FAISS.from_documents(docs, embeddings)
+    vectorstore = FAISS.from_documents(docs, embedding_model)
     vectorstore.save_local(session_dir)
 
     # 5. Store session reference
