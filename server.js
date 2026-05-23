@@ -245,7 +245,24 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
         "Uploaded PDF is empty. Please choose a valid PDF file.",
       );
     }
+    const fileHandle = await fsPromises.open(absoluteFilePath, "r");
+const signatureBuffer = Buffer.alloc(4);
 
+try {
+  await fileHandle.read(signatureBuffer, 0, 4, 0);
+} finally {
+  await fileHandle.close();
+}
+
+if (signatureBuffer.toString() !== "%PDF") {
+  await cleanupFile(uploadedFilePath);
+
+  return sendUploadError(
+    res,
+    415,
+    "Invalid file type. Only real PDF documents are accepted.",
+  );
+}
     const formData = {
       file: fs.createReadStream(absoluteFilePath),
     };
