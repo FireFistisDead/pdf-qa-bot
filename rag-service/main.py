@@ -12,7 +12,6 @@ from rank_bm25 import BM25Okapi
 from langchain_community.vectorstores import FAISS
 import numpy as np
 import os
-import shutil
 import uuid
 import uvicorn
 import torch
@@ -30,8 +29,6 @@ import re
 
 load_dotenv()
 
-
-PERSIST_DIR = "faiss_store"
 # ── Logger (must be defined before exception handlers that use it) ─────────────
 logger = logging.getLogger("pdf_qa_rag")
 logging.basicConfig(
@@ -236,7 +233,6 @@ async def internal_auth_middleware(request: Request, call_next):
         "/process-pdf",
         "/ask",
         "/summarize",
-        "/upload_pdf",
     }:
         provided = request.headers.get("X-Internal-Token")
         if not internal_token_valid(provided, INTERNAL_RAG_TOKEN):
