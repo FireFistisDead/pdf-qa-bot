@@ -360,8 +360,15 @@ def session_expires_at(last_accessed: float) -> float:
     return last_accessed + (SESSION_TTL_MINUTES * 60)
 
 
+def normalize_session_id(session_id: str) -> str:
+    if not session_id or not str(session_id).strip():
+        raise ValueError("Missing session id.")
+    return str(UUID(str(session_id).strip()))
+
+
 def get_session_dir(session_id: str) -> str:
-    return os.fspath(PERSIST_PATH / session_id)
+    safe_session_id = normalize_session_id(session_id)
+    return os.fspath(PERSIST_PATH / safe_session_id)
 
 
 @contextmanager
@@ -420,12 +427,13 @@ def persist_session_registry_entry(session_id: str, meta: dict):
     with session_registry_lock():
         registry = read_session_registry_unlocked()
         last_accessed = meta.get("last_accessed", now_ts())
+        session_dir = get_session_dir(session_id)
         registry[session_id] = {
             "created_at": meta.get("created_at", last_accessed),
             "last_accessed": last_accessed,
             "expires_at": session_expires_at(last_accessed),
             "documents": list(meta.get("documents", [])),
-            "session_dir": meta.get("session_dir") or get_session_dir(session_id),
+            "session_dir": session_dir,
             "session_secret": meta.get("session_secret"),
         }
         write_session_registry_unlocked(registry)
@@ -437,11 +445,8 @@ def remove_persisted_session(session_id: str, session_dir: str | None = None):
         registry_entry = registry.pop(session_id, None)
         write_session_registry_unlocked(registry)
 
-    target_dir = session_dir or (registry_entry or {}).get("session_dir")
-    if not target_dir:
-        target_dir = get_session_dir(session_id)
     try:
-        target_path = Path(target_dir).resolve()
+        target_path = Path(get_session_dir(session_id)).resolve()
         if target_path.is_dir() and PERSIST_PATH in target_path.parents:
             shutil.rmtree(target_path)
     except Exception:
@@ -463,7 +468,7 @@ def cleanup_expired_persisted_sessions(extra_session_dirs: dict | None = None):
                 expired_ids.append(sid)
 
         for sid in expired_ids:
-            expired_dirs[sid] = (extra_session_dirs or {}).get(sid) or registry.get(sid, {}).get("session_dir")
+            expired_dirs[sid] = get_session_dir(sid)
             registry.pop(sid, None)
 
         if expired_ids:
@@ -471,7 +476,7 @@ def cleanup_expired_persisted_sessions(extra_session_dirs: dict | None = None):
 
     for sid, session_dir in expired_dirs.items():
         try:
-            target_path = Path(session_dir or get_session_dir(sid)).resolve()
+            target_path = Path(get_session_dir(sid)).resolve()
             if target_path.is_dir() and PERSIST_PATH in target_path.parents:
                 shutil.rmtree(target_path)
         except Exception:
@@ -496,7 +501,7 @@ def _recover_session_unlocked(session_id: str):
         remove_persisted_session(session_id, entry.get("session_dir"))
         return None
 
-    session_dir = entry.get("session_dir") or get_session_dir(session_id)
+    session_dir = get_session_dir(session_id)
     if not os.path.isdir(session_dir):
         remove_persisted_session(session_id, session_dir)
         return None
@@ -1348,7 +1353,12 @@ def process_pdf(
     filename = file.filename or "uploaded.pdf"
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF documents are supported.")
-    requested_session_id = (session_id or "").strip() or None
+    requested_session_id = None
+    if session_id:
+        try:
+            requested_session_id = normalize_session_id(session_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid session ID format.")
     requested_session_secret = (session_secret or "").strip() or None
 
     # ─── Quota pre-flight checks ──────────────────────────────────────────────────

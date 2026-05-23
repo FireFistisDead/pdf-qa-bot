@@ -21,6 +21,8 @@ from main import (
     passes_evidence_gate,
     document_dedupe_key,
     internal_token_valid,
+    normalize_session_id,
+    get_session_dir,
     _extract_pdf_text_worker,
 )
 
@@ -68,6 +70,24 @@ def test_internal_token_valid_rejects_missing_when_set():
 
 def test_internal_token_valid_accepts_exact_match():
     assert internal_token_valid("secret", "secret") is True
+
+
+def test_normalize_session_id_rejects_invalid_values():
+    with pytest.raises(ValueError, match="Missing session id"):
+        normalize_session_id("")
+
+    with pytest.raises(ValueError):
+        normalize_session_id("not-a-uuid")
+
+
+def test_get_session_dir_requires_uuid_session_id():
+    with pytest.raises(ValueError):
+        get_session_dir("../escape")
+
+
+def test_normalize_session_id_returns_canonical_uuid():
+    normalized = normalize_session_id("550E8400-E29B-41D4-A716-446655440000")
+    assert normalized == "550e8400-e29b-41d4-a716-446655440000"
 
 
 def test_extract_pdf_text_worker_enforces_page_limit(tmp_path):
