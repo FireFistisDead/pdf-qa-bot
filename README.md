@@ -68,6 +68,10 @@ flowchart LR
 
 > **Note:** Vector stores live in process memory. Restarting the RAG service clears all sessions; users must re-upload PDFs.
 
+> **Security note:** The FastAPI RAG service (`:5000`) is meant to be an **internal** dependency of the Express gateway (`:4000`).
+> Do not expose it publicly — otherwise attackers can bypass gateway rate limiting by calling RAG endpoints directly.
+> For defense-in-depth, set `INTERNAL_RAG_TOKEN` so the RAG service rejects requests missing `X-Internal-Token`.
+
 ### Default ports
 
 | Service | Folder | Port | URL |
@@ -281,14 +285,13 @@ Internal service called by Express. You can call it directly for debugging.
 | `POST` | `/ask` | `{ "question": string, "session_id": string }` | `{ "answer": string }` | Returns a friendly message if `session_id` is unknown |
 | `POST` | `/summarize` | `{ "session_id": string, "pdf"?: string \| null }` | `{ "summary": string }` | `pdf` is accepted for API compatibility; indexing uses `session_id` only |
 
-Interactive OpenAPI docs: **http://localhost:5000/docs**
+Interactive OpenAPI docs: **http://localhost:5000/docs** (recommended for local development only; do not expose publicly)
 
-**Example — process PDF (direct)**
+**Example — process PDF (via gateway, recommended)**
 
 ```bash
-curl -X POST http://localhost:5000/process-pdf \
-  -H "Content-Type: application/json" \
-  -d '{"filePath":"C:/path/to/uploads/abc123"}'
+curl -X POST http://localhost:4000/upload \
+  -F "file=@/path/to/your.pdf"
 ```
 
 ---
@@ -303,6 +306,7 @@ Environment variables are read from `rag-service/.env` (create from `.env.exampl
 | `OPENAI_API_KEY` | *(empty)* | Reserved; not used by the current local HF pipeline |
 | `HOST` | `127.0.0.1` | Documented for optional deployment tuning |
 | `PORT` | `5000` | Documented RAG port (uvicorn CLI flag takes precedence in dev) |
+| `INTERNAL_RAG_TOKEN` | *(empty)* | Optional shared secret: when set, RAG endpoints require `X-Internal-Token` |
 
 **Faster, lighter generation (recommended on CPU-only machines):**
 
