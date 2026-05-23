@@ -121,6 +121,7 @@ ASK_REQUIRE_CITATIONS = os.getenv("ASK_REQUIRE_CITATIONS", "true").strip().lower
     "yes",
     "on",
 }
+RETRIEVAL_CACHE_LIMIT = int(os.getenv("RETRIEVAL_CACHE_LIMIT", "25"))
 QUERY_STOPWORDS = {
     "about", "according", "also", "and", "are", "between", "compare",
     "describe", "does", "document", "documents", "explain", "from", "give",
@@ -530,6 +531,8 @@ def detect_question_intent(question):
         return "overview"
     return "factual"
 
+def normalize_query(query: str) -> str:
+    return " ".join(query.lower().strip().split())
 
 def concise_excerpt(text, max_chars=420):
     normalized_text = " ".join(text.split())
@@ -1268,6 +1271,7 @@ def process_pdf(
             session = _touch_session_unlocked(requested_session_id)
             if not session:
                 raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+            session.setdefault("retrieval_cache", {})
             if "lock" not in session:
                 session["lock"] = threading.Lock()
             session_lock = session["lock"]
@@ -1285,6 +1289,7 @@ def process_pdf(
                 "session_dir": session_dir,
                 "created_at": now,
                 "last_accessed": now,
+                "retrieval_cache": {},
             }
             persist_session_registry_entry(session_id, sessions[session_id])
             logger.info(
@@ -1312,6 +1317,7 @@ def process_pdf(
                 raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
             session.setdefault("documents", []).append(uploaded_document)
             session["last_accessed"] = now
+            session["retrieval_cache"] = {}
             session_id = requested_session_id
             persist_session_registry_entry(session_id, session)
             logger.info(
@@ -1336,29 +1342,85 @@ def process_pdf(
 @app.post("/ask")
 def ask_question(data: Question):
     cleanup_expired_sessions()
+
     question = (data.question or "").strip()
+
     if not question:
-        raise HTTPException(status_code=400, detail="Question is required.")
+        raise HTTPException(
+            status_code=400,
+            detail="Question is required."
+        )
 
     intent = detect_question_intent(question)
     session_id = str(data.session_id)
+
+    # Normalize query for cache reuse
+    normalized_query = normalize_query(question)
+    cache_hit = False
+
     with sessions_lock:
+
         session = _touch_session_unlocked(session_id)
+
         if not session or not session.get("vectorstore"):
-            raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+            raise HTTPException(
+                status_code=404,
+                detail="Session expired or invalid. Please re-upload your PDFs."
+            )
+
         if "lock" not in session:
             session["lock"] = threading.Lock()
         session_lock = session["lock"]
         vectorstore = session["vectorstore"]
 
+        # Session-level retrieval cache
+        retrieval_cache = session.setdefault(
+            "retrieval_cache",
+            {}
+        )
+
+        # Cache hit
+        if normalized_query in retrieval_cache:
+
+            logger.info(
+                "Retrieval cache hit session_id=%s query=%s",
+                session_id,
+                normalized_query,
+            )
+
+            scored_candidates = retrieval_cache[
+                normalized_query
+            ]
+
+            cache_hit = True
+
+        else:
+            cache_hit = False
+
     try:
         with session_lock:
             indexed_documents = collect_index_documents(vectorstore)
-            scored_candidates = search_retrieval_candidates(
-                vectorstore,
-                question,
-                ASK_RETRIEVAL_CANDIDATES,
-            )
+
+            if not cache_hit:
+                logger.info(
+                    "Retrieval cache miss session_id=%s query=%s",
+                    session_id,
+                    normalized_query,
+                )
+                scored_candidates = search_retrieval_candidates(
+                    vectorstore,
+                    question,
+                    ASK_RETRIEVAL_CANDIDATES,
+                )
+
+                with sessions_lock:
+                    session = sessions.get(session_id)
+                    if session:
+                        retrieval_cache = session.setdefault("retrieval_cache", {})
+                        if len(retrieval_cache) >= RETRIEVAL_CACHE_LIMIT:
+                            oldest_key = next(iter(retrieval_cache))
+                            del retrieval_cache[oldest_key]
+                        retrieval_cache[normalized_query] = scored_candidates
 
     except Exception:
         logger.exception("Similarity search failed session_id=%s", session_id)
@@ -1367,10 +1429,11 @@ def ask_question(data: Question):
     docs = (
         representative_documents_by_source(indexed_documents)
         if intent == "overview"
-        else diversify_retrieved_documents(scored_candidates, question)
+        else diversify_retrieved_documents(
+            scored_candidates,
+            question
+        )
     )
-    if not docs:
-        return {"answer": "No relevant context found."}
 
     best_score = scored_candidates[0][1] if scored_candidates else None
     if not passes_evidence_gate(question, docs, best_score, intent):
@@ -1396,6 +1459,7 @@ def ask_question(data: Question):
     formatted_context = ""
 
     for idx, doc in enumerate(docs):
+
         page = (
             doc.metadata.get("page", 0) + 1
             if "page" in doc.metadata
@@ -1408,10 +1472,16 @@ def ask_question(data: Question):
         )
 
     context = formatted_context[:6500]
-    retrieved_sources = sorted({document_display_name(doc) for doc in docs})
+
+    retrieved_sources = sorted({
+        document_display_name(doc)
+        for doc in docs
+    })
+
     citation_sources = []
 
     for idx, doc in enumerate(docs):
+
         citation_sources.append({
             "source_id": idx + 1,
             "document": document_display_name(doc),
@@ -1420,7 +1490,10 @@ def ask_question(data: Question):
                 if "page" in doc.metadata
                 else None
             ),
-            "preview": concise_excerpt(doc.page_content, 180),
+            "preview": concise_excerpt(
+                doc.page_content,
+                180
+            ),
         })
 
     source_id_by_key = {
@@ -1467,12 +1540,17 @@ def ask_question(data: Question):
             }
         logger.info(
             "Returning grounded answer session_id=%s intent=%s retrieved_chunks=%s sources=%s",
-            session_id, intent, len(docs), retrieved_sources,
+            session_id,
+            intent,
+            len(docs),
+            retrieved_sources,
         )
+
         return {
             "answer": grounded_answer,
             "sources": citation_sources,
-            "retrieval_type": "citation-aware"
+            "retrieval_type": "citation-aware",
+            "cache_hit": cache_hit
         }
 
     prompt = (
@@ -1496,15 +1574,22 @@ def ask_question(data: Question):
 
     logger.info(
         "Executing query session_id=%s retrieved_chunks=%s sources=%s",
-        session_id, len(docs), retrieved_sources,
+        session_id,
+        len(docs),
+        retrieved_sources,
     )
-    answer = generate_response(prompt, max_new_tokens=256)
-    return {
-    "answer": answer,
-    "sources": citation_sources,
-    "retrieval_type": "citation-aware"
-}
 
+    answer = generate_response(
+        prompt,
+        max_new_tokens=256
+    )
+
+    return {
+        "answer": answer,
+        "sources": citation_sources,
+        "retrieval_type": "citation-aware",
+        "cache_hit": cache_hit
+    }
 
 @app.post("/summarize")
 def summarize_pdf(data: SummarizeRequest):
