@@ -7,8 +7,10 @@ import langchain_community.embeddings
 langchain_community.embeddings.HuggingFaceEmbeddings = MagicMock()
 
 import pytest
+from fastapi.testclient import TestClient
 
 from main import (
+    app,
     detect_question_intent,
     sanitize_upload_filename,
     concise_excerpt,
@@ -70,6 +72,20 @@ def test_internal_token_valid_rejects_missing_when_set():
 
 def test_internal_token_valid_accepts_exact_match():
     assert internal_token_valid("secret", "secret") is True
+
+
+def test_internal_auth_middleware_protects_validate_session_write():
+    import main as main_module
+
+    original_token = main_module.INTERNAL_RAG_TOKEN
+    main_module.INTERNAL_RAG_TOKEN = "test-secret"
+    try:
+        client = TestClient(app)
+        response = client.post("/validate-session-write")
+        assert response.status_code == 403
+        assert response.json()["error"] == "Forbidden"
+    finally:
+        main_module.INTERNAL_RAG_TOKEN = original_token
 
 
 def test_normalize_session_id_rejects_invalid_values():

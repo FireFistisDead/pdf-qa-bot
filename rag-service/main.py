@@ -254,6 +254,7 @@ async def internal_auth_middleware(request: Request, call_next):
         "/ask",
         "/summarize",
         "/upload_pdf",
+        "/validate-session-write",
     }:
         provided = request.headers.get("X-Internal-Token")
         if not internal_token_valid(provided, INTERNAL_RAG_TOKEN):
@@ -369,6 +370,30 @@ def normalize_session_id(session_id: str) -> str:
 def get_session_dir(session_id: str) -> str:
     safe_session_id = normalize_session_id(session_id)
     return os.fspath(PERSIST_PATH / safe_session_id)
+
+
+@contextmanager
+def session_store_lock(session_id: str):
+    safe_session_id = normalize_session_id(session_id)
+    PERSIST_PATH.mkdir(parents=True, exist_ok=True)
+    lock_path = PERSIST_PATH / f"{safe_session_id}.lock"
+    with open(lock_path, "a+b") as lock_file:
+        if fcntl:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        elif msvcrt:
+            lock_file.seek(0)
+            lock_file.write(b"0")
+            lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            if fcntl:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            elif msvcrt:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 @contextmanager
@@ -1361,18 +1386,6 @@ def process_pdf(
             raise HTTPException(status_code=400, detail="Invalid session ID format.")
     requested_session_secret = (session_secret or "").strip() or None
 
-    # ─── Quota pre-flight checks ──────────────────────────────────────────────────
-    if requested_session_id:
-        with sessions_lock:
-            session = _peek_session_unlocked(requested_session_id)
-            if not session:
-                raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-            expected_secret = (session.get("session_secret") or "").strip()
-            if not expected_secret or not requested_session_secret or not secrets.compare_digest(requested_session_secret, expected_secret):
-                raise HTTPException(status_code=403, detail="Forbidden")
-            if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
-                raise HTTPException(status_code=400, detail="Maximum number of documents per session reached.")
-
     logger.info(
         "Processing PDF filename=%s existing_session=%s",
         filename,
@@ -1448,18 +1461,24 @@ def process_pdf(
             ),
         )
     if requested_session_id:
-        with sessions_lock:
-            session = _peek_session_unlocked(requested_session_id)
-            if session:
+        with session_store_lock(requested_session_id):
+            with sessions_lock:
+                session = _peek_session_unlocked(requested_session_id)
+                if not session:
+                    raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+                expected_secret = (session.get("session_secret") or "").strip()
+                if not expected_secret or not requested_session_secret or not secrets.compare_digest(requested_session_secret, expected_secret):
+                    raise HTTPException(status_code=403, detail="Forbidden")
+                if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
+                    raise HTTPException(status_code=400, detail="Maximum number of documents per session reached.")
                 current_chunks = sum(doc.get("chunk_count", 0) for doc in session.get("documents", []))
                 if current_chunks + len(chunks) > MAX_CHUNKS_PER_SESSION:
                     raise HTTPException(status_code=400, detail="Maximum number of chunks per session exceeded.")
-    else:
-        if len(chunks) > MAX_CHUNKS_PER_SESSION:
-            raise HTTPException(
-                status_code=400,
-                detail=f"PDF is too large to index. A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks.",
-            )
+    elif len(chunks) > MAX_CHUNKS_PER_SESSION:
+        raise HTTPException(
+            status_code=400,
+            detail=f"PDF is too large to index. A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks.",
+        )
 
     document_id = str(uuid.uuid4())
     temp_tracking_id = requested_session_id or str(uuid.uuid4())
@@ -1493,20 +1512,50 @@ def process_pdf(
         logger.exception("Failed to create vectorstore filename=%s", filename)
         raise HTTPException(status_code=500, detail="Failed to index the uploaded PDF.")
 
-    with sessions_lock:
-        if requested_session_id:
-            session = _touch_session_unlocked(requested_session_id)
-            if not session:
-                raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-            session.setdefault("retrieval_cache", {})
-            if "lock" not in session:
-                session["lock"] = threading.Lock()
-            session_lock = session["lock"]
-            vectorstore = session["vectorstore"]
-        else:
+    if requested_session_id:
+        with session_store_lock(requested_session_id):
+            with sessions_lock:
+                session = _touch_session_unlocked(requested_session_id)
+                if not session:
+                    raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+                session.setdefault("retrieval_cache", {})
+                if "lock" not in session:
+                    session["lock"] = threading.Lock()
+                session_lock = session["lock"]
+                vectorstore = session["vectorstore"]
+
+            with session_lock:
+                try:
+                    vectorstore.merge_from(new_vectorstore)
+                    persist_vectorstore(requested_session_id, vectorstore)
+                except Exception:
+                    logger.exception(
+                        "Failed to merge vectorstore session_id=%s filename=%s",
+                        requested_session_id,
+                        filename,
+                    )
+                    raise HTTPException(status_code=500, detail="Failed to merge the uploaded PDF into this session.")
+
+            with sessions_lock:
+                session = _touch_session_unlocked(requested_session_id)
+                if not session:
+                    raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+                session.setdefault("documents", []).append(uploaded_document)
+                session["last_accessed"] = now
+                session["retrieval_cache"] = {}
+                session_id = requested_session_id
+                persist_session_registry_entry(session_id, session)
+                logger.info(
+                    "Merged PDF into session session_id=%s filename=%s documents=%s chunks=%s",
+                    session_id,
+                    filename,
+                    len(session["documents"]),
+                    len(chunks),
+                )
+    else:
+        with session_store_lock(session_id := str(uuid.uuid4())):
             _cleanup_expired_sessions_unlocked()
             _enforce_max_sessions_unlocked()
-            session_id = str(uuid.uuid4())
             session_secret = generate_session_secret()
             session_dir = persist_vectorstore(session_id, new_vectorstore)
             previous_tracking_id = temp_tracking_id
@@ -1529,35 +1578,6 @@ def process_pdf(
                 "Created session session_id=%s filename=%s chunks=%s",
                 session_id,
                 filename,
-                len(chunks),
-            )
-
-    if requested_session_id:
-        with session_lock:
-            try:
-                vectorstore.merge_from(new_vectorstore)
-                persist_vectorstore(requested_session_id, vectorstore)
-            except Exception:
-                logger.exception(
-                    "Failed to merge vectorstore session_id=%s filename=%s",
-                    requested_session_id,
-                    filename,
-                )
-                raise HTTPException(status_code=500, detail="Failed to merge the uploaded PDF into this session.")
-        with sessions_lock:
-            session = _touch_session_unlocked(requested_session_id)
-            if not session:
-                raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-            session.setdefault("documents", []).append(uploaded_document)
-            session["last_accessed"] = now
-            session["retrieval_cache"] = {}
-            session_id = requested_session_id
-            persist_session_registry_entry(session_id, session)
-            logger.info(
-                "Merged PDF into session session_id=%s filename=%s documents=%s chunks=%s",
-                session_id,
-                filename,
-                len(session["documents"]),
                 len(chunks),
             )
 
@@ -1585,14 +1605,15 @@ def validate_session_write(data: SessionWriteRequest):
     if not provided_secret:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    with sessions_lock:
-        session = _peek_session_unlocked(session_id)
-        if not session:
-            raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+    with session_store_lock(session_id):
+        with sessions_lock:
+            session = _peek_session_unlocked(session_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
 
-        expected_secret = (session.get("session_secret") or "").strip()
-        if not expected_secret or not secrets.compare_digest(provided_secret, expected_secret):
-            raise HTTPException(status_code=403, detail="Forbidden")
+            expected_secret = (session.get("session_secret") or "").strip()
+            if not expected_secret or not secrets.compare_digest(provided_secret, expected_secret):
+                raise HTTPException(status_code=403, detail="Forbidden")
 
     return {"allowed": True}
 
@@ -1933,22 +1954,21 @@ async def upload_pdf(file: UploadFile = File(...)):
     session_secret = generate_session_secret()
     session_dir = get_session_dir(session_id)
 
-    # 4. Build FAISS index for this session
+    # 4. Build FAISS index for this session and persist it under the session lock.
     vectorstore = FAISS.from_documents(docs, embedding_model)
-    vectorstore.save_local(session_dir)
-
-    # 5. Store session reference
     now = now_ts()
-    sessions[session_id] = {
-        "vectorstore": vectorstore,
-        "lock": threading.Lock(),
-        "documents": [],
-        "session_secret": session_secret,
-        "session_dir": session_dir,
-        "created_at": now,
-        "last_accessed": now,
-    }
-    persist_session_registry_entry(session_id, sessions[session_id])
+    with session_store_lock(session_id):
+        vectorstore.save_local(session_dir)
+        sessions[session_id] = {
+            "vectorstore": vectorstore,
+            "lock": threading.Lock(),
+            "documents": [],
+            "session_secret": session_secret,
+            "session_dir": session_dir,
+            "created_at": now,
+            "last_accessed": now,
+        }
+        persist_session_registry_entry(session_id, sessions[session_id])
 
     # 6. Return both message and session_id
     return {
