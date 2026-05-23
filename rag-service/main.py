@@ -1395,4 +1395,7 @@ async def upload_pdf(file: UploadFile = File(...)):
     }
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=5000, reload=True)
+    is_production = os.getenv("ENVIRONMENT", "development").lower() == "production"
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "5000"))
+    uvicorn.run("main:app", host=host, port=port, reload=not is_production)
