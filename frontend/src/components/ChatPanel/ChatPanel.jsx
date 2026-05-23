@@ -14,6 +14,7 @@ const ChatPanel = ({
   currentPdfName,
   currentPdfSessionId,
   onAppendMessage,
+  onOpenSource,
   handleClearChat,
 }) => {
   const [question, setQuestion] = useState("");
@@ -236,7 +237,12 @@ const ChatPanel = ({
                 </div>
               </div>
               {currentChat.map((msg, i) => (
-                <MessageBubble key={i} msg={msg} darkMode={darkMode} />
+                <MessageBubble
+                  key={i}
+                  msg={msg}
+                  darkMode={darkMode}
+                  onOpenSource={onOpenSource}
+                />
               ))}
 
               {asking && (

@@ -968,6 +968,22 @@ def format_context(documents, max_chars=7000):
     return "\n\n".join(context_parts)
 
 
+def citation_source_for_document(document, index):
+    page = document.metadata.get("page")
+    display_page = page + 1 if isinstance(page, int) else None
+    text = concise_excerpt(document.page_content, 250)
+
+    return {
+        "source_id": index + 1,
+        "document": document_display_name(document) or "Unknown Document",
+        "document_id": document.metadata.get("document_id"),
+        "page": display_page,
+        "text": text,
+        "preview": concise_excerpt(document.page_content, 180),
+        "chunk_index": document.metadata.get("chunk_index", index),
+    }
+
+
 def collect_index_documents(vectorstore):
     docstore = getattr(vectorstore, "docstore", None)
     stored_docs = getattr(docstore, "_dict", {}) if docstore else {}
@@ -1470,23 +1486,10 @@ def ask_question(data: Question):
         for doc in docs
     })
 
-    citation_sources = []
-
-    for idx, doc in enumerate(docs):
-
-        citation_sources.append({
-            "source_id": idx + 1,
-            "document": document_display_name(doc),
-            "page": (
-                doc.metadata.get("page", 0) + 1
-                if "page" in doc.metadata
-                else None
-            ),
-            "preview": concise_excerpt(
-                doc.page_content,
-                180
-            ),
-        })
+    citation_sources = [
+        citation_source_for_document(doc, idx)
+        for idx, doc in enumerate(docs)
+    ]
 
     source_id_by_key = {
         document_dedupe_key(doc): idx + 1

@@ -14,8 +14,9 @@ import { extractApiErrorMessage, uploadPdfApi } from "./services/api";
 pdfjs.GlobalWorkerOptions.workerSrc = `${process.env.PUBLIC_URL}/pdf.worker.min.js`;
 
 function App() {
-  const [pdfs, setPdfs] = useState([]); // {name, url, chat: [], session_id: ""}
+  const [pdfs, setPdfs] = useState([]); // {id, name, document_id, url, chat: [], session_id: ""}
   const [selectedPdf, setSelectedPdf] = useState(null);
+  const [pdfJumpTarget, setPdfJumpTarget] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
 
@@ -52,12 +53,15 @@ function App() {
     try {
       const data = await uploadPdfApi(file);
       const url = URL.createObjectURL(file);
+      const pdfId = data.document?.document_id || data.session_id;
 
     setPdfs((prev) => {
   const updated = [
     ...prev,
     {
+      id: pdfId,
       name: file.name,
+      document_id: data.document?.document_id || null,
       url,
       chat: [],
       session_id: data.session_id,
@@ -65,7 +69,7 @@ function App() {
   ];
  
   if (prev.length === 0) {
-    setSelectedPdf(data.session_id);
+    setSelectedPdf(pdfId);
   }
   return updated;
 });
@@ -100,7 +104,7 @@ function App() {
   const handleAppendMessage = (message) => {
     setPdfs((prev) =>
       prev.map((pdf) =>
-        pdf.session_id === selectedPdf
+        pdf.id === selectedPdf
           ? { ...pdf, chat: [...pdf.chat, message] }
           : pdf,
       ),
@@ -109,16 +113,52 @@ function App() {
   const handleClearChat = () => {
   setPdfs((prev) =>
     prev.map((pdf) =>
-      pdf.session_id === selectedPdf
+      pdf.id === selectedPdf
         ? { ...pdf, chat: [] }
         : pdf,
     ),
   );
+  setPdfJumpTarget(null);
 };
+
+  const handleOpenSource = (source) => {
+    const page = Number(source?.page);
+
+    if (!Number.isFinite(page)) {
+      toast.error("Source page is unavailable.");
+      return;
+    }
+
+    const matchingPdf = pdfs.find((pdf) => {
+      if (source.document_id && pdf.document_id === source.document_id) {
+        return true;
+      }
+
+      return (
+        source.document &&
+        pdf.name.localeCompare(source.document, undefined, {
+          sensitivity: "accent",
+        }) === 0
+      );
+    });
+
+    if (!matchingPdf) {
+      toast.error("Source document is not available in the current session.");
+      return;
+    }
+
+    setSelectedPdf(matchingPdf.id);
+    setPdfJumpTarget({
+      document: matchingPdf.name,
+      document_id: matchingPdf.document_id,
+      page,
+      requestedAt: Date.now(),
+    });
+  };
 
   const themeClass = darkMode ? "bg-dark text-light" : "bg-light text-dark";
 
-  const currentPdf = pdfs.find((pdf) => pdf.session_id === selectedPdf);
+  const currentPdf = pdfs.find((pdf) => pdf.id === selectedPdf);
   const currentChat = currentPdf?.chat || [];
   const currentPdfUrl = currentPdf?.url || null;
   const currentPdfSessionId = currentPdf?.session_id || null;
@@ -172,14 +212,17 @@ function App() {
   <div style={{ marginBottom: "16px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
     {pdfs.map((pdf) => (
       <button
-        key={pdf.session_id}
-        onClick={() => setSelectedPdf(pdf.session_id)}
+        key={pdf.id}
+        onClick={() => {
+          setSelectedPdf(pdf.id);
+          setPdfJumpTarget(null);
+        }}
         style={{
           padding: "8px 16px",
           borderRadius: "12px",
           border: "none",
-          background: selectedPdf === pdf.session_id ? "#8B5CF6" : "#e0e0e0",
-          color: selectedPdf === pdf.session_id ? "#fff" : "#333",
+          background: selectedPdf === pdf.id ? "#8B5CF6" : "#e0e0e0",
+          color: selectedPdf === pdf.id ? "#fff" : "#333",
           cursor: "pointer",
           fontWeight: 600,
         }}
@@ -197,6 +240,7 @@ function App() {
                   <PdfViewer
                     darkMode={darkMode}
                     currentPdfUrl={currentPdfUrl}
+                    jumpTarget={pdfJumpTarget}
                   />
                 </Col>
                 {/* RIGHT PANEL — CHAT */}
@@ -208,6 +252,7 @@ function App() {
                     currentPdfName={currentPdfName}
                     currentPdfSessionId={currentPdfSessionId}
                     onAppendMessage={handleAppendMessage}
+                    onOpenSource={handleOpenSource}
                     handleClearChat={handleClearChat}
                   />
                 </Col>

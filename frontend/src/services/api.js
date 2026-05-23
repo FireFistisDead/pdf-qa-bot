@@ -21,7 +21,7 @@ export const uploadPdfApi = async (file) => {
   const formData = new FormData();
   formData.append("file", file);
 
-  const res = await axios.post(`${API_BASE}/process-pdf`, formData, {
+  const res = await axios.post(`${API_BASE}/upload`, formData, {
     timeout: 30000, // 30 second timeout
   });
   return res.data;
@@ -41,7 +41,10 @@ export const askQuestionApi = async (question, sessionId) => {
       timeout: 60000, // 60 second timeout for AI responses
     }
   );
-  return res.data;
+  return {
+    ...res.data,
+    sources: Array.isArray(res.data?.sources) ? res.data.sources : [],
+  };
 };
 
 /**
