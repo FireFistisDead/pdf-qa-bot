@@ -68,3 +68,34 @@ export const summarizePdfApi = async (pdfName, sessionId) => {
   );
   return res.data;
 };
+export const askQuestionStreamApi = async (question, sessionId, onChunk, signal) => {
+  const response = await fetch(`${API_BASE}/ask/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question, session_id: sessionId }),
+    signal,
+  });
+
+  if (!response.ok) {
+    let errorMessage = "Error getting answer. Please try again.";
+    try {
+      const errorBody = await response.json();
+      errorMessage = errorBody.error || errorBody.detail || errorMessage;
+    } catch (_) {}
+    throw Object.assign(new Error(errorMessage), { response: { status: response.status } });
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let fullText = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = decoder.decode(value, { stream: true });
+    fullText += chunk;
+    onChunk(fullText);
+  }
+
+  return fullText;
+};

@@ -45,7 +45,17 @@ const MessageBubble = ({ msg, darkMode }) => {
         }}
       >
         {msg.role === "bot" ? (
-          <ReactMarkdown>{msg.text}</ReactMarkdown>
+          <span>
+            <ReactMarkdown>{msg.text}</ReactMarkdown>
+            {msg.streaming && (
+              <span style={{
+                display: "inline-block", width: "2px", height: "1em",
+                background: "currentColor", marginLeft: "2px",
+                verticalAlign: "text-bottom",
+                animation: "blink-cursor 0.8s step-end infinite",
+              }} />
+            )}
+          </span>
         ) : (
           <span>{msg.text}</span>
         )}

@@ -7,11 +7,14 @@ const { Blob } = require("node:buffer");
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
 let app, askSchema, summarizeSchema;
+let clientIpFromRequest, normalizeIp;
 test("module loads without error", () => {
   const mod = require("./server.js");
   app = mod.app;
   askSchema = mod.askSchema;
   summarizeSchema = mod.summarizeSchema;
+
+  ({ clientIpFromRequest, normalizeIp } = require("./security/ip"));
 
   assert.ok(typeof app === "function", "app should be an Express app");
   assert.ok(typeof askSchema.safeParse === "function", "askSchema should be a Zod schema");
@@ -38,6 +41,30 @@ const createPdfUploadBody = ({ sessionId = null, sessionSecret = null } = {}) =>
 
   return formData;
 };
+
+const consumeUploadStream = (formData) =>
+  new Promise((resolve, reject) => {
+    const stream = formData?.file;
+    if (!stream || typeof stream.on !== "function") {
+      resolve();
+      return;
+    }
+
+    stream.on("end", resolve);
+    stream.on("error", reject);
+    stream.resume();
+  });
+
+describe("IP normalization", () => {
+  test("normalizeIp strips IPv4-mapped IPv6 prefix", () => {
+    assert.equal(normalizeIp("::ffff:127.0.0.1"), "127.0.0.1");
+  });
+
+  test("clientIpFromRequest prefers req.ip and normalizes it", () => {
+    const ip = clientIpFromRequest({ ip: "::ffff:10.0.0.5", socket: {} });
+    assert.equal(ip, "10.0.0.5");
+  });
+});
 
 describe("askSchema validation", () => {
   test("accepts valid input", () => {
@@ -216,6 +243,7 @@ describe("route error responses", () => {
       return { data: { allowed: true } };
     };
     axios.postForm = async (url, formData) => {
+      await consumeUploadStream(formData);
       forwardedFormData = { url, formData };
       return {
         data: {
