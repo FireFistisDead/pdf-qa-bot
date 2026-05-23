@@ -843,6 +843,9 @@ def load_generation_model():
 def generate_response(prompt: str, max_new_tokens: int) -> str:
     tokenizer, model, is_encoder_decoder = load_generation_model()
     model_device = next(model.parameters()).device
+
+    # Tokenize and move to device before acquiring the lock so
+    # CPU-bound preprocessing does not block other threads unnecessarily.
     encoded = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
     encoded = {key: value.to(model_device) for key, value in encoded.items()}
     pad_token_id = (
@@ -851,6 +854,9 @@ def generate_response(prompt: str, max_new_tokens: int) -> str:
         else tokenizer.eos_token_id
     )
 
+    # Only the model.generate() call is locked — tokenization and device
+    # transfer above happen in parallel across threads. The lock purely
+    # serialises the GPU/CPU forward pass itself which is not thread-safe.
     logger.debug("Acquiring generation lock")
     with generation_lock:
         with torch.no_grad():
