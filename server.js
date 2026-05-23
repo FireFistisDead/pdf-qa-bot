@@ -14,7 +14,6 @@ const { askSchema, summarizeSchema } = require("./validators/schemas");
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
 const PORT = process.env.PORT || 4000;
 
-
 const app = express();
 
 // ─── Trust Proxy ────────────────────────────────────────────────────────────
@@ -221,7 +220,6 @@ const extractServiceDetails = (err) => {
   );
 };
 
-
 app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
   const uploadedFilePath = req.file?.path;
   // CodeQL [js/path-injection] Mitigation: Break taint flow by forcing basename
@@ -235,7 +233,7 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
       return sendUploadError(
         res,
         400,
-        "No file uploaded. Use form field name 'file'.",
+        "No file uploaded. Use form field name 'file'."
       );
     }
 

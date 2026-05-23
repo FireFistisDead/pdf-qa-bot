@@ -83,6 +83,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Session storage with metadata and thread safety
 sessions = {}
 sessions_lock = threading.Lock()
+model_load_lock = threading.Lock()
 generation_lock = threading.Lock()
 
 # Configurable session TTL and max cap
@@ -96,7 +97,17 @@ ASK_CHUNKS_PER_DOCUMENT = int(os.getenv("ASK_CHUNKS_PER_DOCUMENT", "2"))
 ASK_DIVERSITY_RANK_LIMIT = int(os.getenv("ASK_DIVERSITY_RANK_LIMIT", "8"))
 ASK_DIVERSITY_SCORE_MULTIPLIER = float(os.getenv("ASK_DIVERSITY_SCORE_MULTIPLIER", "1.8"))
 ASK_DIVERSITY_SCORE_MARGIN = float(os.getenv("ASK_DIVERSITY_SCORE_MARGIN", "0.35"))
-RETRIEVAL_CACHE_LIMIT = int(os.getenv("RETRIEVAL_CACHE_LIMIT", "25"))
+ASK_EVIDENCE_MAX_DISTANCE = float(os.getenv("ASK_EVIDENCE_MAX_DISTANCE", "0.85"))
+ASK_EVIDENCE_MIN_KEYWORD_OVERLAP = int(os.getenv("ASK_EVIDENCE_MIN_KEYWORD_OVERLAP", "2"))
+ASK_EVIDENCE_MIN_KEYWORD_OVERLAP_SHORT_QUERY = int(
+    os.getenv("ASK_EVIDENCE_MIN_KEYWORD_OVERLAP_SHORT_QUERY", "1")
+)
+ASK_REQUIRE_CITATIONS = os.getenv("ASK_REQUIRE_CITATIONS", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 QUERY_STOPWORDS = {
     "about", "according", "also", "and", "are", "between", "compare",
     "describe", "does", "document", "documents", "explain", "from", "give",
@@ -399,11 +410,80 @@ def has_grounded_keyword_overlap(question, documents):
     return False
 
 
+def best_keyword_overlap_count(question, documents):
+    keywords = query_keywords(question)
+    if not keywords:
+        return 0
+    best = 0
+    for document in documents:
+        document_text = " ".join(
+            [
+                document.page_content,
+                document.metadata.get("filename", ""),
+                document.metadata.get("source", ""),
+            ]
+        )
+        overlap = len(keywords.intersection(tokenize_text(document_text)))
+        best = max(best, overlap)
+    return best
+
+
+def passes_evidence_gate(question, documents, best_score, intent):
+    if not documents:
+        return False
+    if intent == "overview":
+        return True
+
+    keywords = query_keywords(question)
+    if not keywords:
+        return True
+
+    required_overlap = (
+        ASK_EVIDENCE_MIN_KEYWORD_OVERLAP_SHORT_QUERY
+        if len(keywords) < 4
+        else ASK_EVIDENCE_MIN_KEYWORD_OVERLAP
+    )
+    if best_keyword_overlap_count(question, documents) < required_overlap:
+        return False
+
+    if best_score is None:
+        return True
+    return best_score <= ASK_EVIDENCE_MAX_DISTANCE
+
+
+def citation_suffix_for_documents(documents, source_id_by_key):
+    if not source_id_by_key:
+        return ""
+    ids = sorted(
+        {
+            source_id_by_key.get(document_dedupe_key(document))
+            for document in documents
+            if document is not None
+        }
+    )
+    ids = [value for value in ids if isinstance(value, int)]
+    if not ids:
+        return ""
+    if len(ids) == 1:
+        return f" (Source {ids[0]})"
+    joined = ", ".join(str(value) for value in ids)
+    return f" (Sources {joined})"
+
+
+def answer_contains_citation(answer, max_source_id):
+    if not answer or not isinstance(answer, str):
+        return False
+    if not max_source_id or max_source_id < 1:
+        return False
+    # We accept either "Source 1" or "Sources 1, 2".
+    return bool(re.search(r"\bSources?\s+\d+", answer))
+
+
 def markdown_bullets(sentences):
     return "\n".join(f"* {sentence}" for sentence in sentences)
 
 
-def build_relationship_answer(documents, question):
+def build_relationship_answer(documents, question, source_id_by_key=None):
     grouped_documents = group_documents_by_source(documents)
     if len(grouped_documents) < 2:
         return None
@@ -411,7 +491,8 @@ def build_relationship_answer(documents, question):
     for source_name, source_documents in grouped_documents.items():
         sentences = best_sentences_for_document(source_documents, question, max_sentences=2)
         if sentences:
-            answer_parts.append(f"* **{source_name}**: {' '.join(sentences)}")
+            citation_suffix = citation_suffix_for_documents(source_documents, source_id_by_key)
+            answer_parts.append(f"* **{source_name}**{citation_suffix}: {' '.join(sentences)}")
     source_list = ", ".join(grouped_documents.keys())
     answer_parts.append(
         f"\nTogether, these points show the relationship across {source_list} without using information outside the uploaded documents."
@@ -419,7 +500,7 @@ def build_relationship_answer(documents, question):
     return "\n".join(answer_parts)
 
 
-def build_comparison_answer(documents, question):
+def build_comparison_answer(documents, question, source_id_by_key=None):
     grouped_documents = group_documents_by_source(documents)
     if len(grouped_documents) < 2:
         return None
@@ -427,14 +508,15 @@ def build_comparison_answer(documents, question):
     for source_name, source_documents in grouped_documents.items():
         sentences = best_sentences_for_document(source_documents, question, max_sentences=2)
         if sentences:
-            answer_parts.append(f"* **{source_name}**: {' '.join(sentences)}")
+            citation_suffix = citation_suffix_for_documents(source_documents, source_id_by_key)
+            answer_parts.append(f"* **{source_name}**{citation_suffix}: {' '.join(sentences)}")
     answer_parts.append(
         "\nIn comparison, each document describes a different role or focus, and the contrast above is limited to the retrieved PDF content."
     )
     return "\n".join(answer_parts)
 
 
-def build_overview_answer(documents, question):
+def build_overview_answer(documents, question, source_id_by_key=None):
     grouped_documents = group_documents_by_source(documents)
     if not grouped_documents:
         return None
@@ -442,7 +524,8 @@ def build_overview_answer(documents, question):
     for source_name, source_documents in grouped_documents.items():
         sentences = best_sentences_for_document(source_documents, question, max_sentences=2)
         if sentences:
-            answer_parts.append(f"* **{source_name}**: {' '.join(sentences)}")
+            citation_suffix = citation_suffix_for_documents(source_documents, source_id_by_key)
+            answer_parts.append(f"* **{source_name}**{citation_suffix}: {' '.join(sentences)}")
     return "\n".join(answer_parts)
 
 
@@ -464,7 +547,7 @@ def extract_factual_subject(question):
     return subject or None
 
 
-def build_factual_answer(documents, question):
+def build_factual_answer(documents, question, source_id_by_key=None):
     if not has_grounded_keyword_overlap(question, documents):
         return None
     subject = extract_factual_subject(question)
@@ -480,13 +563,14 @@ def build_factual_answer(documents, question):
     if not supporting_sentences:
         return None
     source_name, first_sentence = supporting_sentences[0]
+    citation_suffix = citation_suffix_for_documents(grouped_documents.get(source_name, []), source_id_by_key)
     if subject:
         if "document" in subject.lower() and "about" in subject.lower():
-            answer = f"Based on **{source_name}**, {first_sentence}"
+            answer = f"Based on **{source_name}**{citation_suffix}, {first_sentence}"
         else:
-            answer = f"Based on **{source_name}**, {subject} is mentioned in this context: {first_sentence}"
+            answer = f"Based on **{source_name}**{citation_suffix}, {subject} is mentioned in this context: {first_sentence}"
     else:
-        answer = f"Based on **{source_name}**, {first_sentence}"
+        answer = f"Based on **{source_name}**{citation_suffix}, {first_sentence}"
     additional_sentences = [
         sentence
         for _source, sentence in supporting_sentences[1:3]
@@ -497,17 +581,17 @@ def build_factual_answer(documents, question):
     return answer
 
 
-def build_answer_from_documents(question, documents, intent):
+def build_answer_from_documents(question, documents, intent, source_id_by_key=None):
     if not has_grounded_keyword_overlap(question, documents) and intent != "overview":
         return INSUFFICIENT_CONTEXT_MESSAGE
     if intent == "relationship":
-        return build_relationship_answer(documents, question) or INSUFFICIENT_CONTEXT_MESSAGE
+        return build_relationship_answer(documents, question, source_id_by_key=source_id_by_key) or INSUFFICIENT_CONTEXT_MESSAGE
     if intent == "comparison":
-        return build_comparison_answer(documents, question) or INSUFFICIENT_CONTEXT_MESSAGE
+        return build_comparison_answer(documents, question, source_id_by_key=source_id_by_key) or INSUFFICIENT_CONTEXT_MESSAGE
     if intent == "overview":
-        return build_overview_answer(documents, question) or INSUFFICIENT_CONTEXT_MESSAGE
+        return build_overview_answer(documents, question, source_id_by_key=source_id_by_key) or INSUFFICIENT_CONTEXT_MESSAGE
     if intent == "factual":
-        return build_factual_answer(documents, question) or INSUFFICIENT_CONTEXT_MESSAGE
+        return build_factual_answer(documents, question, source_id_by_key=source_id_by_key) or INSUFFICIENT_CONTEXT_MESSAGE
     return INSUFFICIENT_CONTEXT_MESSAGE
 
 
@@ -726,16 +810,33 @@ def load_generation_model():
     global generation_tokenizer, generation_model, generation_is_encoder_decoder
     if generation_model is not None and generation_tokenizer is not None:
         return generation_tokenizer, generation_model, generation_is_encoder_decoder
-    config = AutoConfig.from_pretrained(HF_GENERATION_MODEL)
-    generation_is_encoder_decoder = bool(getattr(config, "is_encoder_decoder", False))
-    generation_tokenizer = AutoTokenizer.from_pretrained(HF_GENERATION_MODEL)
-    if generation_is_encoder_decoder:
-        generation_model = AutoModelForSeq2SeqLM.from_pretrained(HF_GENERATION_MODEL)
-    else:
-        generation_model = AutoModelForCausalLM.from_pretrained(HF_GENERATION_MODEL)
-    if torch.cuda.is_available():
-        generation_model = generation_model.to("cuda")
-    generation_model.eval()
+
+    logger.info("Acquiring model load lock")
+
+    with model_load_lock:
+        if generation_model is not None and generation_tokenizer is not None:
+            return generation_tokenizer, generation_model, generation_is_encoder_decoder
+
+        logger.info(
+            "Loading generation model model=%s",
+            HF_GENERATION_MODEL,
+        )
+
+        config = AutoConfig.from_pretrained(HF_GENERATION_MODEL)
+        generation_is_encoder_decoder = bool(getattr(config, "is_encoder_decoder", False))
+        generation_tokenizer = AutoTokenizer.from_pretrained(HF_GENERATION_MODEL)
+
+        if generation_is_encoder_decoder:
+            generation_model = AutoModelForSeq2SeqLM.from_pretrained(HF_GENERATION_MODEL)
+        else:
+            generation_model = AutoModelForCausalLM.from_pretrained(HF_GENERATION_MODEL)
+
+        if torch.cuda.is_available():
+            generation_model = generation_model.to("cuda")
+
+        generation_model.eval()
+        logger.info("Generation model loaded successfully")
+
     return generation_tokenizer, generation_model, generation_is_encoder_decoder
 
 
@@ -789,6 +890,27 @@ def sanitize_upload_filename(client_file_path: str) -> str:
     return safe_name
 
 
+def get_trusted_upload_path(file_name: str) -> str:
+    trusted_path = os.path.join(str(UPLOADS_DIR), file_name)
+    normalized_uploads_dir = os.path.abspath(str(UPLOADS_DIR))
+    normalized_path = os.path.abspath(trusted_path)
+    if os.path.dirname(normalized_path) != normalized_uploads_dir:
+        raise ValueError("Invalid upload path.")
+    return normalized_path
+
+
+def validate_uploaded_pdf(file_path: str) -> str:
+    trusted_path = os.fspath(file_path)
+    if not trusted_path.lower().endswith(".pdf"):
+        raise ValueError("Only PDF files are allowed.")
+    # CodeQL [py/path-injection]: trusted server-constructed upload path
+    if not os.path.isfile(trusted_path):
+        raise ValueError("File does not exist or is not a valid file.")
+    # CodeQL [py/path-injection]: trusted server-constructed upload path
+    if os.path.getsize(trusted_path) == 0:
+        raise ValueError("Uploaded PDF is empty. Please choose a valid PDF file.")
+    return trusted_path
+
 
 class Question(BaseModel):
     question: str = Field(..., min_length=1, description="Question cannot be empty")
@@ -813,9 +935,10 @@ def process_pdf(
     session_id: str | None = Form(None)
 ):
     cleanup_expired_sessions()
-    
-    filename = file.filename or "uploaded.pdf"
 
+    filename = file.filename or "uploaded.pdf"
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF documents are supported.")
     requested_session_id = (session_id or "").strip() or None
 
     # ─── Quota pre-flight checks ──────────────────────────────────────────────────
@@ -836,7 +959,7 @@ def process_pdf(
     os.makedirs(str(UPLOADS_DIR), exist_ok=True)
     temp_filename = f"temp_{uuid.uuid4().hex}.pdf"
     temp_path = os.path.join(str(UPLOADS_DIR), temp_filename)
-    
+
     try:
         # Validate actual file magic bytes — extension alone is trivially bypassable.
         # A valid PDF always begins with the 4-byte signature: %PDF (0x25 0x50 0x44 0x46).
@@ -856,10 +979,10 @@ def process_pdf(
                 if bytes_written > max_size:
                     raise HTTPException(status_code=413, detail="Uploaded PDF exceeds the maximum size of 20MB.")
                 f.write(chunk)
-                
+
         if bytes_written == 0:
             raise HTTPException(status_code=400, detail="Uploaded PDF is empty. Please choose a valid PDF file.")
-            
+
         try:
             loader = PyPDFLoader(temp_path)
             docs = loader.load()
@@ -949,10 +1072,6 @@ def process_pdf(
                 session["lock"] = threading.Lock()
             session_lock = session["lock"]
             vectorstore = session["vectorstore"]
-
-            session.setdefault("documents", []).append(uploaded_document)
-            session["last_accessed"] = now
-            session_id = requested_session_id
         else:
             _cleanup_expired_sessions_unlocked()
             _enforce_max_sessions_unlocked()
@@ -966,7 +1085,12 @@ def process_pdf(
                 "last_accessed": now,
                 "retrieval_cache": {},
             }
-            vectorstore = new_vectorstore
+            logger.info(
+                "Created session session_id=%s filename=%s chunks=%s",
+                session_id,
+                filename,
+                len(chunks),
+            )
 
     if requested_session_id:
         with session_lock:
@@ -979,20 +1103,20 @@ def process_pdf(
                     filename,
                 )
                 raise HTTPException(status_code=500, detail="Failed to merge the uploaded PDF into this session.")
-        logger.info(
-            "Merged PDF into session session_id=%s filename=%s documents=%s chunks=%s",
-            session_id,
-            filename,
-            len(session["documents"]),
-            len(chunks),
-        )
-    else:
-        logger.info(
-            "Created session session_id=%s filename=%s chunks=%s",
-            session_id,
-            filename,
-            len(chunks),
-        )
+        with sessions_lock:
+            session = _touch_session_unlocked(requested_session_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+            session.setdefault("documents", []).append(uploaded_document)
+            session["last_accessed"] = now
+            session_id = requested_session_id
+            logger.info(
+                "Merged PDF into session session_id=%s filename=%s documents=%s chunks=%s",
+                session_id,
+                filename,
+                len(session["documents"]),
+                len(chunks),
+            )
 
     with sessions_lock:
         documents = list(sessions[session_id].get("documents", []))
@@ -1033,7 +1157,7 @@ def ask_question(data: Question):
             session["lock"] = threading.Lock()
         session_lock = session["lock"]
         vectorstore = session["vectorstore"]
-        
+
     try:
         with session_lock:
             indexed_documents = collect_index_documents(vectorstore)
@@ -1056,10 +1180,26 @@ def ask_question(data: Question):
         )
     )
 
-    if not docs:
+    best_score = scored_candidates[0][1] if scored_candidates else None
+    if not passes_evidence_gate(question, docs, best_score, intent):
+        logger.info(
+            "Evidence gate refused answer session_id=%s intent=%s best_score=%s retrieved_chunks=%s",
+            session_id,
+            intent,
+            best_score,
+            len(docs),
+        )
         return {
-            "answer": "No relevant context found."
+            "answer": INSUFFICIENT_CONTEXT_MESSAGE,
+            "sources": [],
+            "retrieval_type": "refusal",
         }
+
+    pages = sorted(set(
+        doc.metadata["page"] + 1
+        for doc in docs
+        if "page" in doc.metadata
+    ))
 
     formatted_context = ""
 
@@ -1101,14 +1241,48 @@ def ask_question(data: Question):
             ),
         })
 
+    source_id_by_key = {
+        document_dedupe_key(doc): idx + 1
+        for idx, doc in enumerate(docs)
+    }
+
     grounded_answer = build_answer_from_documents(
         question,
         docs,
-        intent
+        intent,
+        source_id_by_key=source_id_by_key,
     )
 
-    if grounded_answer:
+    if grounded_answer == INSUFFICIENT_CONTEXT_MESSAGE:
+        logger.info(
+            "Refusing due to insufficient context session_id=%s intent=%s best_score=%s retrieved_chunks=%s sources=%s",
+            session_id,
+            intent,
+            best_score,
+            len(docs),
+            retrieved_sources,
+        )
+        return {
+            "answer": grounded_answer,
+            "sources": citation_sources,
+            "retrieval_type": "refusal",
+        }
 
+    if grounded_answer:
+        if ASK_REQUIRE_CITATIONS and not answer_contains_citation(grounded_answer, len(docs)):
+            logger.info(
+                "Refusing due to missing citations session_id=%s intent=%s best_score=%s retrieved_chunks=%s sources=%s",
+                session_id,
+                intent,
+                best_score,
+                len(docs),
+                retrieved_sources,
+            )
+            return {
+                "answer": INSUFFICIENT_CONTEXT_MESSAGE,
+                "sources": citation_sources,
+                "retrieval_type": "refusal",
+            }
         logger.info(
             "Returning grounded answer session_id=%s intent=%s retrieved_chunks=%s sources=%s",
             session_id,
@@ -1175,7 +1349,7 @@ def summarize_pdf(data: SummarizeRequest):
         session_lock = session["lock"]
         vectorstore = session["vectorstore"]
         uploaded_documents = list(session.get("documents", []))
-        
+
     with session_lock:
         indexed_documents = collect_index_documents(vectorstore)
 
