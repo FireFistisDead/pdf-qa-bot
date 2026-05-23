@@ -12,6 +12,7 @@ const helmet = require("helmet");
 const { askSchema, summarizeSchema } = require("./validators/schemas");
 
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
+const INTERNAL_RAG_TOKEN = process.env.INTERNAL_RAG_TOKEN || "";
 const PORT = process.env.PORT || 4000;
 
 const app = express();
@@ -220,6 +221,9 @@ const extractServiceDetails = (err) => {
   );
 };
 
+const ragAuthHeaders = () =>
+  INTERNAL_RAG_TOKEN ? { "X-Internal-Token": INTERNAL_RAG_TOKEN } : {};
+
 app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
   const uploadedFilePath = req.file?.path;
   // CodeQL [js/path-injection] Mitigation: Break taint flow by forcing basename
@@ -245,7 +249,24 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
         "Uploaded PDF is empty. Please choose a valid PDF file.",
       );
     }
+    const fileHandle = await fsPromises.open(absoluteFilePath, "r");
+const signatureBuffer = Buffer.alloc(4);
 
+try {
+  await fileHandle.read(signatureBuffer, 0, 4, 0);
+} finally {
+  await fileHandle.close();
+}
+
+if (signatureBuffer.toString() !== "%PDF") {
+  await cleanupFile(uploadedFilePath);
+
+  return sendUploadError(
+    res,
+    415,
+    "Invalid file type. Only real PDF documents are accepted.",
+  );
+}
     const formData = {
       file: fs.createReadStream(absoluteFilePath),
     };
@@ -253,7 +274,11 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
       formData.session_id = sessionId;
     }
 
-    const response = await axios.postForm(`${RAG_SERVICE_URL}/process-pdf`, formData);
+    const response = await axios.postForm(
+      `${RAG_SERVICE_URL}/process-pdf`,
+      formData,
+      { headers: ragAuthHeaders() },
+    );
 
     await cleanupFile(uploadedFilePath);
 
@@ -291,10 +316,14 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
   const { question, session_id } = validation.data;
 
   try {
-    const response = await axios.post(`${RAG_SERVICE_URL}/ask`, {
+    const response = await axios.post(
+      `${RAG_SERVICE_URL}/ask`,
+      {
       question,
       session_id,
-    });
+      },
+      { headers: ragAuthHeaders() },
+    );
 
     return res.json({
       answer: response.data.answer,
@@ -323,10 +352,9 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
   }
 
   try {
-    const response = await axios.post(
-      `${RAG_SERVICE_URL}/summarize`,
-      validation.data,
-    );
+    const response = await axios.post(`${RAG_SERVICE_URL}/summarize`, validation.data, {
+      headers: ragAuthHeaders(),
+    });
 
     return res.json({
       summary: response.data.summary,
