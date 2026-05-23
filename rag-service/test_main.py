@@ -1,5 +1,6 @@
 import sys
 from unittest.mock import MagicMock
+import multiprocessing
 
 # Prevent downloading/loading Hugging Face embeddings during testing by mocking the class
 import langchain_community.embeddings
@@ -20,6 +21,7 @@ from main import (
     passes_evidence_gate,
     document_dedupe_key,
     internal_token_valid,
+    _extract_pdf_text_worker,
 )
 
 
@@ -66,6 +68,23 @@ def test_internal_token_valid_rejects_missing_when_set():
 
 def test_internal_token_valid_accepts_exact_match():
     assert internal_token_valid("secret", "secret") is True
+
+
+def test_extract_pdf_text_worker_enforces_page_limit(tmp_path):
+    from pypdf import PdfWriter
+
+    pdf_path = tmp_path / "hello.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=300, height=144)
+    with pdf_path.open("wb") as fp:
+        writer.write(fp)
+
+    # Use a local queue and call the worker directly (no subprocess) to validate limit logic.
+    q = multiprocessing.Queue(maxsize=1)
+    _extract_pdf_text_worker(str(pdf_path), max_pages=0, max_chars=1000, out_queue=q)
+    result = q.get(timeout=2)
+    assert result["ok"] is False
+    assert "too many pages" in result["error"].lower()
 
 
 
