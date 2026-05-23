@@ -12,47 +12,117 @@ from dotenv import load_dotenv
 from rank_bm25 import BM25Okapi
 from langchain_community.vectorstores import FAISS
 import numpy as np
-import json
-import os
-import secrets
-import shutil
-import uuid
-import uvicorn
-import torch
-import multiprocessing
-from transformers import (
-    AutoConfig,
-    AutoTokenizer,
-    AutoModelForSeq2SeqLM,
-    AutoModelForCausalLM,
-)
-import threading
-import time
-import logging
-import re
+@app.post("/upload_pdf")
+async def upload_pdf(file: UploadFile = File(...)):
+    cleanup_expired_sessions()
 
-try:
-    import fcntl
-except ImportError:
-    fcntl = None
+    file_name = sanitize_upload_filename(file.filename)
+    temp_file_name = f"{uuid.uuid4().hex}.pdf"
+    temp_path = get_trusted_upload_path(temp_file_name)
+    max_size = 20 * 1024 * 1024
+    bytes_written = 0
 
-try:
-    import msvcrt
-except ImportError:
-    msvcrt = None
+    try:
+        with open(temp_path, "wb") as temp_file:
+            while True:
+                chunk = await file.read(65536)
+                if not chunk:
+                    break
+                bytes_written += len(chunk)
+                if bytes_written > max_size:
+                    raise HTTPException(status_code=413, detail="Uploaded PDF exceeds the maximum size of 20MB.")
+                temp_file.write(chunk)
 
-load_dotenv()
+        if bytes_written == 0:
+            raise HTTPException(status_code=400, detail="Uploaded PDF is empty. Please choose a valid PDF file.")
 
+        validated_path = validate_uploaded_pdf(temp_path)
 
-PERSIST_DIR = "faiss_store"
-# ── Logger (must be defined before exception handlers that use it) ─────────────
-logger = logging.getLogger("pdf_qa_rag")
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-)
+        with open(validated_path, "rb") as pdf_file:
+            if pdf_file.read(4) != b"%PDF":
+                raise HTTPException(status_code=415, detail="Invalid file type. Only real PDF documents are accepted.")
 
-app = FastAPI()
+        pages = extract_pdf_documents_sandboxed(validated_path, file_name)
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        docs = splitter.split_documents(pages)
+
+        unique_chunks = []
+        seen_content = set()
+        for chunk in docs:
+            content = chunk.page_content.strip()
+            if content in seen_content:
+                continue
+            seen_content.add(content)
+            unique_chunks.append(chunk)
+
+        docs = unique_chunks
+
+        if not docs:
+            raise HTTPException(status_code=400, detail="No text chunks generated from the PDF. Please check your file.")
+        if len(docs) > MAX_CHUNKS_PER_SESSION:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"PDF is too large to index. "
+                    f"A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks."
+                ),
+            )
+
+        document_id = str(uuid.uuid4())
+        now = now_ts()
+        uploaded_document = {
+            "document_id": document_id,
+            "filename": file_name,
+            "uploaded_at": now,
+            "chunk_count": len(docs),
+        }
+
+        for chunk_index, chunk in enumerate(docs):
+            chunk.metadata.update(
+                {
+                    "document_id": document_id,
+                    "filename": file_name,
+                    "chunk_index": chunk_index,
+                    "uploaded_at": now,
+                }
+            )
+
+        vectorstore = FAISS.from_documents(docs, embedding_model)
+        session_id = str(uuid.uuid4())
+        session_secret = generate_session_secret()
+        session_dir = get_session_dir(session_id)
+
+        with session_store_lock(session_id):
+            with sessions_lock:
+                _cleanup_expired_sessions_unlocked()
+                _enforce_max_sessions_unlocked()
+                vectorstore.save_local(session_dir)
+                sessions[session_id] = {
+                    "vectorstore": vectorstore,
+                    "lock": threading.Lock(),
+                    "documents": [uploaded_document],
+                    "session_secret": session_secret,
+                    "session_dir": session_dir,
+                    "created_at": now,
+                    "last_accessed": now,
+                    "retrieval_cache": {},
+                }
+                persist_session_registry_entry(session_id, sessions[session_id])
+
+        return {
+            "message": f"{file_name} uploaded and indexed successfully",
+            "session_id": session_id,
+            "session_secret": session_secret,
+            "document": uploaded_document,
+            "documents": [uploaded_document],
+        }
+    finally:
+        await file.close()
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception as exc:
+                logger.error("Failed to delete temp file %s: %s", temp_path, exc)
 # Global session store
 sessions = {}
 processing_progress = {}
@@ -1935,47 +2005,117 @@ def summarize_pdf(data: SummarizeRequest):
     return {"summary": build_session_summary(uploaded_documents, indexed_documents)}
 
 
-    @app.post("/upload_pdf")
-    async def upload_pdf(file: UploadFile = File(...)):
-        # 1. Save the uploaded file
-        file_name = sanitize_upload_filename(file.filename)
-        file_path = get_trusted_upload_path(file_name)
-        with open(file_path, "wb") as f:
-            f.write(await file.read())
-        validated_path = validate_uploaded_pdf(file_path)
+@app.post("/upload_pdf")
+async def upload_pdf(file: UploadFile = File(...)):
+    cleanup_expired_sessions()
 
-        # 2. Load and split the PDF
+    file_name = sanitize_upload_filename(file.filename)
+    temp_file_name = f"{uuid.uuid4().hex}.pdf"
+    temp_path = get_trusted_upload_path(temp_file_name)
+    max_size = 20 * 1024 * 1024
+    bytes_written = 0
+
+    try:
+        with open(temp_path, "wb") as temp_file:
+            while True:
+                chunk = await file.read(65536)
+                if not chunk:
+                    break
+                bytes_written += len(chunk)
+                if bytes_written > max_size:
+                    raise HTTPException(status_code=413, detail="Uploaded PDF exceeds the maximum size of 20MB.")
+                temp_file.write(chunk)
+
+        if bytes_written == 0:
+            raise HTTPException(status_code=400, detail="Uploaded PDF is empty. Please choose a valid PDF file.")
+
+        validated_path = validate_uploaded_pdf(temp_path)
+
+        with open(validated_path, "rb") as pdf_file:
+            if pdf_file.read(4) != b"%PDF":
+                raise HTTPException(status_code=415, detail="Invalid file type. Only real PDF documents are accepted.")
+
         pages = extract_pdf_documents_sandboxed(validated_path, file_name)
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         docs = splitter.split_documents(pages)
 
-        # 3. Generate a new session_id and unique folder
+        unique_chunks = []
+        seen_content = set()
+        for chunk in docs:
+            content = chunk.page_content.strip()
+            if content in seen_content:
+                continue
+            seen_content.add(content)
+            unique_chunks.append(chunk)
+
+        docs = unique_chunks
+
+        if not docs:
+            raise HTTPException(status_code=400, detail="No text chunks generated from the PDF. Please check your file.")
+        if len(docs) > MAX_CHUNKS_PER_SESSION:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"PDF is too large to index. "
+                    f"A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks."
+                ),
+            )
+
+        document_id = str(uuid.uuid4())
+        now = now_ts()
+        uploaded_document = {
+            "document_id": document_id,
+            "filename": file_name,
+            "uploaded_at": now,
+            "chunk_count": len(docs),
+        }
+
+        for chunk_index, chunk in enumerate(docs):
+            chunk.metadata.update(
+                {
+                    "document_id": document_id,
+                    "filename": file_name,
+                    "chunk_index": chunk_index,
+                    "uploaded_at": now,
+                }
+            )
+
+        vectorstore = FAISS.from_documents(docs, embedding_model)
         session_id = str(uuid.uuid4())
         session_secret = generate_session_secret()
         session_dir = get_session_dir(session_id)
 
-        # 4. Build FAISS index for this session and persist it under the session lock.
-        vectorstore = FAISS.from_documents(docs, embedding_model)
-        now = now_ts()
         with session_store_lock(session_id):
-            vectorstore.save_local(session_dir)
-            sessions[session_id] = {
-                "vectorstore": vectorstore,
-                "lock": threading.Lock(),
-                "documents": [],
-                "session_secret": session_secret,
-                "session_dir": session_dir,
-                "created_at": now,
-                "last_accessed": now,
-            }
-            persist_session_registry_entry(session_id, sessions[session_id])
+            with sessions_lock:
+                _cleanup_expired_sessions_unlocked()
+                _enforce_max_sessions_unlocked()
+                vectorstore.save_local(session_dir)
+                sessions[session_id] = {
+                    "vectorstore": vectorstore,
+                    "lock": threading.Lock(),
+                    "documents": [uploaded_document],
+                    "session_secret": session_secret,
+                    "session_dir": session_dir,
+                    "created_at": now,
+                    "last_accessed": now,
+                    "retrieval_cache": {},
+                }
+                persist_session_registry_entry(session_id, sessions[session_id])
 
-        # 6. Return both message and session_id
         return {
             "message": f"{file_name} uploaded and indexed successfully",
             "session_id": session_id,
             "session_secret": session_secret,
+            "document": uploaded_document,
+            "documents": [uploaded_document],
         }
+    finally:
+        await file.close()
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception as exc:
+                logger.error("Failed to delete temp file %s: %s", temp_path, exc)
 if __name__ == "__main__":
     is_production = os.getenv("ENVIRONMENT", "development").lower() == "production"
     host = os.getenv("HOST", "0.0.0.0")
