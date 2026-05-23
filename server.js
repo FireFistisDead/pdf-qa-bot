@@ -32,7 +32,10 @@ if (PROXY_COUNT > 0) {
 // These headers are your first line of defence before any code even runs.
 app.use(helmet());
 
-app.use(cors());
+app.use(cors({
+  origin: process.env.ALLOWED_ORIGIN || "http://localhost:3000",
+  methods: ["POST"],
+}));
 
 // ─── Body Size Limit ─────────────────────────────────────────────────────────
 // Cap JSON payloads at 16 KB. Prevents memory exhaustion from huge JSON bodies
