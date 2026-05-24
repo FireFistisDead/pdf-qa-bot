@@ -17,6 +17,14 @@ import uuid
 import uvicorn
 import torch
 import multiprocessing
+import os
+import secrets
+import shutil
+import sys
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 from transformers import (
     AutoConfig,
     AutoTokenizer,
@@ -45,6 +53,9 @@ UPLOADS_DIR = (BASE_DIR / "uploads").resolve()
 DATA_DIR = (BASE_DIR / "rag-service" / "data").resolve()
 FAISS_DIR = DATA_DIR / "faiss"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
+PERSIST_PATH = DATA_DIR
+SESSION_REGISTRY_FILE = PERSIST_PATH / "session_registry.json"
+SESSION_REGISTRY_LOCK_FILE = PERSIST_PATH / "session_registry.lock"
 
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(FAISS_DIR, exist_ok=True)
