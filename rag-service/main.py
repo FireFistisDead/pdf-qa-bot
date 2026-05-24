@@ -1910,11 +1910,23 @@ def ask_question(data: Question):
             best_score,
             len(docs),
         )
-        return {
+        response_payload = {
             "answer": INSUFFICIENT_CONTEXT_MESSAGE,
             "sources": [],
             "retrieval_type": "refusal",
+            "mode": mode,
         }
+        with sessions_lock:
+            session = sessions.get(session_id)
+            if session:
+                session.setdefault("chat", []).append({
+                    "question": question,
+                    "answer": INSUFFICIENT_CONTEXT_MESSAGE,
+                    "sources": [],
+                    "mode": mode
+                })
+                save_sessions_unlocked()
+        return response_payload
 
     pages = sorted(set(
         doc.metadata["page"] + 1
@@ -2004,12 +2016,24 @@ def ask_question(data: Question):
             len(docs),
             retrieved_sources,
         )
-        return {
+        response_payload = {
             "answer": grounded_answer,
             "sources": citation_sources,
             "retrieval_type": "citation-aware",
             "cache_hit": cache_hit,
+            "mode": mode,
         }
+        with sessions_lock:
+            session = sessions.get(session_id)
+            if session:
+                session.setdefault("chat", []).append({
+                    "question": question,
+                    "answer": grounded_answer,
+                    "sources": citation_sources,
+                    "mode": mode
+                })
+                save_sessions_unlocked()
+        return response_payload
     if grounded_answer:
         if ASK_REQUIRE_CITATIONS and not answer_contains_citation(grounded_answer, len(docs)):
             logger.info(
@@ -2020,11 +2044,23 @@ def ask_question(data: Question):
                 len(docs),
                 retrieved_sources,
             )
-            return {
+            response_payload = {
                 "answer": INSUFFICIENT_CONTEXT_MESSAGE,
                 "sources": citation_sources,
                 "retrieval_type": "refusal",
+                "mode": mode,
             }
+            with sessions_lock:
+                session = sessions.get(session_id)
+                if session:
+                    session.setdefault("chat", []).append({
+                        "question": question,
+                        "answer": INSUFFICIENT_CONTEXT_MESSAGE,
+                        "sources": citation_sources,
+                        "mode": mode
+                    })
+                    save_sessions_unlocked()
+            return response_payload
         logger.info(
             "Returning grounded answer session_id=%s intent=%s retrieved_chunks=%s sources=%s",
             session_id,

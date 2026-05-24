@@ -28,9 +28,10 @@ const ChatPanel = ({
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
   const [summarizing, setSummarizing] = useState(false);
-  const [mode, setMode] = useState(
-    () => localStorage.getItem("pdfqa_preferred_mode") || "default"
-  );
+  const [mode, setMode] = useState(() => {
+    const saved = localStorage.getItem("pdfqa_preferred_mode");
+    return MODE_OPTIONS.some(opt => opt.value === saved) ? saved : "default";
+  });
   const messagesEndRef = useRef(null);
 
   const handleModeChange = (newMode) => {
