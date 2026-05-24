@@ -1801,9 +1801,9 @@ def ask_question(data: Question):
         return {
             "answer": grounded_answer,
             "sources": citation_sources,
-            "retrieval_type": "refusal",
+            "retrieval_type": "citation-aware",
+            "cache_hit": cache_hit,
         }
-
     if grounded_answer:
         if ASK_REQUIRE_CITATIONS and not answer_contains_citation(grounded_answer, len(docs)):
             logger.info(
@@ -1869,7 +1869,7 @@ def ask_question(data: Question):
         "answer": answer,
         "sources": citation_sources,
         "retrieval_type": "citation-aware",
-        
+        "cache_hit": cache_hit,
     }
 
     with sessions_lock:
