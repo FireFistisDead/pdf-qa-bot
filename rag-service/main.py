@@ -105,6 +105,7 @@ INTERNAL_RAG_TOKEN = os.getenv("INTERNAL_RAG_TOKEN", "").strip()
 PROTECTED_RAG_PATHS = {
     "/process-pdf",
     "/ask",
+    "/ask/stream",
     "/summarize",
     "/validate-session-write",
 }
@@ -289,7 +290,7 @@ def extract_pdf_documents_sandboxed(pdf_path: str, filename: str):
 @app.middleware("http")
 async def internal_auth_middleware(request: Request, call_next):
     """
-    Enforce service-to-service auth for RAG endpoints when INTERNAL_RAG_TOKEN is set.
+    Enforce service-to-service auth for protected RAG endpoints.
 
     This prevents attackers from bypassing the API gateway's rate limits by calling
     the RAG service directly (for example when port 5000 is accidentally exposed).

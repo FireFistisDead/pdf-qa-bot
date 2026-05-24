@@ -1,6 +1,9 @@
+import os
 import sys
 from unittest.mock import MagicMock
 import multiprocessing
+
+os.environ.setdefault("INTERNAL_RAG_TOKEN", "test-secret")
 
 # Prevent downloading/loading Hugging Face embeddings during testing by mocking the class
 import langchain_community.embeddings
@@ -59,9 +62,9 @@ def test_sanitize_upload_filename_invalid():
         sanitize_upload_filename("test$file.pdf")
 
 
-def test_internal_token_valid_allows_when_unset():
-    assert internal_token_valid(None, "") is True
-    assert internal_token_valid("", "") is True
+def test_internal_token_valid_rejects_when_unset():
+    assert internal_token_valid(None, "") is False
+    assert internal_token_valid("", "") is False
 
 
 def test_internal_token_valid_rejects_missing_when_set():
