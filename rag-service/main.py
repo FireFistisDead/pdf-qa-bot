@@ -17,6 +17,9 @@ import uuid
 import uvicorn
 import torch
 import multiprocessing
+import json
+import shutil
+import secrets
 from transformers import (
     AutoConfig,
     AutoTokenizer,
@@ -29,6 +32,16 @@ import time
 import logging
 import re
 
+try:  # pragma: no cover
+    import fcntl  # type: ignore
+except Exception:  # pragma: no cover
+    fcntl = None
+
+try:  # pragma: no cover
+    import msvcrt  # type: ignore
+except Exception:  # pragma: no cover
+    msvcrt = None
+
 load_dotenv()
 
 # ── Logger (must be defined before exception handlers that use it) ─────────────
@@ -39,15 +52,20 @@ logging.basicConfig(
 )
 
 app = FastAPI()
-# Global session store
+# Global session store (progress is stored per-session to follow session TTL/eviction)
 sessions = {}
-processing_progress = {}
+
 def update_processing_progress(session_id, stage, progress):
-    processing_progress[session_id] = {
+    payload = {
         "stage": stage,
         "progress": progress,
         "updated_at": now_ts(),
     }
+    with sessions_lock:
+        meta = sessions.get(session_id)
+        if not meta:
+            return
+        meta["processing_progress"] = payload
 
 INTERNAL_RAG_TOKEN = os.getenv("INTERNAL_RAG_TOKEN", "").strip()
 
@@ -235,15 +253,23 @@ async def internal_auth_middleware(request: Request, call_next):
     This prevents attackers from bypassing the API gateway's rate limits by calling
     the RAG service directly (for example when port 5000 is accidentally exposed).
     """
-    if INTERNAL_RAG_TOKEN and request.url.path in {
-        "/process-pdf",
-        "/ask",
-        "/summarize",
-        "/validate-session-write",
-    }:
-        provided = request.headers.get("X-Internal-Token")
-        if not internal_token_valid(provided, INTERNAL_RAG_TOKEN):
-            return standard_error_response(403, "Forbidden")
+    if INTERNAL_RAG_TOKEN:
+        path = request.url.path
+        protected_exact = {
+            "/process-pdf",
+            "/ask",
+            "/summarize",
+            "/validate-session-write",
+        }
+        protected_prefixes = (
+            "/processing-status/",
+        )
+        is_protected = path in protected_exact or any(path.startswith(prefix) for prefix in protected_prefixes)
+
+        if is_protected:
+            provided = request.headers.get("X-Internal-Token")
+            if not internal_token_valid(provided, INTERNAL_RAG_TOKEN):
+                return standard_error_response(403, "Forbidden")
 
     return await call_next(request)
 
@@ -321,6 +347,7 @@ OVERVIEW_QUERY_TERMS = {
 INSUFFICIENT_CONTEXT_MESSAGE = "The uploaded documents do not contain enough information to answer this question."
 BASE_DIR = Path(__file__).resolve().parent.parent
 UPLOADS_DIR = (BASE_DIR / "uploads").resolve()
+PERSIST_DIR = "uploads/sessions"
 PERSIST_PATH = (BASE_DIR / PERSIST_DIR).resolve()
 SESSION_REGISTRY_FILE = PERSIST_PATH / "session_registry.json"
 SESSION_REGISTRY_LOCK_FILE = PERSIST_PATH / "session_registry.lock"
@@ -1370,6 +1397,8 @@ def process_pdf(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid session ID format.")
     requested_session_secret = (session_secret or "").strip() or None
+    processing_session_id = requested_session_id
+    created_placeholder_session = False
 
     logger.info(
         "Processing PDF filename=%s existing_session=%s",
@@ -1377,209 +1406,252 @@ def process_pdf(
         bool(requested_session_id),
     )
 
-    os.makedirs(str(UPLOADS_DIR), exist_ok=True)
-    temp_filename = f"temp_{uuid.uuid4().hex}.pdf"
-    temp_path = os.path.join(str(UPLOADS_DIR), temp_filename)
-
-    try:
-        # Validate actual file magic bytes — extension alone is trivially bypassable.
-        # A valid PDF always begins with the 4-byte signature: %PDF (0x25 0x50 0x44 0x46).
-        magic = file.file.read(5)
-        if magic[:4] != b"%PDF":
-            raise HTTPException(
-                status_code=415,
-                detail="Invalid file type. Only real PDF documents are accepted."
-            )
-        file.file.seek(0)  # Reset stream so we can copy the full file
-
-        max_size = 20 * 1024 * 1024
-        bytes_written = 0
-        with open(temp_path, "wb") as f:
-            while chunk := file.file.read(65536):
-                bytes_written += len(chunk)
-                if bytes_written > max_size:
-                    raise HTTPException(status_code=413, detail="Uploaded PDF exceeds the maximum size of 20MB.")
-                f.write(chunk)
-
-        if bytes_written == 0:
-            raise HTTPException(status_code=400, detail="Uploaded PDF is empty. Please choose a valid PDF file.")
-
-        try:
-            docs = extract_pdf_documents_sandboxed(temp_path, filename)
-        except Exception as exc:
-            logger.warning("Failed to load PDF filename=%s error=%s", filename, exc)
-            if isinstance(exc, HTTPException):
-                raise
-            raise HTTPException(status_code=400, detail="Unable to read this PDF. It may be corrupted or encrypted.")
-    finally:
-        file.file.close()
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except Exception as e:
-                logger.error("Failed to delete temp file %s: %s", temp_path, e)
-
-    if not docs:
-        raise HTTPException(status_code=400, detail="No readable pages were found in the PDF.")
-
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-    chunks = splitter.split_documents(docs)
-    unique_chunks = []
-    seen_content = set()
-
-    for chunk in chunks:
-        content = chunk.page_content.strip()
-        if content not in seen_content:
-            seen_content.add(content)
-            unique_chunks.append(chunk)
-
-    chunks = unique_chunks
-
-    if not chunks:
-        raise HTTPException(status_code=400, detail="No text chunks generated from the PDF. Please check your file.")
-    if not requested_session_id and len(chunks) > MAX_CHUNKS_PER_SESSION:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"PDF is too large to index. "
-                f"A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks."
-            ),
-        )
-    if requested_session_id:
-        with session_store_lock(requested_session_id):
-            with sessions_lock:
-                session = _peek_session_unlocked(requested_session_id)
-                if not session:
-                    raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-                expected_secret = (session.get("session_secret") or "").strip()
-                if not expected_secret or not requested_session_secret or not secrets.compare_digest(requested_session_secret, expected_secret):
-                    raise HTTPException(status_code=403, detail="Forbidden")
-                if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
-                    raise HTTPException(status_code=400, detail="Maximum number of documents per session reached.")
-                current_chunks = sum(doc.get("chunk_count", 0) for doc in session.get("documents", []))
-                if current_chunks + len(chunks) > MAX_CHUNKS_PER_SESSION:
-                    raise HTTPException(status_code=400, detail="Maximum number of chunks per session exceeded.")
-    elif len(chunks) > MAX_CHUNKS_PER_SESSION:
-        raise HTTPException(
-            status_code=400,
-            detail=f"PDF is too large to index. A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks.",
-        )
-
-    document_id = str(uuid.uuid4())
-    temp_tracking_id = requested_session_id or str(uuid.uuid4())
-
-    update_processing_progress(
-        temp_tracking_id,
-        "Extracting text from PDF",
-        15
-    )
-    now = now_ts()
-    uploaded_document = {
-        "document_id": document_id,
-        "filename": filename,
-        "uploaded_at": now,
-        "chunk_count": len(chunks),
-    }
-
-    for chunk_index, chunk in enumerate(chunks):
-        chunk.metadata.update(
-            {
-                "document_id": document_id,
-                "filename": filename,
-                "chunk_index": chunk_index,
-                "uploaded_at": now,
-            }
-        )
-
-    try:
-        new_vectorstore = FAISS.from_documents(chunks, embedding_model)
-    except Exception as exc:
-        logger.exception("Failed to create vectorstore filename=%s", filename)
-        raise HTTPException(status_code=500, detail="Failed to index the uploaded PDF.")
-
-    if requested_session_id:
-        with session_store_lock(requested_session_id):
-            with sessions_lock:
-                session = _touch_session_unlocked(requested_session_id)
-                if not session:
-                    raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-                session.setdefault("retrieval_cache", {})
-                if "lock" not in session:
-                    session["lock"] = threading.Lock()
-                session_lock = session["lock"]
-                vectorstore = session["vectorstore"]
-
-            with session_lock:
-                try:
-                    vectorstore.merge_from(new_vectorstore)
-                    persist_vectorstore(requested_session_id, vectorstore)
-                except Exception:
-                    logger.exception(
-                        "Failed to merge vectorstore session_id=%s filename=%s",
-                        requested_session_id,
-                        filename,
-                    )
-                    raise HTTPException(status_code=500, detail="Failed to merge the uploaded PDF into this session.")
-
-            with sessions_lock:
-                session = _touch_session_unlocked(requested_session_id)
-                if not session:
-                    raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-                session.setdefault("documents", []).append(uploaded_document)
-                session["last_accessed"] = now
-                session["retrieval_cache"] = {}
-                session_id = requested_session_id
-                persist_session_registry_entry(session_id, session)
-                logger.info(
-                    "Merged PDF into session session_id=%s filename=%s documents=%s chunks=%s",
-                    session_id,
-                    filename,
-                    len(session["documents"]),
-                    len(chunks),
-                )
-    else:
-        with session_store_lock(session_id := str(uuid.uuid4())):
+    # For new sessions, allocate the session id up-front so progress tracking is
+    # always scoped to the session lifecycle (TTL/cap eviction) rather than an
+    # unbounded global map.
+    if not processing_session_id:
+        processing_session_id = str(uuid.uuid4())
+        created_placeholder_session = True
+        created_at = now_ts()
+        new_session_secret = generate_session_secret()
+        with sessions_lock:
             _cleanup_expired_sessions_unlocked()
             _enforce_max_sessions_unlocked()
-            session_secret = generate_session_secret()
-            session_dir = persist_vectorstore(session_id, new_vectorstore)
-            previous_tracking_id = temp_tracking_id
-            temp_tracking_id = session_id
-            if previous_tracking_id != session_id and previous_tracking_id in processing_progress:
-                processing_progress[session_id] = processing_progress.pop(previous_tracking_id)
-            session_lock = threading.Lock()
-            sessions[session_id] = {
-                "vectorstore": new_vectorstore,
-                "lock": session_lock,
-                "documents": [uploaded_document],
-                "session_secret": session_secret,
-                "session_dir": session_dir,
-                "created_at": now,
-                "last_accessed": now,
+            sessions[processing_session_id] = {
+                "vectorstore": None,
+                "lock": threading.Lock(),
+                "documents": [],
+                "session_secret": new_session_secret,
+                "session_dir": None,
+                "created_at": created_at,
+                "last_accessed": created_at,
                 "retrieval_cache": {},
             }
-            persist_session_registry_entry(session_id, sessions[session_id])
-            logger.info(
-                "Created session session_id=%s filename=%s chunks=%s",
-                session_id,
-                filename,
-                len(chunks),
+        update_processing_progress(processing_session_id, "Starting", 5)
+
+    try:
+        os.makedirs(str(UPLOADS_DIR), exist_ok=True)
+        temp_filename = f"temp_{uuid.uuid4().hex}.pdf"
+        temp_path = os.path.join(str(UPLOADS_DIR), temp_filename)
+
+        try:
+            # Validate actual file magic bytes — extension alone is trivially bypassable.
+            # A valid PDF always begins with the 4-byte signature: %PDF (0x25 0x50 0x44 0x46).
+            magic = file.file.read(5)
+            if magic[:4] != b"%PDF":
+                raise HTTPException(
+                    status_code=415,
+                    detail="Invalid file type. Only real PDF documents are accepted."
+                )
+            file.file.seek(0)  # Reset stream so we can copy the full file
+
+            max_size = 20 * 1024 * 1024
+            bytes_written = 0
+            with open(temp_path, "wb") as f:
+                while chunk := file.file.read(65536):
+                    bytes_written += len(chunk)
+                    if bytes_written > max_size:
+                        raise HTTPException(status_code=413, detail="Uploaded PDF exceeds the maximum size of 20MB.")
+                    f.write(chunk)
+
+            if bytes_written == 0:
+                raise HTTPException(status_code=400, detail="Uploaded PDF is empty. Please choose a valid PDF file.")
+
+            try:
+                docs = extract_pdf_documents_sandboxed(temp_path, filename)
+            except Exception as exc:
+                logger.warning("Failed to load PDF filename=%s error=%s", filename, exc)
+                if isinstance(exc, HTTPException):
+                    raise
+                raise HTTPException(status_code=400, detail="Unable to read this PDF. It may be corrupted or encrypted.")
+        finally:
+            file.file.close()
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception as e:
+                    logger.error("Failed to delete temp file %s: %s", temp_path, e)
+    except Exception:
+        if created_placeholder_session and processing_session_id:
+            with sessions_lock:
+                meta = sessions.pop(processing_session_id, None)
+            if meta:
+                remove_persisted_session(processing_session_id, meta.get("session_dir"))
+        raise
+
+    try:
+        if not docs:
+            raise HTTPException(status_code=400, detail="No readable pages were found in the PDF.")
+
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        chunks = splitter.split_documents(docs)
+        unique_chunks = []
+        seen_content = set()
+
+        for chunk in chunks:
+            content = chunk.page_content.strip()
+            if content not in seen_content:
+                seen_content.add(content)
+                unique_chunks.append(chunk)
+
+        chunks = unique_chunks
+
+        if not chunks:
+            raise HTTPException(status_code=400, detail="No text chunks generated from the PDF. Please check your file.")
+        if not requested_session_id and len(chunks) > MAX_CHUNKS_PER_SESSION:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"PDF is too large to index. "
+                    f"A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks."
+                ),
+            )
+        if requested_session_id:
+            with session_store_lock(requested_session_id):
+                with sessions_lock:
+                    session = _peek_session_unlocked(requested_session_id)
+                    if not session:
+                        raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+                    expected_secret = (session.get("session_secret") or "").strip()
+                    if not expected_secret or not requested_session_secret or not secrets.compare_digest(requested_session_secret, expected_secret):
+                        raise HTTPException(status_code=403, detail="Forbidden")
+                    if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
+                        raise HTTPException(status_code=400, detail="Maximum number of documents per session reached.")
+                    current_chunks = sum(doc.get("chunk_count", 0) for doc in session.get("documents", []))
+                    if current_chunks + len(chunks) > MAX_CHUNKS_PER_SESSION:
+                        raise HTTPException(status_code=400, detail="Maximum number of chunks per session exceeded.")
+        elif len(chunks) > MAX_CHUNKS_PER_SESSION:
+            raise HTTPException(
+                status_code=400,
+                detail=f"PDF is too large to index. A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks.",
             )
 
-    with sessions_lock:
-        documents = list(sessions[session_id].get("documents", []))
-    update_processing_progress(
-        session_id,
-        "Completed",
-        100
-    )
-    return {
-        "message": "PDF processed successfully",
-        "session_id": session_id,
-        "session_secret": sessions[session_id].get("session_secret"),
-        "document": uploaded_document,
-        "documents": documents,
-    }
+        document_id = str(uuid.uuid4())
+        update_processing_progress(
+            processing_session_id,
+            "Extracting text from PDF",
+            15
+        )
+        now = now_ts()
+        uploaded_document = {
+            "document_id": document_id,
+            "filename": filename,
+            "uploaded_at": now,
+            "chunk_count": len(chunks),
+        }
+
+        for chunk_index, chunk in enumerate(chunks):
+            chunk.metadata.update(
+                {
+                    "document_id": document_id,
+                    "filename": filename,
+                    "chunk_index": chunk_index,
+                    "uploaded_at": now,
+                }
+            )
+
+        try:
+            new_vectorstore = FAISS.from_documents(chunks, embedding_model)
+        except Exception:
+            logger.exception("Failed to create vectorstore filename=%s", filename)
+            raise HTTPException(status_code=500, detail="Failed to index the uploaded PDF.")
+
+        if requested_session_id:
+            with session_store_lock(requested_session_id):
+                with sessions_lock:
+                    session = _touch_session_unlocked(requested_session_id)
+                    if not session:
+                        raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+                    session.setdefault("retrieval_cache", {})
+                    if "lock" not in session:
+                        session["lock"] = threading.Lock()
+                    session_lock = session["lock"]
+                    vectorstore = session["vectorstore"]
+
+                with session_lock:
+                    try:
+                        vectorstore.merge_from(new_vectorstore)
+                        persist_vectorstore(requested_session_id, vectorstore)
+                    except Exception:
+                        logger.exception(
+                            "Failed to merge vectorstore session_id=%s filename=%s",
+                            requested_session_id,
+                            filename,
+                        )
+                        raise HTTPException(status_code=500, detail="Failed to merge the uploaded PDF into this session.")
+
+                with sessions_lock:
+                    session = _touch_session_unlocked(requested_session_id)
+                    if not session:
+                        raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+                    session.setdefault("documents", []).append(uploaded_document)
+                    session["last_accessed"] = now
+                    session["retrieval_cache"] = {}
+                    session_id = requested_session_id
+                    persist_session_registry_entry(session_id, session)
+                    logger.info(
+                        "Merged PDF into session session_id=%s filename=%s documents=%s chunks=%s",
+                        session_id,
+                        filename,
+                        len(session["documents"]),
+                        len(chunks),
+                    )
+        else:
+            session_id = processing_session_id
+            with session_store_lock(session_id):
+                session_dir = persist_vectorstore(session_id, new_vectorstore)
+                with sessions_lock:
+                    session = sessions.get(session_id)
+                    if not session:
+                        # Should be extremely rare (eviction/race). Recreate a minimal session entry.
+                        created_at = now_ts()
+                        session = {
+                            "vectorstore": None,
+                            "lock": threading.Lock(),
+                            "documents": [],
+                            "session_secret": generate_session_secret(),
+                            "session_dir": None,
+                            "created_at": created_at,
+                            "last_accessed": created_at,
+                            "retrieval_cache": {},
+                        }
+                        sessions[session_id] = session
+
+                    session["vectorstore"] = new_vectorstore
+                    session["documents"] = [uploaded_document]
+                    session["session_dir"] = session_dir
+                    session["last_accessed"] = now
+                    session["retrieval_cache"] = {}
+                    persist_session_registry_entry(session_id, session)
+
+                logger.info(
+                    "Created session session_id=%s filename=%s chunks=%s",
+                    session_id,
+                    filename,
+                    len(chunks),
+                )
+
+        with sessions_lock:
+            documents = list(sessions[session_id].get("documents", []))
+        update_processing_progress(
+            session_id,
+            "Completed",
+            100
+        )
+        return {
+            "message": "PDF processed successfully",
+            "session_id": session_id,
+            "session_secret": sessions[session_id].get("session_secret"),
+            "document": uploaded_document,
+            "documents": documents,
+        }
+    except Exception:
+        if created_placeholder_session and processing_session_id:
+            with sessions_lock:
+                meta = sessions.pop(processing_session_id, None)
+            if meta:
+                remove_persisted_session(processing_session_id, meta.get("session_dir"))
+        raise
 
 
 @app.post("/validate-session-write")
@@ -1607,14 +1679,18 @@ def validate_session_write(data: SessionWriteRequest):
 
 @app.get("/processing-status/{session_id}")
 def processing_status(session_id: str):
+    cleanup_expired_sessions()
+    try:
+        safe_session_id = normalize_session_id(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session ID format.")
 
-    progress = processing_progress.get(session_id)
+    with sessions_lock:
+        meta = _peek_session_unlocked(safe_session_id)
+        progress = meta.get("processing_progress") if meta else None
 
     if not progress:
-        raise HTTPException(
-            status_code=404,
-            detail="No processing status found."
-        )
+        raise HTTPException(status_code=404, detail="No processing status found.")
 
     return progress
 
