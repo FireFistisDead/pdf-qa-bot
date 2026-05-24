@@ -1900,10 +1900,34 @@ def process_pdf(
             detail=f"PDF is too large to index. A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks.",
         )
 
-    temp_tracking_id = requested_session_id or str(uuid.uuid4())
+    processing_session_id = requested_session_id
+    created_placeholder_session = False
+
+    if not processing_session_id:
+        processing_session_id = str(uuid.uuid4())
+        created_placeholder_session = True
+        created_at = now_ts()
+        new_session_secret = generate_session_secret()
+        with sessions_lock:
+            _cleanup_expired_sessions_unlocked()
+            _enforce_max_sessions_unlocked()
+            sessions[processing_session_id] = {
+                "vectorstore": None,
+                "lock": threading.Lock(),
+                "documents": [],
+                "session_secret": new_session_secret,
+                "session_dir": None,
+                "created_at": created_at,
+                "last_accessed": created_at,
+                "retrieval_cache": {},
+                "chat": [],
+            }
+            persist_session_registry_entry(processing_session_id, sessions[processing_session_id])
+
+        update_processing_progress(processing_session_id, "Starting", 5)
 
     update_processing_progress(
-        temp_tracking_id,
+        processing_session_id,
         "Extracting text from PDF",
         15
     )
@@ -1988,10 +2012,9 @@ def process_pdf(
             with sessions_lock:
                 _cleanup_expired_sessions_unlocked()
                 _enforce_max_sessions_unlocked()
-                previous_tracking_id = temp_tracking_id
-                temp_tracking_id = session_id
-                if previous_tracking_id != session_id and previous_tracking_id in processing_progress:
-                    processing_progress[session_id] = processing_progress.pop(previous_tracking_id)
+                if processing_session_id in processing_progress:
+                    processing_progress[session_id] = processing_progress.pop(processing_session_id)
+                processing_session_id = session_id
                 session_lock = threading.Lock()
                 sessions[session_id] = {
                     "vectorstore": new_vectorstore,
