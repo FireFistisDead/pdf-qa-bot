@@ -102,6 +102,15 @@ def update_processing_progress(session_id, stage, progress):
     }
 
 INTERNAL_RAG_TOKEN = os.getenv("INTERNAL_RAG_TOKEN", "").strip()
+PROTECTED_RAG_PATHS = {
+    "/process-pdf",
+    "/ask",
+    "/summarize",
+    "/validate-session-write",
+}
+
+if not INTERNAL_RAG_TOKEN:
+    raise RuntimeError("INTERNAL_RAG_TOKEN must be configured for protected endpoints.")
 
 PDF_PARSE_TIMEOUT_SECONDS = int(os.getenv("PDF_PARSE_TIMEOUT_SECONDS", "20"))
 MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "200"))
@@ -113,10 +122,8 @@ except Exception:  # pragma: no cover
     from langchain.schema import Document  # type: ignore
 
 def internal_token_valid(provided: str | None, expected: str) -> bool:
-    if not expected:
-        return True
     candidate = (provided or "").strip()
-    return bool(candidate) and candidate == expected
+    return bool(expected) and bool(candidate) and secrets.compare_digest(candidate, expected)
 
 
 def generate_session_secret() -> str:
@@ -287,12 +294,7 @@ async def internal_auth_middleware(request: Request, call_next):
     This prevents attackers from bypassing the API gateway's rate limits by calling
     the RAG service directly (for example when port 5000 is accidentally exposed).
     """
-    if INTERNAL_RAG_TOKEN and request.url.path in {
-        "/process-pdf",
-        "/ask",
-        "/summarize",
-        "/validate-session-write",
-    }:
+    if request.url.path in PROTECTED_RAG_PATHS:
         provided = request.headers.get("X-Internal-Token")
         if not internal_token_valid(provided, INTERNAL_RAG_TOKEN):
             return standard_error_response(403, "Forbidden")
