@@ -1076,6 +1076,14 @@ def _generate_followup_question(answer: str, question: str, docs: list) -> str:
 
 def _generate_socratic_questions(question: str, docs: list) -> str:
     """Return 2-3 guiding questions without revealing the answer."""
+    _SAFE_FALLBACK = (
+        "🤔 Let's think through this together:\n\n"
+        "1. What context does the document provide about this topic?\n"
+        "2. What evidence does the document give that relates to your question?\n"
+        "3. Based on that evidence, what conclusion can you draw?"
+    )
+    _INTERROGATIVES = {"what", "why", "how", "when", "where", "which", "who", "could", "can", "would", "is", "are", "do", "does"}
+
     context_preview = " ".join(
         doc.page_content[:200] for doc in docs[:3]
     )
@@ -1089,14 +1097,28 @@ def _generate_socratic_questions(question: str, docs: list) -> str:
     )
     try:
         raw = generate_response(prompt, max_new_tokens=120).strip()
-        return f"🤔 Let's think through this together:\n\n{raw}"
-    except Exception:
-        return (
-            "🤔 Let's think through this together:\n\n"
-            "1. What context does the document provide about this topic?\n"
-            "2. What evidence does the document give that relates to your question?\n"
-            "3. Based on that evidence, what conclusion can you draw?"
+
+        # Sanitize: keep only lines that look like genuine questions
+        lines = [ln.strip() for ln in raw.splitlines()]
+        question_lines = [
+            ln for ln in lines
+            if ln and (
+                ln.endswith("?")
+                or ln.split()[0].rstrip(".").lower() in _INTERROGATIVES
+            )
+        ]
+
+        # Enforce 2–3 questions; fall back if we can't satisfy the constraint
+        if len(question_lines) < 2:
+            return _SAFE_FALLBACK
+        question_lines = question_lines[:3]  # cap at 3
+
+        formatted = "\n".join(
+            f"{i + 1}. {q}" for i, q in enumerate(question_lines)
         )
+        return f"🤔 Let's think through this together:\n\n{formatted}"
+    except Exception:
+        return _SAFE_FALLBACK
 
 
 def _truncate_to_concise(answer: str, word_limit: int = 60) -> str:
@@ -1494,9 +1516,10 @@ class Question(BaseModel):
     @field_validator("mode")
     @classmethod
     def validate_mode(cls, v: str) -> str:
-        if v not in VALID_MODES:
+        normalized = v.strip().lower()
+        if normalized not in VALID_MODES:
             raise ValueError(f"Invalid mode '{v}'. Must be one of {VALID_MODES}")
-        return v
+        return normalized
 
 
 class SummarizeRequest(BaseModel):
@@ -2073,6 +2096,16 @@ def ask_question(data: Question):
         )
 
         framed = apply_mode_framing(grounded_answer, question, mode, docs, context)
+
+        # If citations were required and mode-framing stripped them, revert to original.
+        if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
+            logger.info(
+                "Mode framing stripped citations; reverting to grounded answer session_id=%s mode=%s",
+                session_id,
+                mode,
+            )
+            framed = grounded_answer
+
         result = {
             "answer": framed,
             "sources": citation_sources,
@@ -2125,6 +2158,15 @@ def ask_question(data: Question):
     )
     
     framed = apply_mode_framing(answer, question, mode, docs, context)
+
+    # If citations were required and mode-framing stripped them, revert to original.
+    if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
+        logger.info(
+            "Mode framing stripped citations; reverting to generated answer session_id=%s mode=%s",
+            session_id,
+            mode,
+        )
+        framed = answer
 
     response_payload = {
         "answer": framed,
