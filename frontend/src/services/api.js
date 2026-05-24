@@ -13,13 +13,32 @@ export const extractApiErrorMessage = (error, fallbackMessage) => {
 };
 
 /**
+ * Fetches all past sessions (chat history).
+ * @returns {Promise<Array>} Array of session objects
+ */
+export const getSessionsApi = async () => {
+  const res = await axios.get(`${API_BASE}/sessions`, {
+    timeout: 20000, // Increased to 20 seconds for cloud deployments
+  });
+  return res.data;
+};
+
+/**
  * Uploads a PDF file to the server.
  * @param {File} file 
+ * @param {string | null} sessionId
+ * @param {string | null} sessionSecret
  * @returns {Promise<Object>} Contains session_id
  */
-export const uploadPdfApi = async (file) => {
+export const uploadPdfApi = async (file, sessionId = null, sessionSecret = null) => {
   const formData = new FormData();
   formData.append("file", file);
+  if (sessionId) {
+    formData.append("session_id", sessionId);
+  }
+  if (sessionSecret) {
+    formData.append("session_secret", sessionSecret);
+  }
 
   const res = await axios.post(`${API_BASE}/upload`, formData, {
     timeout: 30000, // 30 second timeout

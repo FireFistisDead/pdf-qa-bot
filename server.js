@@ -1,3 +1,4 @@
+// feat: file type and size validation added for /upload endpoint (closes #179)
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
@@ -293,6 +294,9 @@ if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
 
+// Serve the uploads directory statically so frontend can view historical PDFs
+app.use("/uploads", express.static(UPLOADS_DIR));
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, UPLOADS_DIR);
@@ -388,6 +392,50 @@ const extractServiceDetails = (err, fallbackMessage = "Upstream service request 
 const ragAuthHeaders = () =>
   INTERNAL_RAG_TOKEN ? { "X-Internal-Token": INTERNAL_RAG_TOKEN } : {};
 
+const normalizeSessionSecret = (value) =>
+  typeof value === "string" ? value.trim() || null : null;
+
+const validateSessionExtension = async (sessionId, sessionSecret) => {
+  if (!sessionId) {
+    return {
+      allowed: false,
+      statusCode: 400,
+      error: "session_id is required to extend a session.",
+    };
+  }
+
+  if (!sessionSecret) {
+    return {
+      allowed: false,
+      statusCode: 403,
+      error: "session_secret is required to extend an existing session.",
+    };
+  }
+
+  try {
+    await axios.post(
+      `${RAG_SERVICE_URL}/validate-session-write`,
+      {
+        session_id: sessionId,
+        session_secret: sessionSecret,
+      },
+      { headers: ragAuthHeaders() },
+    );
+
+    return { allowed: true };
+  } catch (err) {
+    const statusCode = err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
+    const details = extractServiceDetails(err);
+
+    return {
+      allowed: false,
+      statusCode,
+      error: typeof details === "string" ? details : "Session extension denied.",
+      details,
+    };
+  }
+};
+
 app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
   const uploadedFilePath = req.file?.path;
   // CodeQL [js/path-injection] Mitigation: Break taint flow by forcing basename
@@ -395,6 +443,7 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
     ? path.join(UPLOADS_DIR, path.basename(uploadedFilePath))
     : null;
   const sessionId = req.body?.session_id || null;
+  const sessionSecret = normalizeSessionSecret(req.body?.session_secret);
 
   try {
     if (!req.file) {
@@ -413,6 +462,20 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
         "Uploaded PDF is empty. Please choose a valid PDF file.",
       );
     }
+
+    if (sessionId) {
+      const validation = await validateSessionExtension(sessionId, sessionSecret);
+      if (!validation.allowed) {
+        await cleanupFile(uploadedFilePath);
+        return sendUploadError(
+          res,
+          validation.statusCode,
+          validation.error,
+          validation.details || validation.error,
+        );
+      }
+    }
+
     const fileHandle = await fsPromises.open(absoluteFilePath, "r");
 const signatureBuffer = Buffer.alloc(4);
 
@@ -433,9 +496,13 @@ if (signatureBuffer.toString() !== "%PDF") {
 }
     const formData = {
       file: fs.createReadStream(absoluteFilePath),
+      original_filename: req.file.originalname,
     };
     if (sessionId) {
       formData.session_id = sessionId;
+    }
+    if (sessionSecret) {
+      formData.session_secret = sessionSecret;
     }
 
     const response = await axios.postForm(
@@ -444,13 +511,16 @@ if (signatureBuffer.toString() !== "%PDF") {
       { headers: ragAuthHeaders() },
     );
 
-    await cleanupFile(uploadedFilePath);
+    // Provide the static URL back to the frontend
+    const staticUrl = `/uploads/${path.basename(absoluteFilePath)}`;
 
     return res.json({
       message: "PDF uploaded & processed successfully!",
       session_id: response.data.session_id,
+      session_secret: response.data.session_secret,
       document: response.data.document,
       documents: response.data.documents || [],
+      url: staticUrl
     });
   } catch (err) {
     await cleanupFile(uploadedFilePath);
@@ -575,6 +645,23 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
 
     return res.status(statusCode).json({
       error: typeof details === "string" ? details : "Error summarizing PDF",
+      details: isDevelopment ? details : "Internal processing error",
+    });
+  }
+});
+
+app.get("/sessions", async (req, res) => {
+  try {
+    const response = await axios.get(`${RAG_SERVICE_URL}/sessions`, {
+      headers: ragAuthHeaders(),
+    });
+    return res.json(response.data);
+  } catch (err) {
+    const statusCode = err.response?.status || 500;
+    const details = extractServiceDetails(err);
+    console.error("Failed to fetch sessions:", details);
+    return res.status(statusCode).json({
+      error: "Failed to fetch sessions",
       details: isDevelopment ? details : "Internal processing error",
     });
   }

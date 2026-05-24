@@ -7,8 +7,10 @@ import langchain_community.embeddings
 langchain_community.embeddings.HuggingFaceEmbeddings = MagicMock()
 
 import pytest
+from fastapi.testclient import TestClient
 
 from main import (
+    app,
     detect_question_intent,
     sanitize_upload_filename,
     concise_excerpt,
@@ -22,6 +24,8 @@ from main import (
     document_dedupe_key,
     citation_source_for_document,
     internal_token_valid,
+    normalize_session_id,
+    get_session_dir,
     _extract_pdf_text_worker,
 )
 
@@ -69,6 +73,38 @@ def test_internal_token_valid_rejects_missing_when_set():
 
 def test_internal_token_valid_accepts_exact_match():
     assert internal_token_valid("secret", "secret") is True
+
+
+def test_internal_auth_middleware_protects_validate_session_write():
+    import main as main_module
+
+    original_token = main_module.INTERNAL_RAG_TOKEN
+    main_module.INTERNAL_RAG_TOKEN = "test-secret"
+    try:
+        client = TestClient(app)
+        response = client.post("/validate-session-write")
+        assert response.status_code == 403
+        assert response.json()["error"] == "Forbidden"
+    finally:
+        main_module.INTERNAL_RAG_TOKEN = original_token
+
+
+def test_normalize_session_id_rejects_invalid_values():
+    with pytest.raises(ValueError, match="Missing session id"):
+        normalize_session_id("")
+
+    with pytest.raises(ValueError):
+        normalize_session_id("not-a-uuid")
+
+
+def test_get_session_dir_requires_uuid_session_id():
+    with pytest.raises(ValueError):
+        get_session_dir("../escape")
+
+
+def test_normalize_session_id_returns_canonical_uuid():
+    normalized = normalize_session_id("550E8400-E29B-41D4-A716-446655440000")
+    assert normalized == "550e8400-e29b-41d4-a716-446655440000"
 
 
 def test_extract_pdf_text_worker_enforces_page_limit(tmp_path):
@@ -196,6 +232,7 @@ def test_retry_logic_placeholder():
 
     for _ in range(retries):
         success = True
+
 
     assert success is True
 
