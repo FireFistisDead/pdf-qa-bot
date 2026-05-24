@@ -1604,29 +1604,29 @@ def process_pdf(
                 )
     else:
         with session_store_lock(session_id := str(uuid.uuid4())):
-
-            _cleanup_expired_sessions_unlocked()
-            _enforce_max_sessions_unlocked()
             session_secret = generate_session_secret()
             session_dir = persist_vectorstore(session_id, new_vectorstore)
-            previous_tracking_id = temp_tracking_id
-            temp_tracking_id = session_id
-            if previous_tracking_id != session_id and previous_tracking_id in processing_progress:
-                processing_progress[session_id] = processing_progress.pop(previous_tracking_id)
-            session_lock = threading.Lock()
-            new_vectorstore.save_local(str(FAISS_DIR / session_id))
-            sessions[session_id] = {
-                "vectorstore": new_vectorstore,
-                "lock": session_lock,
-                "documents": [uploaded_document],
-                "session_secret": session_secret,
-                "session_dir": session_dir,
-                "created_at": now,
-                "last_accessed": now,
-                "retrieval_cache": {},
-                "chat": [],
-            }
-            persist_session_registry_entry(session_id, sessions[session_id])
+            
+            with sessions_lock:
+                _cleanup_expired_sessions_unlocked()
+                _enforce_max_sessions_unlocked()
+                previous_tracking_id = temp_tracking_id
+                temp_tracking_id = session_id
+                if previous_tracking_id != session_id and previous_tracking_id in processing_progress:
+                    processing_progress[session_id] = processing_progress.pop(previous_tracking_id)
+                session_lock = threading.Lock()
+                sessions[session_id] = {
+                    "vectorstore": new_vectorstore,
+                    "lock": session_lock,
+                    "documents": [uploaded_document],
+                    "session_secret": session_secret,
+                    "session_dir": session_dir,
+                    "created_at": now,
+                    "last_accessed": now,
+                    "retrieval_cache": {},
+                    "chat": [],
+                }
+                persist_session_registry_entry(session_id, sessions[session_id])
             logger.info(
                 "Created session session_id=%s filename=%s chunks=%s",
                 session_id,
@@ -1958,11 +1958,6 @@ def ask_question(data: Question):
                 {}
             )
 
-            retrieval_cache[normalized_query] = {
-                "answer": answer,
-                "sources": citation_sources,
-                "retrieval_type": "citation-aware",
-            }
             session.setdefault("chat", []).append({
                 "question": question,
                 "answer": answer,

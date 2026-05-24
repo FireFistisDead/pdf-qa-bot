@@ -25,12 +25,24 @@ function App() {
       try {
         const sessions = await getSessionsApi();
         if (sessions && sessions.length > 0) {
-          const formattedPdfs = sessions.map(s => ({
-            name: s.documents?.[0]?.filename || "Unknown PDF",
-            url: s.documents?.[0]?.static_url || `/uploads/${s.documents?.[0]?.filename}`, // Use static_url if available
-            chat: s.chat || [],
-            session_id: s.session_id,
-          }));
+          const apiUrl = process.env.REACT_APP_API_URL || "";
+          const formattedPdfs = sessions.map(s => {
+            const doc = s.documents?.[0];
+            let url = null;
+            if (doc) {
+              const rawUrl = doc.static_url || (doc.filename ? `/uploads/${doc.filename}` : null);
+              if (rawUrl) {
+                url = rawUrl.startsWith('http') ? rawUrl : `${apiUrl}${rawUrl}`;
+              }
+            }
+            return {
+              name: doc?.filename || "Unknown PDF",
+              url: url,
+              chat: s.chat || [],
+              session_id: s.session_id,
+              session_secret: s.session_secret || null,
+            };
+          });
           setPdfs(formattedPdfs);
           setSelectedPdf(formattedPdfs[0].session_id);
         }
@@ -72,7 +84,10 @@ function App() {
     const loadingToast = toast.loading("Uploading PDF...");
 
     try {
-      const data = await uploadPdfApi(file);
+      const currentPdfForUpload = pdfs.find(p => p.session_id === selectedPdf);
+      const data = await uploadPdfApi(file, selectedPdf, currentPdfForUpload?.session_secret);
+      const apiUrl = process.env.REACT_APP_API_URL || "";
+      const serverUrl = data.url ? (data.url.startsWith('http') ? data.url : `${apiUrl}${data.url}`) : null;
       const url = URL.createObjectURL(file);
 
     setPdfs((prev) => {
@@ -80,7 +95,7 @@ function App() {
     ...prev,
     {
       name: file.name,
-      url: data.url || url,
+      url: serverUrl || url,
       chat: [],
       session_id: data.session_id,
       session_secret: data.session_secret || null,
