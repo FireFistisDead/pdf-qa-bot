@@ -10,7 +10,7 @@ const crypto = require("crypto");
 const { rateLimit } = require("express-rate-limit");
 const slowDown = require("express-slow-down");
 const helmet = require("helmet");
-const { askSchema, summarizeSchema } = require("./validators/schemas");
+const { askSchema, summarizeSchema, sessionsLookupSchema } = require("./validators/schemas");
 const { clientIpFromRequest } = require("./security/ip");
 const { createRedisClient } = require("./security/redis");
 
@@ -59,7 +59,7 @@ app.use(helmet());
 
 app.use(cors({
   origin: process.env.ALLOWED_ORIGIN || "http://localhost:3000",
-  methods: ["POST"],
+  methods: ["GET", "POST"],
 }));
 
 // ─── Body Size Limit ─────────────────────────────────────────────────────────
@@ -557,14 +557,16 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
   }
 
   const { question, session_id, mode } = validation.data;
+  const session_secret = validation.data.session_secret;
 
   try {
     const response = await axios.post(
       `${RAG_SERVICE_URL}/ask`,
       {
-      question,
-      session_id,
-      mode,
+        question,
+        session_id,
+        session_secret,
+        mode,
       },
       { headers: ragAuthHeaders() },
     );
@@ -596,11 +598,12 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
   }
 
   const { question, session_id, mode } = validation.data;
+  const session_secret = validation.data.session_secret;
 
   try {
     const ragResponse = await axios.post(
       `${RAG_SERVICE_URL}/ask/stream`,
-      { question, session_id, mode },
+      { question, session_id, session_secret, mode },
       { responseType: "stream", timeout: 120000 }
     );
 
@@ -662,17 +665,34 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
 });
 
 app.get("/sessions", async (req, res) => {
-  try {
-    const response = await axios.get(`${RAG_SERVICE_URL}/sessions`, {
-      headers: ragAuthHeaders(),
+  return res.status(410).json({
+    error: "Endpoint removed. Use /sessions/lookup with session_id + session_secret.",
+  });
+});
+
+app.post("/sessions/lookup", async (req, res) => {
+  const validation = sessionsLookupSchema.safeParse(req.body);
+
+  if (!validation.success) {
+    return res.status(400).json({
+      error: "Validation failed",
+      details: validation.error.flatten(),
     });
+  }
+
+  try {
+    const response = await axios.post(
+      `${RAG_SERVICE_URL}/sessions/lookup`,
+      validation.data,
+      { headers: ragAuthHeaders() },
+    );
     return res.json(response.data);
   } catch (err) {
     const statusCode = err.response?.status || 500;
     const details = extractServiceDetails(err);
-    console.error("Failed to fetch sessions:", details);
+    console.error("Failed to lookup sessions:", details);
     return res.status(statusCode).json({
-      error: "Failed to fetch sessions",
+      error: "Failed to lookup sessions",
       details: isDevelopment ? details : "Internal processing error",
     });
   }
