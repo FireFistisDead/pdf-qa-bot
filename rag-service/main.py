@@ -21,6 +21,8 @@ import os
 import secrets
 import shutil
 import sys
+fcntl = None
+msvcrt = None
 if sys.platform == "win32":
     import msvcrt
 else:
