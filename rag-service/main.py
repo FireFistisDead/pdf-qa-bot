@@ -21,13 +21,6 @@ import multiprocessing
 import os
 import secrets
 import shutil
-import sys
-fcntl = None
-msvcrt = None
-if sys.platform == "win32":
-    import msvcrt
-else:
-    import fcntl
 from transformers import (
     AutoConfig,
     AutoTokenizer,
@@ -39,6 +32,16 @@ import threading
 import time
 import logging
 import re
+
+try:  # pragma: no cover
+    import fcntl  # type: ignore
+except Exception:  # pragma: no cover
+    fcntl = None
+
+try:  # pragma: no cover
+    import msvcrt  # type: ignore
+except Exception:  # pragma: no cover
+    msvcrt = None
 
 load_dotenv()
 
@@ -94,13 +97,17 @@ def save_sessions_unlocked():
 
 # Global session store
 sessions = load_sessions()
-processing_progress = {}
 def update_processing_progress(session_id, stage, progress):
-    processing_progress[session_id] = {
+    payload = {
         "stage": stage,
         "progress": progress,
         "updated_at": now_ts(),
     }
+    with sessions_lock:
+        meta = sessions.get(session_id)
+        if not meta:
+            return
+        meta["processing_progress"] = payload
 
 INTERNAL_RAG_TOKEN = os.getenv("INTERNAL_RAG_TOKEN", "").strip()
 
@@ -1624,10 +1631,34 @@ def process_pdf(
         )
 
     document_id = str(uuid.uuid4())
-    temp_tracking_id = requested_session_id or str(uuid.uuid4())
+    processing_session_id = requested_session_id
+    created_placeholder_session = False
+
+    if not processing_session_id:
+        processing_session_id = str(uuid.uuid4())
+        created_placeholder_session = True
+        created_at = now_ts()
+        new_session_secret = generate_session_secret()
+        with sessions_lock:
+            _cleanup_expired_sessions_unlocked()
+            _enforce_max_sessions_unlocked()
+            sessions[processing_session_id] = {
+                "vectorstore": None,
+                "lock": threading.Lock(),
+                "documents": [],
+                "session_secret": new_session_secret,
+                "session_dir": None,
+                "created_at": created_at,
+                "last_accessed": created_at,
+                "retrieval_cache": {},
+                "chat": [],
+            }
+            persist_session_registry_entry(processing_session_id, sessions[processing_session_id])
+
+        update_processing_progress(processing_session_id, "Starting", 5)
 
     update_processing_progress(
-        temp_tracking_id,
+        processing_session_id,
         "Extracting text from PDF",
         15
     )
@@ -1710,36 +1741,39 @@ def process_pdf(
                     len(chunks),
                 )
     else:
-        with session_store_lock(session_id := str(uuid.uuid4())):
-            session_secret = generate_session_secret()
-            session_dir = persist_vectorstore(session_id, new_vectorstore)
-            
-            with sessions_lock:
-                _cleanup_expired_sessions_unlocked()
-                _enforce_max_sessions_unlocked()
-                previous_tracking_id = temp_tracking_id
-                temp_tracking_id = session_id
-                if previous_tracking_id != session_id and previous_tracking_id in processing_progress:
-                    processing_progress[session_id] = processing_progress.pop(previous_tracking_id)
-                session_lock = threading.Lock()
-                sessions[session_id] = {
-                    "vectorstore": new_vectorstore,
-                    "lock": session_lock,
-                    "documents": [uploaded_document],
-                    "session_secret": session_secret,
-                    "session_dir": session_dir,
-                    "created_at": now,
-                    "last_accessed": now,
-                    "retrieval_cache": {},
-                    "chat": [],
-                }
-                persist_session_registry_entry(session_id, sessions[session_id])
-            logger.info(
-                "Created session session_id=%s filename=%s chunks=%s",
-                session_id,
-                filename,
-                len(chunks),
-            )
+        session_id = processing_session_id
+        try:
+            with session_store_lock(session_id):
+                session_dir = persist_vectorstore(session_id, new_vectorstore)
+
+                with sessions_lock:
+                    _cleanup_expired_sessions_unlocked()
+                    _enforce_max_sessions_unlocked()
+                    session = sessions.get(session_id)
+                    if not session:
+                        raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+                    session["vectorstore"] = new_vectorstore
+                    session["documents"] = [uploaded_document]
+                    session["session_dir"] = session_dir
+                    session["created_at"] = session.get("created_at") or now
+                    session["last_accessed"] = now
+                    session["retrieval_cache"] = {}
+                    session.setdefault("chat", [])
+                    persist_session_registry_entry(session_id, session)
+
+                logger.info(
+                    "Created session session_id=%s filename=%s chunks=%s",
+                    session_id,
+                    filename,
+                    len(chunks),
+                )
+        except Exception:
+            if created_placeholder_session and session_id:
+                with sessions_lock:
+                    meta = sessions.pop(session_id, None)
+                if meta:
+                    remove_persisted_session(session_id, meta.get("session_dir"))
+            raise
 
 
     with sessions_lock:
@@ -1784,7 +1818,9 @@ def validate_session_write(data: SessionWriteRequest):
 @app.get("/processing-status/{session_id}")
 def processing_status(session_id: str):
 
-    progress = processing_progress.get(session_id)
+    with sessions_lock:
+        meta = sessions.get(session_id)
+        progress = meta.get("processing_progress") if meta else None
 
     if not progress:
         raise HTTPException(
