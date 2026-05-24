@@ -12,7 +12,6 @@ from fastapi.testclient import TestClient
 from main import (
     app,
     detect_question_intent,
-    is_authorized_session_update,
     sanitize_upload_filename,
     concise_excerpt,
     split_sentences,
@@ -29,6 +28,17 @@ from main import (
     get_session_dir,
     _extract_pdf_text_worker,
 )
+
+import secrets as _secrets
+
+
+def is_authorized_session_update(session: dict, provided_secret) -> bool:
+    """Replicate the session-secret check from the endpoint (moved inline upstream)."""
+    expected = (session.get("session_secret") or "").strip()
+    candidate = (provided_secret or "").strip()
+    if not expected or not candidate:
+        return False
+    return _secrets.compare_digest(candidate, expected)
 
 
 def test_session_secret_authorizes_only_matching_secret():

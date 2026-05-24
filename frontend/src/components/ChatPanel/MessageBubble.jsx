@@ -10,7 +10,11 @@ const MODE_BADGE = {
   concise:  { label: "Concise",   bg: "rgba(249,115,22,0.15)", color: "#F97316" },
 };
 
-const MessageBubble = ({ msg, darkMode }) => {
+const MessageBubble = ({ msg, darkMode, onOpenSource }) => {
+  const getSourceText = (source) => source.preview || source.text;
+  const getSourceLabel = (source) => source.document || "Source Document";
+  const hasOpenablePage = (source) => Boolean(source.page && source.document);
+
   return (
     <div
       className={`d-flex ${
