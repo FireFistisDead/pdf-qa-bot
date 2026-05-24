@@ -26,11 +26,19 @@ export const getSessionsApi = async () => {
 /**
  * Uploads a PDF file to the server.
  * @param {File} file 
+ * @param {string | null} sessionId
+ * @param {string | null} sessionSecret
  * @returns {Promise<Object>} Contains session_id
  */
-export const uploadPdfApi = async (file) => {
+export const uploadPdfApi = async (file, sessionId = null, sessionSecret = null) => {
   const formData = new FormData();
   formData.append("file", file);
+  if (sessionId) {
+    formData.append("session_id", sessionId);
+  }
+  if (sessionSecret) {
+    formData.append("session_secret", sessionSecret);
+  }
 
   const res = await axios.post(`${API_BASE}/process-pdf`, formData, {
     timeout: 30000, // 30 second timeout
