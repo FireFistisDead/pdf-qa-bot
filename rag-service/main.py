@@ -1969,29 +1969,31 @@ def save_ask_chat(session_id: str, question: str, answer: str, sources: list):
 
 
 def stream_response_tokens(prompt: str, max_new_tokens: int = 256):
+    tokenizer, model, _ = load_generation_model()
+    model_device = next(model.parameters()).device
+
     streamer = TextIteratorStreamer(
         tokenizer,
         skip_prompt=True,
         skip_special_tokens=True,
     )
 
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True)
-    try:
-        model_device = next(model.parameters()).device
-        inputs = {key: value.to(model_device) for key, value in inputs.items()}
-    except Exception:
-        pass
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+    inputs = {key: value.to(model_device) for key, value in inputs.items()}
+
+    pad_token_id = (
+        tokenizer.pad_token_id
+        if tokenizer.pad_token_id is not None
+        else tokenizer.eos_token_id
+    )
 
     generation_kwargs = {
         **inputs,
         "max_new_tokens": max_new_tokens,
+        "do_sample": False,
+        "pad_token_id": pad_token_id,
         "streamer": streamer,
     }
-
-    if getattr(tokenizer, "pad_token_id", None) is not None:
-        generation_kwargs["pad_token_id"] = tokenizer.pad_token_id
-    if getattr(tokenizer, "eos_token_id", None) is not None:
-        generation_kwargs["eos_token_id"] = tokenizer.eos_token_id
 
     generation_error = []
 
