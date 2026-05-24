@@ -1915,6 +1915,7 @@ def ask_question(data: Question):
             "sources": [],
             "retrieval_type": "refusal",
             "mode": mode,
+            "cache_hit": cache_hit,
         }
         with sessions_lock:
             session = sessions.get(session_id)
@@ -2049,6 +2050,7 @@ def ask_question(data: Question):
                 "sources": citation_sources,
                 "retrieval_type": "refusal",
                 "mode": mode,
+                "cache_hit": cache_hit,
             }
             with sessions_lock:
                 session = sessions.get(session_id)
