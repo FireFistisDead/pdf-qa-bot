@@ -13,13 +13,32 @@ export const extractApiErrorMessage = (error, fallbackMessage) => {
 };
 
 /**
+ * Fetches all past sessions (chat history).
+ * @returns {Promise<Array>} Array of session objects
+ */
+export const getSessionsApi = async () => {
+  const res = await axios.get(`${API_BASE}/sessions`, {
+    timeout: 20000, // Increased to 20 seconds for cloud deployments
+  });
+  return res.data;
+};
+
+/**
  * Uploads a PDF file to the server.
  * @param {File} file 
+ * @param {string | null} sessionId
+ * @param {string | null} sessionSecret
  * @returns {Promise<Object>} Contains session_id
  */
-export const uploadPdfApi = async (file) => {
+export const uploadPdfApi = async (file, sessionId = null, sessionSecret = null) => {
   const formData = new FormData();
   formData.append("file", file);
+  if (sessionId) {
+    formData.append("session_id", sessionId);
+  }
+  if (sessionSecret) {
+    formData.append("session_secret", sessionSecret);
+  }
 
   const res = await axios.post(`${API_BASE}/process-pdf`, formData, {
     timeout: 30000, // 30 second timeout
@@ -59,4 +78,35 @@ export const summarizePdfApi = async (pdfName, sessionId) => {
     }
   );
   return res.data;
+};
+export const askQuestionStreamApi = async (question, sessionId, onChunk, signal) => {
+  const response = await fetch(`${API_BASE}/ask/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question, session_id: sessionId }),
+    signal,
+  });
+
+  if (!response.ok) {
+    let errorMessage = "Error getting answer. Please try again.";
+    try {
+      const errorBody = await response.json();
+      errorMessage = errorBody.error || errorBody.detail || errorMessage;
+    } catch (_) {}
+    throw Object.assign(new Error(errorMessage), { response: { status: response.status } });
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let fullText = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = decoder.decode(value, { stream: true });
+    fullText += chunk;
+    onChunk(fullText);
+  }
+
+  return fullText;
 };
