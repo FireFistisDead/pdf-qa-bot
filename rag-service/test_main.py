@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from main import (
     app,
     detect_question_intent,
+    is_authorized_session_update,
     sanitize_upload_filename,
     concise_excerpt,
     split_sentences,
@@ -27,6 +28,15 @@ from main import (
     get_session_dir,
     _extract_pdf_text_worker,
 )
+
+
+def test_session_secret_authorizes_only_matching_secret():
+    session = {"session_secret": "expected-secret"}
+
+    assert is_authorized_session_update(session, "expected-secret") is True
+    assert is_authorized_session_update(session, "wrong-secret") is False
+    assert is_authorized_session_update(session, None) is False
+    assert is_authorized_session_update({}, "expected-secret") is False
 
 
 def test_detect_question_intent():
