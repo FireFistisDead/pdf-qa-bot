@@ -20,13 +20,6 @@ import multiprocessing
 import os
 import secrets
 import shutil
-import sys
-fcntl = None
-msvcrt = None
-if sys.platform == "win32":
-    import msvcrt
-else:
-    import fcntl
 from transformers import (
     AutoConfig,
     AutoTokenizer,
@@ -38,6 +31,16 @@ import threading
 import time
 import logging
 import re
+
+try:  # pragma: no cover
+    import fcntl  # type: ignore
+except Exception:  # pragma: no cover
+    fcntl = None
+
+try:  # pragma: no cover
+    import msvcrt  # type: ignore
+except Exception:  # pragma: no cover
+    msvcrt = None
 
 load_dotenv()
 
@@ -93,13 +96,17 @@ def save_sessions_unlocked():
 
 # Global session store
 sessions = load_sessions()
-processing_progress = {}
 def update_processing_progress(session_id, stage, progress):
-    processing_progress[session_id] = {
+    payload = {
         "stage": stage,
         "progress": progress,
         "updated_at": now_ts(),
     }
+    with sessions_lock:
+        meta = sessions.get(session_id)
+        if not meta:
+            return
+        meta["processing_progress"] = payload
 
 INTERNAL_RAG_TOKEN = os.getenv("INTERNAL_RAG_TOKEN", "").strip()
 
@@ -1900,6 +1907,7 @@ def process_pdf(
             detail=f"PDF is too large to index. A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks.",
         )
 
+    document_id = str(uuid.uuid4())
     processing_session_id = requested_session_id
     created_placeholder_session = False
 
@@ -2078,7 +2086,9 @@ def validate_session_write(data: SessionWriteRequest):
 @app.get("/processing-status/{session_id}")
 def processing_status(session_id: str):
 
-    progress = processing_progress.get(session_id)
+    with sessions_lock:
+        meta = sessions.get(session_id)
+        progress = meta.get("processing_progress") if meta else None
 
     if not progress:
         raise HTTPException(
