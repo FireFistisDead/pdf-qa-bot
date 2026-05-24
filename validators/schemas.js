@@ -40,9 +40,15 @@ const questionSchema = z.preprocess(
   z.string().trim().min(1, "Question is required."),
 );
 
+const modeSchema = z.preprocess(
+  (val) => (typeof val === "string" ? val : "default"),
+  z.enum(["default", "tutor", "socratic", "eli5", "concise"]).default("default")
+);
+
 const askSchema = z.object({
   question: questionSchema,
   session_id: uuidSchema,
+  mode: modeSchema,
 });
 
 const summarizeSchema = z.object({

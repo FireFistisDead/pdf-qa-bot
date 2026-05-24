@@ -294,6 +294,9 @@ if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
 
+// Serve the uploads directory statically so frontend can view historical PDFs
+app.use("/uploads", express.static(UPLOADS_DIR));
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, UPLOADS_DIR);
@@ -338,13 +341,51 @@ const sendUploadError = (res, statusCode, message, details = message) => {
   });
 };
 
-const extractServiceDetails = (err) => {
-  const upstreamDetails = err.response?.data;
+const stringifyServiceDetails = (details) => {
+  if (details == null) return "";
+
+  if (Buffer.isBuffer(details)) {
+    return details.toString("utf8").trim();
+  }
+
+  if (typeof details === "string") {
+    return details.trim();
+  }
+
+  if (typeof details === "object") {
+    const nested =
+      stringifyServiceDetails(details.detail) ||
+      stringifyServiceDetails(details.error) ||
+      stringifyServiceDetails(details.message);
+
+    if (nested) return nested;
+
+    const hasKnownErrorField =
+      Object.prototype.hasOwnProperty.call(details, "detail") ||
+      Object.prototype.hasOwnProperty.call(details, "error") ||
+      Object.prototype.hasOwnProperty.call(details, "message");
+
+    if (hasKnownErrorField && Object.keys(details).length <= 3) {
+      return "";
+    }
+
+    try {
+      const serialized = JSON.stringify(details);
+      return serialized === "{}" ? "" : serialized;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  return String(details).trim();
+};
+
+const extractServiceDetails = (err, fallbackMessage = "Upstream service request failed.") => {
   return (
-    upstreamDetails?.detail ||
-    upstreamDetails?.error ||
-    upstreamDetails ||
-    err.message
+    stringifyServiceDetails(err.response?.data) ||
+    stringifyServiceDetails(err.message) ||
+    stringifyServiceDetails(err.code) ||
+    fallbackMessage
   );
 };
 
@@ -455,9 +496,19 @@ if (signatureBuffer.toString() !== "%PDF") {
 }
     const formData = {
       file: fs.createReadStream(absoluteFilePath),
+      original_filename: req.file.originalname,
     };
-    if (sessionId) {
+    if (sessionId && sessionSecret) {
       formData.session_id = sessionId;
+      formData.session_secret = sessionSecret;
+    } else if (sessionId || sessionSecret) {
+      await cleanupFile(uploadedFilePath);
+
+      return sendUploadError(
+        res,
+        403,
+        "session_id and session_secret must be provided together to extend an existing session.",
+      );
     }
     if (sessionSecret) {
       formData.session_secret = sessionSecret;
@@ -469,7 +520,8 @@ if (signatureBuffer.toString() !== "%PDF") {
       { headers: ragAuthHeaders() },
     );
 
-    await cleanupFile(uploadedFilePath);
+    // Provide the static URL back to the frontend
+    const staticUrl = `/uploads/${path.basename(absoluteFilePath)}`;
 
     return res.json({
       message: "PDF uploaded & processed successfully!",
@@ -477,13 +529,14 @@ if (signatureBuffer.toString() !== "%PDF") {
       session_secret: response.data.session_secret,
       document: response.data.document,
       documents: response.data.documents || [],
+      url: staticUrl
     });
   } catch (err) {
     await cleanupFile(uploadedFilePath);
 
     const statusCode =
       err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
-    const details = extractServiceDetails(err);
+    const details = extractServiceDetails(err, "PDF processing failed");
     console.error("Upload processing failed:", details);
 
     return res.status(statusCode).json({
@@ -503,7 +556,7 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
     });
   }
 
-  const { question, session_id } = validation.data;
+  const { question, session_id, mode } = validation.data;
 
   try {
     const response = await axios.post(
@@ -511,6 +564,7 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
       {
       question,
       session_id,
+      mode,
       },
       { headers: ragAuthHeaders() },
     );
@@ -518,10 +572,11 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
     return res.json({
       answer: response.data.answer,
       sources: response.data.sources ?? [],
+      mode: response.data.mode ?? "default",
     });
   } catch (err) {
     const statusCode = err.response?.status || 500;
-    const details = extractServiceDetails(err);
+    const details = extractServiceDetails(err, "Error answering question");
     console.error("Question answering failed:", details);
 
     return res.status(statusCode).json({
@@ -540,12 +595,12 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
     });
   }
 
-  const { question, session_id } = validation.data;
+  const { question, session_id, mode } = validation.data;
 
   try {
     const ragResponse = await axios.post(
       `${RAG_SERVICE_URL}/ask/stream`,
-      { question, session_id },
+      { question, session_id, mode },
       { responseType: "stream", timeout: 120000 }
     );
 
@@ -567,7 +622,7 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
     });
   } catch (err) {
     const statusCode = err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
-    const details = extractServiceDetails(err);
+    const details = extractServiceDetails(err, "Error answering question");
     console.error("Streaming question answering failed:", details);
     return res.status(statusCode).json({
       error: typeof details === "string" ? details : "Error answering question",
@@ -596,11 +651,28 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
     });
   } catch (err) {
     const statusCode = err.response?.status || 500;
-    const details = extractServiceDetails(err);
+    const details = extractServiceDetails(err, "Error summarizing PDF");
     console.error("Summarization failed:", details);
 
     return res.status(statusCode).json({
       error: typeof details === "string" ? details : "Error summarizing PDF",
+      details: isDevelopment ? details : "Internal processing error",
+    });
+  }
+});
+
+app.get("/sessions", async (req, res) => {
+  try {
+    const response = await axios.get(`${RAG_SERVICE_URL}/sessions`, {
+      headers: ragAuthHeaders(),
+    });
+    return res.json(response.data);
+  } catch (err) {
+    const statusCode = err.response?.status || 500;
+    const details = extractServiceDetails(err);
+    console.error("Failed to fetch sessions:", details);
+    return res.status(statusCode).json({
+      error: "Failed to fetch sessions",
       details: isDevelopment ? details : "Internal processing error",
     });
   }
@@ -658,4 +730,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, askSchema, summarizeSchema };
+module.exports = { app, askSchema, summarizeSchema, extractServiceDetails };

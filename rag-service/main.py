@@ -10,16 +10,17 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from dotenv import load_dotenv
 from rank_bm25 import BM25Okapi
+from pdf_parse_worker import _extract_pdf_text_worker
 from langchain_community.vectorstores import FAISS
 import numpy as np
-import os
+import json
 import uuid
 import uvicorn
 import torch
 import multiprocessing
-import json
-import shutil
+import os
 import secrets
+import shutil
 from transformers import (
     AutoConfig,
     AutoTokenizer,
@@ -52,9 +53,50 @@ logging.basicConfig(
 )
 
 app = FastAPI()
-# Global session store (progress is stored per-session to follow session TTL/eviction)
-sessions = {}
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+UPLOADS_DIR = (BASE_DIR / "uploads").resolve()
+DATA_DIR = (BASE_DIR / "rag-service" / "data").resolve()
+FAISS_DIR = DATA_DIR / "faiss"
+SESSIONS_FILE = DATA_DIR / "sessions.json"
+PERSIST_PATH = DATA_DIR
+SESSION_REGISTRY_FILE = PERSIST_PATH / "session_registry.json"
+SESSION_REGISTRY_LOCK_FILE = PERSIST_PATH / "session_registry.lock"
+
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(FAISS_DIR, exist_ok=True)
+
+def load_sessions():
+    if SESSIONS_FILE.exists():
+        try:
+            with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for sid, meta in data.items():
+                    meta["lock"] = threading.Lock()
+                    meta["vectorstore"] = None
+                return data
+        except Exception as e:
+            logger.error(f"Failed to load sessions: {e}")
+    return {}
+
+def save_sessions_unlocked():
+    try:
+        data = {}
+        for sid, meta in sessions.items():
+            data[sid] = {
+                "created_at": meta.get("created_at"),
+                "last_accessed": meta.get("last_accessed"),
+                "documents": meta.get("documents", []),
+                "retrieval_cache": meta.get("retrieval_cache", {}),
+                "chat": meta.get("chat", []),
+            }
+        with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception as e:
+        logger.error(f"Failed to save sessions: {e}")
+
+# Global session store
+sessions = load_sessions()
 def update_processing_progress(session_id, stage, progress):
     payload = {
         "stage": stage,
@@ -96,77 +138,6 @@ def standard_error_response(status_code: int, detail: str, **extra):
         **extra,
     }
     return JSONResponse(status_code=status_code, content=payload)
-
-def _extract_pdf_text_worker(
-    pdf_path: str,
-    max_pages: int,
-    max_chars: int,
-    out_queue: "multiprocessing.Queue",
-):
-    """
-    Runs in a separate process so the parent can hard-timeout / terminate if PDF parsing
-    becomes pathological (DoS-grade PDFs).
-    """
-    try:
-        from pypdf import PdfReader  # local import to keep startup light
-
-        reader = PdfReader(pdf_path, strict=False)
-
-        # Some PDFs are encrypted (or malformed) and can throw lazily; attempt decrypt best-effort.
-        if getattr(reader, "is_encrypted", False):
-            try:
-                reader.decrypt("")  # type: ignore[attr-defined]
-            except Exception:
-                out_queue.put({"ok": False, "error": "Unable to read this PDF. It may be encrypted."})
-                return
-
-        pages = getattr(reader, "pages", [])
-        page_count = len(pages)
-        if page_count == 0:
-            out_queue.put({"ok": False, "error": "No readable pages were found in the PDF."})
-            return
-        if page_count > max_pages:
-            out_queue.put(
-                {
-                    "ok": False,
-                    "error": f"PDF has too many pages ({page_count}). Max allowed is {max_pages}.",
-                    "page_count": page_count,
-                }
-            )
-            return
-
-        extracted = []
-        used = 0
-        for idx, page in enumerate(pages):
-            if idx >= max_pages:
-                break
-            text = page.extract_text() or ""
-            if not text.strip():
-                continue
-
-            remaining = max_chars - used
-            if remaining <= 0:
-                break
-            if len(text) > remaining:
-                text = text[:remaining]
-            used += len(text)
-            extracted.append({"page": idx, "text": text})
-
-        if not extracted:
-            out_queue.put({"ok": False, "error": "No readable text was found in the PDF."})
-            return
-
-        out_queue.put(
-            {
-                "ok": True,
-                "page_count": page_count,
-                "extracted": extracted,
-                "extracted_chars": used,
-            }
-        )
-    except Exception as exc:
-        out_queue.put({"ok": False, "error": "Unable to read this PDF. It may be corrupted.", "details": str(exc)})
-
 
 def extract_pdf_documents_sandboxed(pdf_path: str, filename: str):
     """
@@ -253,23 +224,15 @@ async def internal_auth_middleware(request: Request, call_next):
     This prevents attackers from bypassing the API gateway's rate limits by calling
     the RAG service directly (for example when port 5000 is accidentally exposed).
     """
-    if INTERNAL_RAG_TOKEN:
-        path = request.url.path
-        protected_exact = {
-            "/process-pdf",
-            "/ask",
-            "/summarize",
-            "/validate-session-write",
-        }
-        protected_prefixes = (
-            "/processing-status/",
-        )
-        is_protected = path in protected_exact or any(path.startswith(prefix) for prefix in protected_prefixes)
-
-        if is_protected:
-            provided = request.headers.get("X-Internal-Token")
-            if not internal_token_valid(provided, INTERNAL_RAG_TOKEN):
-                return standard_error_response(403, "Forbidden")
+    if INTERNAL_RAG_TOKEN and request.url.path in {
+        "/process-pdf",
+        "/ask",
+        "/summarize",
+        "/validate-session-write",
+    }:
+        provided = request.headers.get("X-Internal-Token")
+        if not internal_token_valid(provided, INTERNAL_RAG_TOKEN):
+            return standard_error_response(403, "Forbidden")
 
     return await call_next(request)
 
@@ -305,8 +268,8 @@ model_load_lock = threading.Lock()
 generation_lock = threading.Lock()
 
 # Configurable session TTL and max cap
-SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "30"))
-MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "100"))
+SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "43200"))  # 30 days default for persistence
+MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "1000"))
 MAX_DOCUMENTS_PER_SESSION = int(os.getenv("MAX_DOCUMENTS_PER_SESSION", "5"))
 MAX_CHUNKS_PER_SESSION = int(os.getenv("MAX_CHUNKS_PER_SESSION", "2000"))
 ASK_RETRIEVAL_CANDIDATES = int(os.getenv("ASK_RETRIEVAL_CANDIDATES", "12"))
@@ -345,12 +308,7 @@ OVERVIEW_QUERY_TERMS = {
     "multiple", "overall", "overview", "summarize", "topics",
 }
 INSUFFICIENT_CONTEXT_MESSAGE = "The uploaded documents do not contain enough information to answer this question."
-BASE_DIR = Path(__file__).resolve().parent.parent
-UPLOADS_DIR = (BASE_DIR / "uploads").resolve()
-PERSIST_DIR = "uploads/sessions"
-PERSIST_PATH = (BASE_DIR / PERSIST_DIR).resolve()
-SESSION_REGISTRY_FILE = PERSIST_PATH / "session_registry.json"
-SESSION_REGISTRY_LOCK_FILE = PERSIST_PATH / "session_registry.lock"
+
 UPLOAD_FILENAME_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyz"
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -590,7 +548,9 @@ def cleanup_expired_sessions():
             expired.append(oldest)
             evicted_count += 1
         active_sessions = len(sessions)
-    cleanup_expired_persisted_sessions(expired_dirs)
+        if expired or evicted_count:
+            save_sessions_unlocked()
+            cleanup_expired_persisted_sessions(expired_dirs)
     if expired or evicted_count:
         logger.info(
             "Session cleanup completed expired=%s evicted=%s active=%s",
@@ -1034,6 +994,125 @@ def build_answer_from_documents(question, documents, intent, source_id_by_key=No
     return INSUFFICIENT_CONTEXT_MESSAGE
 
 
+def _generate_followup_question(answer: str, question: str, docs: list) -> str:
+    """Derive one non-yes/no follow-up from the answer text."""
+    sentences = split_sentences(answer)
+    base = sentences[0] if sentences else answer[:200]
+    
+    prompt = (
+        "Given this answer from a document: "
+        f'"{base}" '
+        "Write one thoughtful follow-up question (not yes/no) that would deepen "
+        "understanding of the topic. Question only, no preamble:"
+    )
+    try:
+        return generate_response(prompt, max_new_tokens=60).strip()
+    except Exception:
+        return "What further implications does this have for the broader topic?"
+
+
+def _generate_socratic_questions(question: str, docs: list) -> str:
+    """Return 2-3 guiding questions without revealing the answer."""
+    _SAFE_FALLBACK = (
+        "🤔 Let's think through this together:\n\n"
+        "1. What context does the document provide about this topic?\n"
+        "2. What evidence does the document give that relates to your question?\n"
+        "3. Based on that evidence, what conclusion can you draw?"
+    )
+    _INTERROGATIVES = {"what", "why", "how", "when", "where", "which", "who", "could", "can", "would", "is", "are", "do", "does"}
+
+    context_preview = " ".join(
+        doc.page_content[:200] for doc in docs[:3]
+    )
+    prompt = (
+        "You are a Socratic tutor. The student asked: "
+        f'"{question}". '
+        "Based on this document context (DO NOT reveal the answer): "
+        f"{context_preview[:600]} "
+        "Write 2-3 guiding questions that lead the student toward discovering "
+        "the answer themselves. Go from broad to specific. Never state the answer:"
+    )
+    try:
+        raw = generate_response(prompt, max_new_tokens=120).strip()
+
+        # Sanitize: keep only lines that look like genuine questions
+        lines = [ln.strip() for ln in raw.splitlines()]
+        question_lines = [
+            ln for ln in lines
+            if ln and (
+                ln.endswith("?")
+                or ln.split()[0].rstrip(".").lower() in _INTERROGATIVES
+            )
+        ]
+
+        # Enforce 2–3 questions; fall back if we can't satisfy the constraint
+        if len(question_lines) < 2:
+            return _SAFE_FALLBACK
+        question_lines = question_lines[:3]  # cap at 3
+
+        formatted = "\n".join(
+            f"{i + 1}. {q}" for i, q in enumerate(question_lines)
+        )
+        return f"🤔 Let's think through this together:\n\n{formatted}"
+    except Exception:
+        return _SAFE_FALLBACK
+
+
+def _truncate_to_concise(answer: str, word_limit: int = 60) -> str:
+    """Return first 1-2 sentences, hard-capped at word_limit words."""
+    sentences = split_sentences(answer)
+    if not sentences:
+        return answer
+    result = sentences[0]
+    words = result.split()
+    if len(words) > word_limit:
+        result = " ".join(words[:word_limit]) + "…"
+    return result
+
+
+def apply_mode_framing(
+    answer: str,
+    question: str,
+    mode: str,
+    docs: list,
+    context: str,
+) -> str:
+    """Transform the grounded answer according to the requested mode."""
+    if mode == "default" or not mode:
+        return answer
+
+    if mode == "tutor":
+        followup = _generate_followup_question(answer, question, docs)
+        return f"{answer}\n\n---\n💡 To think about: {followup}"
+
+    if mode == "socratic":
+        return _generate_socratic_questions(question, docs)
+
+    if mode == "eli5":
+        prompt = (
+            "Explain this simply. Use an analogy if helpful. "
+            "Avoid technical jargon. Write short sentences. "
+            "Assume the reader has no background in this topic. "
+            "If a technical term is unavoidable, immediately explain it in "
+            "plain language in parentheses. Use flowing prose, no bullet points.\n\n"
+            f"Context:\n{context[:3000]}\n\n"
+            f"Question: {question}\n"
+            "Simple explanation:"
+        )
+        try:
+            return generate_response(prompt, max_new_tokens=200).strip()
+        except Exception:
+            return answer
+
+    if mode == "concise":
+        truncated = _truncate_to_concise(answer)
+        if not truncated.strip():
+            return "The document doesn't state this directly."
+        return truncated
+
+    return answer
+
+
 def build_document_summary_bullets(documents, max_bullets=3):
     sentences = best_sentences_for_document(documents, max_sentences=max_bullets)
     if not sentences:
@@ -1222,6 +1301,22 @@ def format_context(documents, max_chars=7000):
     return "\n\n".join(context_parts)
 
 
+def citation_source_for_document(document, index):
+    page = document.metadata.get("page")
+    display_page = page + 1 if isinstance(page, int) else None
+    text = concise_excerpt(document.page_content, 250)
+
+    return {
+        "source_id": index + 1,
+        "document": document_display_name(document) or "Unknown Document",
+        "document_id": document.metadata.get("document_id"),
+        "page": display_page,
+        "text": text,
+        "preview": concise_excerpt(document.page_content, 180),
+        "chunk_index": document.metadata.get("chunk_index", index),
+    }
+
+
 def collect_index_documents(vectorstore):
     docstore = getattr(vectorstore, "docstore", None)
     stored_docs = getattr(docstore, "_dict", {}) if docstore else {}
@@ -1239,10 +1334,26 @@ HF_GENERATION_MODEL = os.getenv("HF_GENERATION_MODEL", "google/flan-t5-base")
 generation_tokenizer = None
 generation_model = None
 generation_is_encoder_decoder = False
+embedding_model = None
 
-embedding_model = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
-)
+
+def get_embedding_model():
+    global embedding_model
+    if embedding_model is not None and hasattr(embedding_model, "embed_documents"):
+        return embedding_model
+
+    with model_load_lock:
+        if embedding_model is None or not hasattr(embedding_model, "embed_documents"):
+            logger.info("Loading embedding model")
+            loaded_embedding_model = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-MiniLM-L6-v2"
+            )
+            if loaded_embedding_model is None or not hasattr(loaded_embedding_model, "embed_documents"):
+                raise RuntimeError("Embedding model failed to initialize.")
+            embedding_model = loaded_embedding_model
+            logger.info("Embedding model loaded successfully")
+
+    return embedding_model
 
 
 def load_generation_model():
@@ -1357,9 +1468,12 @@ def validate_uploaded_pdf(file_path: str) -> str:
     return trusted_path
 
 
+VALID_MODES = {"default", "tutor", "socratic", "eli5", "concise"}
+
 class Question(BaseModel):
     question: str = Field(..., min_length=1, description="Question cannot be empty")
     session_id: UUID
+    mode: str = Field(default="default")
 
     @field_validator("question")
     @classmethod
@@ -1368,11 +1482,33 @@ class Question(BaseModel):
             raise ValueError("Question cannot be whitespace only")
         return v
 
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        normalized = v.strip().lower()
+        if normalized not in VALID_MODES:
+            raise ValueError(f"Invalid mode '{v}'. Must be one of {VALID_MODES}")
+        return normalized
+
 
 class SummarizeRequest(BaseModel):
     pdf: str | None = None
     session_id: UUID
 
+@app.get("/sessions")
+def get_sessions():
+    cleanup_expired_sessions()
+    with sessions_lock:
+        return [
+            {
+                "session_id": sid,
+                "created_at": meta.get("created_at"),
+                "last_accessed": meta.get("last_accessed"),
+                "documents": meta.get("documents", []),
+                "chat": meta.get("chat", []),
+            }
+            for sid, meta in sorted(sessions.items(), key=lambda x: x[1].get("last_accessed", 0), reverse=True)
+        ]
 
 class SessionWriteRequest(BaseModel):
     session_id: UUID
@@ -1383,11 +1519,13 @@ class SessionWriteRequest(BaseModel):
 def process_pdf(
     file: UploadFile = File(...),
     session_id: str | None = Form(None),
-    session_secret: str | None = Form(None),
+    original_filename: str | None = Form(None),
+    session_secret: str | None = Form(None)
 ):
     cleanup_expired_sessions()
 
-    filename = file.filename or "uploaded.pdf"
+    # If original_filename is provided, use it for display, otherwise fallback to the file's name (which might be a UUID)
+    filename = original_filename or file.filename or "uploaded.pdf"
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF documents are supported.")
     requested_session_id = None
@@ -1397,8 +1535,6 @@ def process_pdf(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid session ID format.")
     requested_session_secret = (session_secret or "").strip() or None
-    processing_session_id = requested_session_id
-    created_placeholder_session = False
 
     logger.info(
         "Processing PDF filename=%s existing_session=%s",
@@ -1406,9 +1542,98 @@ def process_pdf(
         bool(requested_session_id),
     )
 
-    # For new sessions, allocate the session id up-front so progress tracking is
-    # always scoped to the session lifecycle (TTL/cap eviction) rather than an
-    # unbounded global map.
+    os.makedirs(str(UPLOADS_DIR), exist_ok=True)
+    temp_filename = f"temp_{uuid.uuid4().hex}.pdf"
+    temp_path = os.path.join(str(UPLOADS_DIR), temp_filename)
+
+    try:
+        # Validate actual file magic bytes — extension alone is trivially bypassable.
+        # A valid PDF always begins with the 4-byte signature: %PDF (0x25 0x50 0x44 0x46).
+        magic = file.file.read(5)
+        if magic[:4] != b"%PDF":
+            raise HTTPException(
+                status_code=415,
+                detail="Invalid file type. Only real PDF documents are accepted."
+            )
+        file.file.seek(0)  # Reset stream so we can copy the full file
+
+        max_size = 20 * 1024 * 1024
+        bytes_written = 0
+        with open(temp_path, "wb") as f:
+            while chunk := file.file.read(65536):
+                bytes_written += len(chunk)
+                if bytes_written > max_size:
+                    raise HTTPException(status_code=413, detail="Uploaded PDF exceeds the maximum size of 20MB.")
+                f.write(chunk)
+
+        if bytes_written == 0:
+            raise HTTPException(status_code=400, detail="Uploaded PDF is empty. Please choose a valid PDF file.")
+
+        try:
+            docs = extract_pdf_documents_sandboxed(temp_path, filename)
+        except Exception as exc:
+            logger.warning("Failed to load PDF filename=%s error=%s", filename, exc)
+            if isinstance(exc, HTTPException):
+                raise
+            raise HTTPException(status_code=400, detail="Unable to read this PDF. It may be corrupted or encrypted.")
+    finally:
+        file.file.close()
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception as e:
+                logger.error("Failed to delete temp file %s: %s", temp_path, e)
+
+    if not docs:
+        raise HTTPException(status_code=400, detail="No readable pages were found in the PDF.")
+
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    chunks = splitter.split_documents(docs)
+    unique_chunks = []
+    seen_content = set()
+
+    for chunk in chunks:
+        content = chunk.page_content.strip()
+        if content not in seen_content:
+            seen_content.add(content)
+            unique_chunks.append(chunk)
+
+    chunks = unique_chunks
+
+    if not chunks:
+        raise HTTPException(status_code=400, detail="No text chunks generated from the PDF. Please check your file.")
+    if not requested_session_id and len(chunks) > MAX_CHUNKS_PER_SESSION:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"PDF is too large to index. "
+                f"A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks."
+            ),
+        )
+    if requested_session_id:
+        with session_store_lock(requested_session_id):
+            with sessions_lock:
+                session = _peek_session_unlocked(requested_session_id)
+                if not session:
+                    raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+                expected_secret = (session.get("session_secret") or "").strip()
+                if not expected_secret or not requested_session_secret or not secrets.compare_digest(requested_session_secret, expected_secret):
+                    raise HTTPException(status_code=403, detail="Forbidden")
+                if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
+                    raise HTTPException(status_code=400, detail="Maximum number of documents per session reached.")
+                current_chunks = sum(doc.get("chunk_count", 0) for doc in session.get("documents", []))
+                if current_chunks + len(chunks) > MAX_CHUNKS_PER_SESSION:
+                    raise HTTPException(status_code=400, detail="Maximum number of chunks per session exceeded.")
+    elif len(chunks) > MAX_CHUNKS_PER_SESSION:
+        raise HTTPException(
+            status_code=400,
+            detail=f"PDF is too large to index. A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks.",
+        )
+
+    document_id = str(uuid.uuid4())
+    processing_session_id = requested_session_id
+    created_placeholder_session = False
+
     if not processing_session_id:
         processing_session_id = str(uuid.uuid4())
         created_placeholder_session = True
@@ -1426,202 +1651,114 @@ def process_pdf(
                 "created_at": created_at,
                 "last_accessed": created_at,
                 "retrieval_cache": {},
+                "chat": [],
             }
+            persist_session_registry_entry(processing_session_id, sessions[processing_session_id])
+
         update_processing_progress(processing_session_id, "Starting", 5)
 
-    try:
-        os.makedirs(str(UPLOADS_DIR), exist_ok=True)
-        temp_filename = f"temp_{uuid.uuid4().hex}.pdf"
-        temp_path = os.path.join(str(UPLOADS_DIR), temp_filename)
+    update_processing_progress(
+        processing_session_id,
+        "Extracting text from PDF",
+        15
+    )
+    now = now_ts()
+    uploaded_document = {
+        "document_id": document_id,
+        "filename": filename,
+        "static_url": f"/uploads/{os.path.basename(file.filename)}" if file.filename else None,
+        "uploaded_at": now,
+        "chunk_count": len(chunks),
+    }
 
-        try:
-            # Validate actual file magic bytes — extension alone is trivially bypassable.
-            # A valid PDF always begins with the 4-byte signature: %PDF (0x25 0x50 0x44 0x46).
-            magic = file.file.read(5)
-            if magic[:4] != b"%PDF":
-                raise HTTPException(
-                    status_code=415,
-                    detail="Invalid file type. Only real PDF documents are accepted."
-                )
-            file.file.seek(0)  # Reset stream so we can copy the full file
-
-            max_size = 20 * 1024 * 1024
-            bytes_written = 0
-            with open(temp_path, "wb") as f:
-                while chunk := file.file.read(65536):
-                    bytes_written += len(chunk)
-                    if bytes_written > max_size:
-                        raise HTTPException(status_code=413, detail="Uploaded PDF exceeds the maximum size of 20MB.")
-                    f.write(chunk)
-
-            if bytes_written == 0:
-                raise HTTPException(status_code=400, detail="Uploaded PDF is empty. Please choose a valid PDF file.")
-
-            try:
-                docs = extract_pdf_documents_sandboxed(temp_path, filename)
-            except Exception as exc:
-                logger.warning("Failed to load PDF filename=%s error=%s", filename, exc)
-                if isinstance(exc, HTTPException):
-                    raise
-                raise HTTPException(status_code=400, detail="Unable to read this PDF. It may be corrupted or encrypted.")
-        finally:
-            file.file.close()
-            if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except Exception as e:
-                    logger.error("Failed to delete temp file %s: %s", temp_path, e)
-    except Exception:
-        if created_placeholder_session and processing_session_id:
-            with sessions_lock:
-                meta = sessions.pop(processing_session_id, None)
-            if meta:
-                remove_persisted_session(processing_session_id, meta.get("session_dir"))
-        raise
-
-    try:
-        if not docs:
-            raise HTTPException(status_code=400, detail="No readable pages were found in the PDF.")
-
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-        chunks = splitter.split_documents(docs)
-        unique_chunks = []
-        seen_content = set()
-
-        for chunk in chunks:
-            content = chunk.page_content.strip()
-            if content not in seen_content:
-                seen_content.add(content)
-                unique_chunks.append(chunk)
-
-        chunks = unique_chunks
-
-        if not chunks:
-            raise HTTPException(status_code=400, detail="No text chunks generated from the PDF. Please check your file.")
-        if not requested_session_id and len(chunks) > MAX_CHUNKS_PER_SESSION:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"PDF is too large to index. "
-                    f"A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks."
-                ),
-            )
-        if requested_session_id:
-            with session_store_lock(requested_session_id):
-                with sessions_lock:
-                    session = _peek_session_unlocked(requested_session_id)
-                    if not session:
-                        raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-                    expected_secret = (session.get("session_secret") or "").strip()
-                    if not expected_secret or not requested_session_secret or not secrets.compare_digest(requested_session_secret, expected_secret):
-                        raise HTTPException(status_code=403, detail="Forbidden")
-                    if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
-                        raise HTTPException(status_code=400, detail="Maximum number of documents per session reached.")
-                    current_chunks = sum(doc.get("chunk_count", 0) for doc in session.get("documents", []))
-                    if current_chunks + len(chunks) > MAX_CHUNKS_PER_SESSION:
-                        raise HTTPException(status_code=400, detail="Maximum number of chunks per session exceeded.")
-        elif len(chunks) > MAX_CHUNKS_PER_SESSION:
-            raise HTTPException(
-                status_code=400,
-                detail=f"PDF is too large to index. A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks.",
-            )
-
-        document_id = str(uuid.uuid4())
-        update_processing_progress(
-            processing_session_id,
-            "Extracting text from PDF",
-            15
+    for chunk_index, chunk in enumerate(chunks):
+        chunk.metadata.update(
+            {
+                "document_id": document_id,
+                "filename": filename,
+                "chunk_index": chunk_index,
+                "uploaded_at": now,
+            }
         )
-        now = now_ts()
-        uploaded_document = {
-            "document_id": document_id,
-            "filename": filename,
-            "uploaded_at": now,
-            "chunk_count": len(chunks),
-        }
 
-        for chunk_index, chunk in enumerate(chunks):
-            chunk.metadata.update(
-                {
-                    "document_id": document_id,
-                    "filename": filename,
-                    "chunk_index": chunk_index,
-                    "uploaded_at": now,
-                }
-            )
+    try:
+        embeddings = get_embedding_model()
+    except Exception:
+        logger.exception("Failed to load embedding model filename=%s", filename)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Embedding model is unavailable. Start the RAG service once with internet access "
+                "to download sentence-transformers/all-MiniLM-L6-v2, or pre-download it into the "
+                "local Hugging Face cache."
+            ),
+        )
 
-        try:
-            new_vectorstore = FAISS.from_documents(chunks, embedding_model)
-        except Exception:
-            logger.exception("Failed to create vectorstore filename=%s", filename)
-            raise HTTPException(status_code=500, detail="Failed to index the uploaded PDF.")
+    try:
+        new_vectorstore = FAISS.from_documents(chunks, embeddings)
+    except Exception as exc:
+        logger.exception("Failed to create vectorstore filename=%s", filename)
+        raise HTTPException(status_code=500, detail="Failed to index the uploaded PDF.")
 
-        if requested_session_id:
-            with session_store_lock(requested_session_id):
-                with sessions_lock:
-                    session = _touch_session_unlocked(requested_session_id)
-                    if not session:
-                        raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-                    session.setdefault("retrieval_cache", {})
-                    if "lock" not in session:
-                        session["lock"] = threading.Lock()
-                    session_lock = session["lock"]
-                    vectorstore = session["vectorstore"]
+    if requested_session_id:
+        with session_store_lock(requested_session_id):
+            with sessions_lock:
+                session = _touch_session_unlocked(requested_session_id)
+                if not session:
+                    raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+                session.setdefault("retrieval_cache", {})
+                if "lock" not in session:
+                    session["lock"] = threading.Lock()
+                session_lock = session["lock"]
+                vectorstore = session["vectorstore"]
 
-                with session_lock:
-                    try:
-                        vectorstore.merge_from(new_vectorstore)
-                        persist_vectorstore(requested_session_id, vectorstore)
-                    except Exception:
-                        logger.exception(
-                            "Failed to merge vectorstore session_id=%s filename=%s",
-                            requested_session_id,
-                            filename,
-                        )
-                        raise HTTPException(status_code=500, detail="Failed to merge the uploaded PDF into this session.")
-
-                with sessions_lock:
-                    session = _touch_session_unlocked(requested_session_id)
-                    if not session:
-                        raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-                    session.setdefault("documents", []).append(uploaded_document)
-                    session["last_accessed"] = now
-                    session["retrieval_cache"] = {}
-                    session_id = requested_session_id
-                    persist_session_registry_entry(session_id, session)
-                    logger.info(
-                        "Merged PDF into session session_id=%s filename=%s documents=%s chunks=%s",
-                        session_id,
+            with session_lock:
+                try:
+                    vectorstore.merge_from(new_vectorstore)
+                    persist_vectorstore(requested_session_id, vectorstore)
+                except Exception:
+                    logger.exception(
+                        "Failed to merge vectorstore session_id=%s filename=%s",
+                        requested_session_id,
                         filename,
-                        len(session["documents"]),
-                        len(chunks),
                     )
-        else:
-            session_id = processing_session_id
+                    raise HTTPException(status_code=500, detail="Failed to merge the uploaded PDF into this session.")
+
+            with sessions_lock:
+                session = _touch_session_unlocked(requested_session_id)
+                if not session:
+                    raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+                session.setdefault("documents", []).append(uploaded_document)
+                session["last_accessed"] = now
+                session["retrieval_cache"] = {}
+                session_id = requested_session_id
+                persist_session_registry_entry(session_id, session)
+                logger.info(
+                    "Merged PDF into session session_id=%s filename=%s documents=%s chunks=%s",
+                    session_id,
+                    filename,
+                    len(session["documents"]),
+                    len(chunks),
+                )
+    else:
+        session_id = processing_session_id
+        try:
             with session_store_lock(session_id):
                 session_dir = persist_vectorstore(session_id, new_vectorstore)
+
                 with sessions_lock:
+                    _cleanup_expired_sessions_unlocked()
+                    _enforce_max_sessions_unlocked()
                     session = sessions.get(session_id)
                     if not session:
-                        # Should be extremely rare (eviction/race). Recreate a minimal session entry.
-                        created_at = now_ts()
-                        session = {
-                            "vectorstore": None,
-                            "lock": threading.Lock(),
-                            "documents": [],
-                            "session_secret": generate_session_secret(),
-                            "session_dir": None,
-                            "created_at": created_at,
-                            "last_accessed": created_at,
-                            "retrieval_cache": {},
-                        }
-                        sessions[session_id] = session
-
+                        raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
                     session["vectorstore"] = new_vectorstore
                     session["documents"] = [uploaded_document]
                     session["session_dir"] = session_dir
+                    session["created_at"] = session.get("created_at") or now
                     session["last_accessed"] = now
                     session["retrieval_cache"] = {}
+                    session.setdefault("chat", [])
                     persist_session_registry_entry(session_id, session)
 
                 logger.info(
@@ -1630,28 +1767,29 @@ def process_pdf(
                     filename,
                     len(chunks),
                 )
+        except Exception:
+            if created_placeholder_session and session_id:
+                with sessions_lock:
+                    meta = sessions.pop(session_id, None)
+                if meta:
+                    remove_persisted_session(session_id, meta.get("session_dir"))
+            raise
 
-        with sessions_lock:
-            documents = list(sessions[session_id].get("documents", []))
-        update_processing_progress(
-            session_id,
-            "Completed",
-            100
-        )
-        return {
-            "message": "PDF processed successfully",
-            "session_id": session_id,
-            "session_secret": sessions[session_id].get("session_secret"),
-            "document": uploaded_document,
-            "documents": documents,
-        }
-    except Exception:
-        if created_placeholder_session and processing_session_id:
-            with sessions_lock:
-                meta = sessions.pop(processing_session_id, None)
-            if meta:
-                remove_persisted_session(processing_session_id, meta.get("session_dir"))
-        raise
+
+    with sessions_lock:
+        documents = list(sessions[session_id].get("documents", []))
+    update_processing_progress(
+        session_id,
+        "Completed",
+        100
+    )
+    return {
+        "message": "PDF processed successfully",
+        "session_id": session_id,
+        "session_secret": sessions[session_id].get("session_secret"),
+        "document": uploaded_document,
+        "documents": documents,
+    }
 
 
 @app.post("/validate-session-write")
@@ -1679,18 +1817,16 @@ def validate_session_write(data: SessionWriteRequest):
 
 @app.get("/processing-status/{session_id}")
 def processing_status(session_id: str):
-    cleanup_expired_sessions()
-    try:
-        safe_session_id = normalize_session_id(session_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid session ID format.")
 
     with sessions_lock:
-        meta = _peek_session_unlocked(safe_session_id)
+        meta = sessions.get(session_id)
         progress = meta.get("processing_progress") if meta else None
 
     if not progress:
-        raise HTTPException(status_code=404, detail="No processing status found.")
+        raise HTTPException(
+            status_code=404,
+            detail="No processing status found."
+        )
 
     return progress
 
@@ -1709,6 +1845,7 @@ def ask_question(data: Question):
 
     intent = detect_question_intent(question)
     session_id = str(data.session_id)
+    mode = data.mode
 
     # Normalize query for cache reuse
     normalized_query = normalize_query(question)
@@ -1718,7 +1855,7 @@ def ask_question(data: Question):
 
         session = _touch_session_unlocked(session_id)
 
-        if not session or not session.get("vectorstore"):
+        if not session:
             raise HTTPException(
                 status_code=404,
                 detail="Session expired or invalid. Please re-upload your PDFs."
@@ -1728,6 +1865,12 @@ def ask_question(data: Question):
             session["lock"] = threading.Lock()
 
         session_lock = session["lock"]
+        if not session.get("vectorstore"):
+            try:
+                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), embedding_model, allow_dangerous_deserialization=True)
+            except Exception as e:
+                logger.error(f"Failed to lazy load vectorstore: {e}")
+                raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
 
         # Session-level retrieval cache
@@ -1737,16 +1880,17 @@ def ask_question(data: Question):
         )
 
         # Cache hit
-        if normalized_query in retrieval_cache:
+        cache_key = f"{mode}:{normalized_query}"
+        if cache_key in retrieval_cache:
 
             logger.info(
-                "Retrieval cache hit session_id=%s query=%s",
+                "Retrieval cache hit session_id=%s cache_key=%s",
                 session_id,
-                normalized_query,
+                cache_key,
             )
 
             scored_candidates = retrieval_cache[
-                normalized_query
+                cache_key
             ]
 
             cache_hit = True
@@ -1760,9 +1904,9 @@ def ask_question(data: Question):
 
             if not cache_hit:
                 logger.info(
-                    "Retrieval cache miss session_id=%s query=%s",
+                    "Retrieval cache miss session_id=%s cache_key=%s",
                     session_id,
-                    normalized_query,
+                    cache_key,
                 )
                 scored_candidates = search_retrieval_candidates(
                     vectorstore,
@@ -1777,7 +1921,7 @@ def ask_question(data: Question):
                         if len(retrieval_cache) >= RETRIEVAL_CACHE_LIMIT:
                             oldest_key = next(iter(retrieval_cache))
                             del retrieval_cache[oldest_key]
-                        retrieval_cache[normalized_query] = scored_candidates
+                        retrieval_cache[cache_key] = scored_candidates
 
     except Exception:
         logger.exception("Similarity search failed session_id=%s", session_id)
@@ -1801,11 +1945,24 @@ def ask_question(data: Question):
             best_score,
             len(docs),
         )
-        return {
+        response_payload = {
             "answer": INSUFFICIENT_CONTEXT_MESSAGE,
             "sources": [],
             "retrieval_type": "refusal",
+            "mode": mode,
+            "cache_hit": cache_hit,
         }
+        with sessions_lock:
+            session = sessions.get(session_id)
+            if session:
+                session.setdefault("chat", []).append({
+                    "question": question,
+                    "answer": INSUFFICIENT_CONTEXT_MESSAGE,
+                    "sources": [],
+                    "mode": mode
+                })
+                save_sessions_unlocked()
+        return response_payload
 
     pages = sorted(set(
         doc.metadata["page"] + 1
@@ -1835,28 +1992,36 @@ def ask_question(data: Question):
         for doc in docs
     })
 
-    citation_sources = []
-
-    for idx, doc in enumerate(docs):
-
-        citation_sources.append({
-            "source_id": idx + 1,
-            "document": document_display_name(doc),
-            "page": (
-                doc.metadata.get("page", 0) + 1
-                if "page" in doc.metadata
-                else None
-            ),
-            "preview": concise_excerpt(
-                doc.page_content,
-                180
-            ),
-        })
+    citation_sources = [
+        citation_source_for_document(doc, idx)
+        for idx, doc in enumerate(docs)
+    ]
 
     source_id_by_key = {
         document_dedupe_key(doc): idx + 1
         for idx, doc in enumerate(docs)
     }
+
+    if mode == "socratic":
+        framed = apply_mode_framing("", question, mode, docs, context)
+        response_payload = {
+            "answer": framed,
+            "sources": citation_sources,
+            "retrieval_type": "socratic",
+            "cache_hit": cache_hit,
+            "mode": mode,
+        }
+        with sessions_lock:
+            session = sessions.get(session_id)
+            if session:
+                session.setdefault("chat", []).append({
+                    "question": question,
+                    "answer": framed,
+                    "sources": citation_sources,
+                    "mode": mode
+                })
+                save_sessions_unlocked()
+        return response_payload
 
     grounded_answer = build_answer_from_documents(
         question,
@@ -1874,12 +2039,24 @@ def ask_question(data: Question):
             len(docs),
             retrieved_sources,
         )
-        return {
+        response_payload = {
             "answer": grounded_answer,
             "sources": citation_sources,
-            "retrieval_type": "refusal",
+            "retrieval_type": "citation-aware",
+            "cache_hit": cache_hit,
+            "mode": mode,
         }
-
+        with sessions_lock:
+            session = sessions.get(session_id)
+            if session:
+                session.setdefault("chat", []).append({
+                    "question": question,
+                    "answer": grounded_answer,
+                    "sources": citation_sources,
+                    "mode": mode
+                })
+                save_sessions_unlocked()
+        return response_payload
     if grounded_answer:
         if ASK_REQUIRE_CITATIONS and not answer_contains_citation(grounded_answer, len(docs)):
             logger.info(
@@ -1890,11 +2067,24 @@ def ask_question(data: Question):
                 len(docs),
                 retrieved_sources,
             )
-            return {
+            response_payload = {
                 "answer": INSUFFICIENT_CONTEXT_MESSAGE,
                 "sources": citation_sources,
                 "retrieval_type": "refusal",
+                "mode": mode,
+                "cache_hit": cache_hit,
             }
+            with sessions_lock:
+                session = sessions.get(session_id)
+                if session:
+                    session.setdefault("chat", []).append({
+                        "question": question,
+                        "answer": INSUFFICIENT_CONTEXT_MESSAGE,
+                        "sources": citation_sources,
+                        "mode": mode
+                    })
+                    save_sessions_unlocked()
+            return response_payload
         logger.info(
             "Returning grounded answer session_id=%s intent=%s retrieved_chunks=%s sources=%s",
             session_id,
@@ -1903,12 +2093,36 @@ def ask_question(data: Question):
             retrieved_sources,
         )
 
-        return {
-            "answer": grounded_answer,
+        framed = apply_mode_framing(grounded_answer, question, mode, docs, context)
+
+        # If citations were required and mode-framing stripped them, revert to original.
+        if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
+            logger.info(
+                "Mode framing stripped citations; reverting to grounded answer session_id=%s mode=%s",
+                session_id,
+                mode,
+            )
+            framed = grounded_answer
+
+        result = {
+            "answer": framed,
             "sources": citation_sources,
             "retrieval_type": "citation-aware",
-            
+            "cache_hit": cache_hit,
+            "mode": mode,
         }
+        
+        with sessions_lock:
+            session = sessions.get(session_id)
+            if session:
+                session.setdefault("chat", []).append({
+                    "question": question,
+                    "answer": framed,
+                    "sources": citation_sources,
+                    "mode": mode
+                })
+                save_sessions_unlocked()
+        return result
 
     prompt = (
         "You are a careful assistant answering questions over one or more uploaded PDF documents. "
@@ -1940,12 +2154,24 @@ def ask_question(data: Question):
         prompt,
         max_new_tokens=256
     )
+    
+    framed = apply_mode_framing(answer, question, mode, docs, context)
+
+    # If citations were required and mode-framing stripped them, revert to original.
+    if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
+        logger.info(
+            "Mode framing stripped citations; reverting to generated answer session_id=%s mode=%s",
+            session_id,
+            mode,
+        )
+        framed = answer
 
     response_payload = {
-        "answer": answer,
+        "answer": framed,
         "sources": citation_sources,
         "retrieval_type": "citation-aware",
-        
+        "cache_hit": cache_hit,
+        "mode": mode,
     }
 
     with sessions_lock:
@@ -1959,11 +2185,13 @@ def ask_question(data: Question):
                 {}
             )
 
-            retrieval_cache[normalized_query] = {
-                "answer": answer,
+            session.setdefault("chat", []).append({
+                "question": question,
+                "answer": framed,
                 "sources": citation_sources,
-                "retrieval_type": "citation-aware",
-            }
+                "mode": mode
+            })
+            save_sessions_unlocked()
 
     return response_payload
 
@@ -1973,11 +2201,17 @@ def summarize_pdf(data: SummarizeRequest):
     session_id = str(data.session_id)
     with sessions_lock:
         session = _touch_session_unlocked(session_id)
-        if not session or not session.get("vectorstore"):
+        if not session:
             raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
         if "lock" not in session:
             session["lock"] = threading.Lock()
         session_lock = session["lock"]
+        if not session.get("vectorstore"):
+            try:
+                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), embedding_model, allow_dangerous_deserialization=True)
+            except Exception as e:
+                logger.error(f"Failed to lazy load vectorstore: {e}")
+                raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
         uploaded_documents = list(session.get("documents", []))
 

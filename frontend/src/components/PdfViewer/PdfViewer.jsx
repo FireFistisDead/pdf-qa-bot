@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Card, Button } from "react-bootstrap";
 import PictureAsPdfIcon from "@mui/icons-material/PictureAsPdf";
 import { Document, Page, pdfjs } from "react-pdf";
@@ -6,10 +6,11 @@ import { Document, Page, pdfjs } from "react-pdf";
 // Set PDF.js worker to local file
 pdfjs.GlobalWorkerOptions.workerSrc = `${process.env.PUBLIC_URL}/pdf.worker.min.mjs`;
 
-const PdfViewer = ({ darkMode, currentPdfFile, currentPdfUrl }) => {
+const PdfViewer = ({ darkMode, currentPdfFile, currentPdfUrl, jumpTarget }) => {
   const [numPages, setNumPages] = useState(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [loadError, setLoadError] = useState("");
+  const viewerRef = useRef(null);
 
   const pdfSource = currentPdfFile || currentPdfUrl;
 
@@ -22,9 +23,35 @@ const PdfViewer = ({ darkMode, currentPdfFile, currentPdfUrl }) => {
 
   const onDocumentLoadSuccess = ({ numPages }) => {
     setNumPages(numPages);
-    setPageNumber(1);
+    const requestedPage = Number(jumpTarget?.page);
+    setPageNumber(
+      Number.isFinite(requestedPage)
+        ? Math.min(Math.max(requestedPage, 1), numPages)
+        : 1,
+    );
     setLoadError("");
   };
+
+  useEffect(() => {
+    if (!jumpTarget?.page || loadError) {
+      return;
+    }
+
+    const requestedPage = Number(jumpTarget.page);
+    if (!Number.isFinite(requestedPage)) {
+      return;
+    }
+
+    const nextPage = numPages
+      ? Math.min(Math.max(requestedPage, 1), numPages)
+      : Math.max(requestedPage, 1);
+
+    setPageNumber(nextPage);
+    viewerRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+  }, [jumpTarget, numPages, loadError]);
 
   const handleLoadError = (error) => {
     console.error("PDF preview failed:", error);
@@ -36,6 +63,7 @@ const PdfViewer = ({ darkMode, currentPdfFile, currentPdfUrl }) => {
 
   return (
     <Card
+      ref={viewerRef}
       className={`glass-card ${
         darkMode ? "bg-dark text-light border-secondary" : ""
       }`}

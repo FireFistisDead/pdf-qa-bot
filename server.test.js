@@ -6,19 +6,21 @@ const { Blob } = require("node:buffer");
 
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
-let app, askSchema, summarizeSchema;
+let app, askSchema, summarizeSchema, extractServiceDetails;
 let clientIpFromRequest, normalizeIp;
 test("module loads without error", () => {
   const mod = require("./server.js");
   app = mod.app;
   askSchema = mod.askSchema;
   summarizeSchema = mod.summarizeSchema;
+  extractServiceDetails = mod.extractServiceDetails;
 
   ({ clientIpFromRequest, normalizeIp } = require("./security/ip"));
 
   assert.ok(typeof app === "function", "app should be an Express app");
   assert.ok(typeof askSchema.safeParse === "function", "askSchema should be a Zod schema");
   assert.ok(typeof summarizeSchema.safeParse === "function", "summarizeSchema should be a Zod schema");
+  assert.ok(typeof extractServiceDetails === "function", "extractServiceDetails should be exported for tests");
 });
 
 const createPdfUploadBody = ({ sessionId = null, sessionSecret = null } = {}) => {
@@ -63,6 +65,26 @@ describe("IP normalization", () => {
   test("clientIpFromRequest prefers req.ip and normalizes it", () => {
     const ip = clientIpFromRequest({ ip: "::ffff:10.0.0.5", socket: {} });
     assert.equal(ip, "10.0.0.5");
+  });
+});
+
+describe("service error extraction", () => {
+  test("falls back when upstream details are empty", () => {
+    const details = extractServiceDetails(
+      { response: { data: { detail: "" } }, message: "" },
+      "PDF processing failed",
+    );
+
+    assert.equal(details, "PDF processing failed");
+  });
+
+  test("extracts nested upstream detail", () => {
+    const details = extractServiceDetails({
+      response: { data: { detail: { error: "Unable to read this PDF." } } },
+      message: "Request failed",
+    });
+
+    assert.equal(details, "Unable to read this PDF.");
   });
 });
 

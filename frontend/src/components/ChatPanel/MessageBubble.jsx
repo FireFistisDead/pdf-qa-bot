@@ -1,5 +1,14 @@
 import React from "react";
+import { Button } from "react-bootstrap";
 import ReactMarkdown from "react-markdown";
+
+const MODE_BADGE = {
+  default:  { label: "Standard",  bg: "rgba(107,114,128,0.15)", color: "#6B7280" },
+  tutor:    { label: "Tutor",     bg: "rgba(59,130,246,0.15)",  color: "#3B82F6" },
+  socratic: { label: "Socratic",  bg: "rgba(139,92,246,0.15)", color: "#8B5CF6" },
+  eli5:     { label: "Simple",    bg: "rgba(34,197,94,0.15)",  color: "#22C55E" },
+  concise:  { label: "Concise",   bg: "rgba(249,115,22,0.15)", color: "#F97316" },
+};
 
 const MessageBubble = ({ msg, darkMode }) => {
   return (
@@ -60,6 +69,25 @@ const MessageBubble = ({ msg, darkMode }) => {
           <span>{msg.text}</span>
         )}
 
+        {msg.role === "bot" && msg.mode && msg.mode !== "default" && (() => {
+          const badge = MODE_BADGE[msg.mode] || MODE_BADGE.default;
+          return (
+            <div style={{ marginTop: "8px" }}>
+              <span style={{
+                fontSize: "0.7rem",
+                fontWeight: 600,
+                padding: "2px 8px",
+                borderRadius: "10px",
+                background: badge.bg,
+                color: badge.color,
+                letterSpacing: "0.02em",
+              }}>
+                {badge.label}
+              </span>
+            </div>
+          );
+        })()}
+
         {msg.role === "bot" && msg.sources?.length > 0 && (
   <div
     style={{
@@ -81,9 +109,14 @@ const MessageBubble = ({ msg, darkMode }) => {
       Sources Used
     </div>
 
-    {msg.sources.map((source, index) => (
+    {msg.sources.map((source, index) => {
+      const sourceText = getSourceText(source);
+      const sourceLabel = getSourceLabel(source);
+      const canOpenPage = hasOpenablePage(source);
+
+      return (
       <div
-        key={index}
+        key={`${source.document_id || sourceLabel}-${source.page || "unknown"}-${index}`}
         style={{
           padding: "10px",
           marginBottom: "10px",
@@ -95,7 +128,7 @@ const MessageBubble = ({ msg, darkMode }) => {
         }}
       >
         <div style={{ fontWeight: 600 }}>
-          {source.document}
+          {sourceLabel}
         </div>
 
         <div
@@ -104,19 +137,37 @@ const MessageBubble = ({ msg, darkMode }) => {
             marginBottom: "6px",
           }}
         >
-          Page {source.page}
+          {source.page ? `Page ${source.page}` : "Source page unavailable"}
         </div>
 
-        <div
+        {sourceText && (
+          <div
+            style={{
+              opacity: 0.9,
+              lineHeight: 1.5,
+            }}
+          >
+            "{sourceText}"
+          </div>
+        )}
+
+        <Button
+          variant={darkMode ? "outline-light" : "outline-dark"}
+          size="sm"
+          disabled={!canOpenPage}
+          onClick={() => onOpenSource?.(source)}
           style={{
-            opacity: 0.9,
-            lineHeight: 1.5,
+            marginTop: "10px",
+            borderRadius: "8px",
+            fontSize: "12px",
+            fontWeight: 600,
           }}
         >
-          {source.preview}
-        </div>
+          Open Page
+        </Button>
       </div>
-    ))}
+      );
+    })}
   </div>
 )}
       </div>

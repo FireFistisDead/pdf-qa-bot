@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from main import (
     app,
     detect_question_intent,
+    is_authorized_session_update,
     sanitize_upload_filename,
     concise_excerpt,
     split_sentences,
@@ -22,11 +23,21 @@ from main import (
     INSUFFICIENT_CONTEXT_MESSAGE,
     passes_evidence_gate,
     document_dedupe_key,
+    citation_source_for_document,
     internal_token_valid,
     normalize_session_id,
     get_session_dir,
     _extract_pdf_text_worker,
 )
+
+
+def test_session_secret_authorizes_only_matching_secret():
+    session = {"session_secret": "expected-secret"}
+
+    assert is_authorized_session_update(session, "expected-secret") is True
+    assert is_authorized_session_update(session, "wrong-secret") is False
+    assert is_authorized_session_update(session, None) is False
+    assert is_authorized_session_update({}, "expected-secret") is False
 
 
 def test_detect_question_intent():
@@ -315,3 +326,25 @@ def test_build_answer_refuses_when_unanswerable():
         source_id_by_key=source_id_by_key,
     )
     assert answer == INSUFFICIENT_CONTEXT_MESSAGE
+
+
+def test_citation_source_for_document_preserves_jump_metadata():
+    doc = DummyDocument("Internship duration is 6 weeks. More details follow.", filename="policy.pdf", page=11)
+    doc.metadata["chunk_index"] = 4
+    source = citation_source_for_document(doc, 0)
+
+    assert source["document"] == "policy.pdf"
+    assert source["page"] == 12
+    assert source["chunk_index"] == 4
+    assert source["text"].startswith("Internship duration")
+    assert source["preview"].startswith("Internship duration")
+
+
+def test_citation_source_for_document_handles_missing_metadata():
+    doc = DummyDocument("Useful supporting text.", filename="", page=0)
+    doc.metadata = {}
+    source = citation_source_for_document(doc, 2)
+
+    assert source["document"] == "uploaded document"
+    assert source["page"] is None
+    assert source["chunk_index"] == 2
