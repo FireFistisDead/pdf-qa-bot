@@ -18,7 +18,7 @@ export const extractApiErrorMessage = (error, fallbackMessage) => {
  */
 export const getSessionsApi = async () => {
   const res = await axios.get(`${API_BASE}/sessions`, {
-    timeout: 10000,
+    timeout: 20000, // Increased to 20 seconds for cloud deployments
   });
   return res.data;
 };
