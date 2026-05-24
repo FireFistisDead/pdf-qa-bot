@@ -1057,6 +1057,103 @@ def build_answer_from_documents(question, documents, intent, source_id_by_key=No
     return INSUFFICIENT_CONTEXT_MESSAGE
 
 
+def _generate_followup_question(answer: str, question: str, docs: list) -> str:
+    """Derive one non-yes/no follow-up from the answer text."""
+    sentences = split_sentences(answer)
+    base = sentences[0] if sentences else answer[:200]
+    
+    prompt = (
+        "Given this answer from a document: "
+        f'"{base}" '
+        "Write one thoughtful follow-up question (not yes/no) that would deepen "
+        "understanding of the topic. Question only, no preamble:"
+    )
+    try:
+        return generate_response(prompt, max_new_tokens=60).strip()
+    except Exception:
+        return "What further implications does this have for the broader topic?"
+
+
+def _generate_socratic_questions(question: str, docs: list) -> str:
+    """Return 2-3 guiding questions without revealing the answer."""
+    context_preview = " ".join(
+        doc.page_content[:200] for doc in docs[:3]
+    )
+    prompt = (
+        "You are a Socratic tutor. The student asked: "
+        f'"{question}". '
+        "Based on this document context (DO NOT reveal the answer): "
+        f"{context_preview[:600]} "
+        "Write 2-3 guiding questions that lead the student toward discovering "
+        "the answer themselves. Go from broad to specific. Never state the answer:"
+    )
+    try:
+        raw = generate_response(prompt, max_new_tokens=120).strip()
+        return f"🤔 Let's think through this together:\n\n{raw}"
+    except Exception:
+        return (
+            "🤔 Let's think through this together:\n\n"
+            "1. What context does the document provide about this topic?\n"
+            "2. What evidence does the document give that relates to your question?\n"
+            "3. Based on that evidence, what conclusion can you draw?"
+        )
+
+
+def _truncate_to_concise(answer: str, word_limit: int = 60) -> str:
+    """Return first 1-2 sentences, hard-capped at word_limit words."""
+    sentences = split_sentences(answer)
+    if not sentences:
+        return answer
+    result = sentences[0]
+    words = result.split()
+    if len(words) > word_limit:
+        result = " ".join(words[:word_limit]) + "…"
+    return result
+
+
+def apply_mode_framing(
+    answer: str,
+    question: str,
+    mode: str,
+    docs: list,
+    context: str,
+) -> str:
+    """Transform the grounded answer according to the requested mode."""
+    if mode == "default" or not mode:
+        return answer
+
+    if mode == "tutor":
+        followup = _generate_followup_question(answer, question, docs)
+        return f"{answer}\n\n---\n💡 To think about: {followup}"
+
+    if mode == "socratic":
+        return _generate_socratic_questions(question, docs)
+
+    if mode == "eli5":
+        prompt = (
+            "Explain this simply. Use an analogy if helpful. "
+            "Avoid technical jargon. Write short sentences. "
+            "Assume the reader has no background in this topic. "
+            "If a technical term is unavoidable, immediately explain it in "
+            "plain language in parentheses. Use flowing prose, no bullet points.\n\n"
+            f"Context:\n{context[:3000]}\n\n"
+            f"Question: {question}\n"
+            "Simple explanation:"
+        )
+        try:
+            return generate_response(prompt, max_new_tokens=200).strip()
+        except Exception:
+            return answer
+
+    if mode == "concise":
+        truncated = _truncate_to_concise(answer)
+        if not truncated.strip():
+            return "The document doesn't state this directly."
+        return truncated
+
+    return answer
+
+
 def build_document_summary_bullets(documents, max_bullets=3):
     sentences = best_sentences_for_document(documents, max_sentences=max_bullets)
     if not sentences:
@@ -1380,15 +1477,25 @@ def validate_uploaded_pdf(file_path: str) -> str:
     return trusted_path
 
 
+VALID_MODES = {"default", "tutor", "socratic", "eli5", "concise"}
+
 class Question(BaseModel):
     question: str = Field(..., min_length=1, description="Question cannot be empty")
     session_id: UUID
+    mode: str = Field(default="default")
 
     @field_validator("question")
     @classmethod
     def question_must_not_be_blank(cls, v: str) -> str:
         if not v.strip():
             raise ValueError("Question cannot be whitespace only")
+        return v
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        if v not in VALID_MODES:
+            raise ValueError(f"Invalid mode '{v}'. Must be one of {VALID_MODES}")
         return v
 
 
@@ -1704,6 +1811,7 @@ def ask_question(data: Question):
 
     intent = detect_question_intent(question)
     session_id = str(data.session_id)
+    mode = (data.mode or "default").strip()
 
     # Normalize query for cache reuse
     normalized_query = normalize_query(question)
@@ -1859,6 +1967,27 @@ def ask_question(data: Question):
         for idx, doc in enumerate(docs)
     }
 
+    if mode == "socratic":
+        framed = apply_mode_framing("", question, mode, docs, context)
+        response_payload = {
+            "answer": framed,
+            "sources": citation_sources,
+            "retrieval_type": "socratic",
+            "cache_hit": cache_hit,
+            "mode": mode,
+        }
+        with sessions_lock:
+            session = sessions.get(session_id)
+            if session:
+                session.setdefault("chat", []).append({
+                    "question": question,
+                    "answer": framed,
+                    "sources": citation_sources,
+                    "mode": mode
+                })
+                save_sessions_unlocked()
+        return response_payload
+
     grounded_answer = build_answer_from_documents(
         question,
         docs,
@@ -1904,12 +2033,25 @@ def ask_question(data: Question):
             retrieved_sources,
         )
 
-        return {
-            "answer": grounded_answer,
+        framed = apply_mode_framing(grounded_answer, question, mode, docs, context)
+        result = {
+            "answer": framed,
             "sources": citation_sources,
             "retrieval_type": "citation-aware",
-            
+            "mode": mode,
         }
+        
+        with sessions_lock:
+            session = sessions.get(session_id)
+            if session:
+                session.setdefault("chat", []).append({
+                    "question": question,
+                    "answer": framed,
+                    "sources": citation_sources,
+                    "mode": mode
+                })
+                save_sessions_unlocked()
+        return result
 
     prompt = (
         "You are a careful assistant answering questions over one or more uploaded PDF documents. "
@@ -1941,12 +2083,15 @@ def ask_question(data: Question):
         prompt,
         max_new_tokens=256
     )
+    
+    framed = apply_mode_framing(answer, question, mode, docs, context)
 
     response_payload = {
-        "answer": answer,
+        "answer": framed,
         "sources": citation_sources,
         "retrieval_type": "citation-aware",
         "cache_hit": cache_hit,
+        "mode": mode,
     }
 
     with sessions_lock:
@@ -1962,8 +2107,9 @@ def ask_question(data: Question):
 
             session.setdefault("chat", []).append({
                 "question": question,
-                "answer": answer,
-                "sources": citation_sources
+                "answer": framed,
+                "sources": citation_sources,
+                "mode": mode
             })
             save_sessions_unlocked()
 

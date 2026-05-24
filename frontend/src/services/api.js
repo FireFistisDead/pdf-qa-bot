@@ -52,10 +52,10 @@ export const uploadPdfApi = async (file, sessionId = null, sessionSecret = null)
  * @param {string} sessionId 
  * @returns {Promise<Object>} Contains the bot's answer
  */
-export const askQuestionApi = async (question, sessionId) => {
+export const askQuestionApi = async (question, sessionId, mode = "default") => {
   const res = await axios.post(
     `${API_BASE}/ask`,
-    { question, session_id: sessionId },
+    { question, session_id: sessionId, mode },
     {
       timeout: 60000, // 60 second timeout for AI responses
     }
@@ -79,11 +79,11 @@ export const summarizePdfApi = async (pdfName, sessionId) => {
   );
   return res.data;
 };
-export const askQuestionStreamApi = async (question, sessionId, onChunk, signal) => {
+export const askQuestionStreamApi = async (question, sessionId, mode = "default", onChunk, signal) => {
   const response = await fetch(`${API_BASE}/ask/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, session_id: sessionId }),
+    body: JSON.stringify({ question, session_id: sessionId, mode }),
     signal,
   });
 

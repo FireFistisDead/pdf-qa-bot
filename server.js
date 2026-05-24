@@ -509,7 +509,7 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
     });
   }
 
-  const { question, session_id } = validation.data;
+  const { question, session_id, mode } = validation.data;
 
   try {
     const response = await axios.post(
@@ -517,6 +517,7 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
       {
       question,
       session_id,
+      mode,
       },
       { headers: ragAuthHeaders() },
     );
@@ -524,6 +525,7 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
     return res.json({
       answer: response.data.answer,
       sources: response.data.sources ?? [],
+      mode: response.data.mode ?? "default",
     });
   } catch (err) {
     const statusCode = err.response?.status || 500;
@@ -546,12 +548,12 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
     });
   }
 
-  const { question, session_id } = validation.data;
+  const { question, session_id, mode } = validation.data;
 
   try {
     const ragResponse = await axios.post(
       `${RAG_SERVICE_URL}/ask/stream`,
-      { question, session_id },
+      { question, session_id, mode },
       { responseType: "stream", timeout: 120000 }
     );
 

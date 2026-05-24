@@ -157,7 +157,7 @@ function App() {
   );
 };
 
-const handleUpdateLastBotMessage = (text, streaming, sources) => {
+const handleUpdateLastBotMessage = (text, streaming, sources, mode) => {
   setPdfs((prev) =>
     prev.map((pdf) => {
       if (pdf.session_id !== selectedPdf) return pdf;
@@ -169,6 +169,7 @@ const handleUpdateLastBotMessage = (text, streaming, sources) => {
             text: text !== null ? text : chat[i].text,
             streaming: streaming,
             sources: sources !== undefined ? sources : chat[i].sources,
+            mode: mode !== undefined ? mode : chat[i].mode,
           };
           break;
         }
