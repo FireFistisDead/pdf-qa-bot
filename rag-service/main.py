@@ -1811,7 +1811,7 @@ def ask_question(data: Question):
 
     intent = detect_question_intent(question)
     session_id = str(data.session_id)
-    mode = (data.mode or "default").strip()
+    mode = data.mode
 
     # Normalize query for cache reuse
     normalized_query = normalize_query(question)
@@ -2074,6 +2074,7 @@ def ask_question(data: Question):
             "answer": framed,
             "sources": citation_sources,
             "retrieval_type": "citation-aware",
+            "cache_hit": cache_hit,
             "mode": mode,
         }
         
