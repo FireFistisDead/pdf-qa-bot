@@ -9,7 +9,7 @@ import ChatPanel from "./components/ChatPanel/ChatPanel";
 import toast, { Toaster } from "react-hot-toast";
 import LandingPage from "./components/Landing/LandingPage";
 
-import { extractApiErrorMessage, uploadPdfApi } from "./services/api";
+import { extractApiErrorMessage, uploadPdfApi, getSessionsApi } from "./services/api";
 
 pdfjs.GlobalWorkerOptions.workerSrc = `${process.env.PUBLIC_URL}/pdf.worker.min.js`;
 
@@ -18,6 +18,40 @@ function App() {
   const [selectedPdf, setSelectedPdf] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
+
+  React.useEffect(() => {
+    // Load historical sessions on initial mount
+    const fetchHistory = async () => {
+      try {
+        const sessions = await getSessionsApi();
+        if (sessions && sessions.length > 0) {
+          const apiUrl = process.env.REACT_APP_API_URL || "";
+          const formattedPdfs = sessions.map(s => {
+            const doc = s.documents?.[0];
+            let url = null;
+            if (doc) {
+              const rawUrl = doc.static_url || (doc.filename ? `/uploads/${doc.filename}` : null);
+              if (rawUrl) {
+                url = rawUrl.startsWith('http') ? rawUrl : `${apiUrl}${rawUrl}`;
+              }
+            }
+            return {
+              name: doc?.filename || "Unknown PDF",
+              url: url,
+              chat: s.chat || [],
+              session_id: s.session_id,
+              session_secret: s.session_secret || null,
+            };
+          });
+          setPdfs(formattedPdfs);
+          setSelectedPdf(formattedPdfs[0].session_id);
+        }
+      } catch (e) {
+        console.error("Failed to load session history:", e);
+      }
+    };
+    fetchHistory();
+  }, []);
 
   // Router logic to serve new UI on /new
   const path = window.location.pathname;
@@ -50,7 +84,10 @@ function App() {
     const loadingToast = toast.loading("Uploading PDF...");
 
     try {
-      const data = await uploadPdfApi(file);
+      const currentPdfForUpload = pdfs.find(p => p.session_id === selectedPdf);
+      const data = await uploadPdfApi(file, selectedPdf, currentPdfForUpload?.session_secret);
+      const apiUrl = process.env.REACT_APP_API_URL || "";
+      const serverUrl = data.url ? (data.url.startsWith('http') ? data.url : `${apiUrl}${data.url}`) : null;
       const url = URL.createObjectURL(file);
 
     setPdfs((prev) => {
@@ -58,7 +95,7 @@ function App() {
     ...prev,
     {
       name: file.name,
-      url,
+      url: serverUrl || url,
       chat: [],
       session_id: data.session_id,
       session_secret: data.session_secret || null,
@@ -66,6 +103,9 @@ function App() {
   ];
  
   if (prev.length === 0) {
+    setSelectedPdf(data.session_id);
+  } else {
+    // Switch to the newly uploaded pdf immediately
     setSelectedPdf(data.session_id);
   }
   return updated;

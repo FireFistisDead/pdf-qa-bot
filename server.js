@@ -294,6 +294,9 @@ if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
 
+// Serve the uploads directory statically so frontend can view historical PDFs
+app.use("/uploads", express.static(UPLOADS_DIR));
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, UPLOADS_DIR);
@@ -455,6 +458,7 @@ if (signatureBuffer.toString() !== "%PDF") {
 }
     const formData = {
       file: fs.createReadStream(absoluteFilePath),
+      original_filename: req.file.originalname,
     };
     if (sessionId) {
       formData.session_id = sessionId;
@@ -469,7 +473,8 @@ if (signatureBuffer.toString() !== "%PDF") {
       { headers: ragAuthHeaders() },
     );
 
-    await cleanupFile(uploadedFilePath);
+    // Provide the static URL back to the frontend
+    const staticUrl = `/uploads/${path.basename(absoluteFilePath)}`;
 
     return res.json({
       message: "PDF uploaded & processed successfully!",
@@ -477,6 +482,7 @@ if (signatureBuffer.toString() !== "%PDF") {
       session_secret: response.data.session_secret,
       document: response.data.document,
       documents: response.data.documents || [],
+      url: staticUrl
     });
   } catch (err) {
     await cleanupFile(uploadedFilePath);
@@ -601,6 +607,23 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
 
     return res.status(statusCode).json({
       error: typeof details === "string" ? details : "Error summarizing PDF",
+      details: isDevelopment ? details : "Internal processing error",
+    });
+  }
+});
+
+app.get("/sessions", async (req, res) => {
+  try {
+    const response = await axios.get(`${RAG_SERVICE_URL}/sessions`, {
+      headers: ragAuthHeaders(),
+    });
+    return res.json(response.data);
+  } catch (err) {
+    const statusCode = err.response?.status || 500;
+    const details = extractServiceDetails(err);
+    console.error("Failed to fetch sessions:", details);
+    return res.status(statusCode).json({
+      error: "Failed to fetch sessions",
       details: isDevelopment ? details : "Internal processing error",
     });
   }

@@ -13,6 +13,17 @@ export const extractApiErrorMessage = (error, fallbackMessage) => {
 };
 
 /**
+ * Fetches all past sessions (chat history).
+ * @returns {Promise<Array>} Array of session objects
+ */
+export const getSessionsApi = async () => {
+  const res = await axios.get(`${API_BASE}/sessions`, {
+    timeout: 20000, // Increased to 20 seconds for cloud deployments
+  });
+  return res.data;
+};
+
+/**
  * Uploads a PDF file to the server.
  * @param {File} file 
  * @param {string | null} sessionId
