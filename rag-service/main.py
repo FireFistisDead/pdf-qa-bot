@@ -290,6 +290,7 @@ async def internal_auth_middleware(request: Request, call_next):
     if INTERNAL_RAG_TOKEN and request.url.path in {
         "/process-pdf",
         "/ask",
+        "/ask/stream",
         "/summarize",
         "/validate-session-write",
     }:
@@ -1960,11 +1961,18 @@ def save_ask_chat(session_id: str, question: str, answer: str, sources: list):
 
         if session:
 
-            session.setdefault("chat", []).append({
-                "question": question,
-                "answer": answer,
-                "sources": sources
-            })
+            session.setdefault("chat", []).extend([
+                {
+                    "role": "user",
+                    "text": question,
+                },
+                {
+                    "role": "bot",
+                    "text": answer,
+                    "sources": sources,
+                    "streaming": False,
+                },
+            ])
             save_sessions_unlocked()
 
 
