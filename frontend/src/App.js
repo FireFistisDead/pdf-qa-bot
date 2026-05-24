@@ -168,31 +168,14 @@ function App() {
   setPdfJumpTarget(null);
 };
 
-const handleUpdateLastBotMessage = (text, streaming, sources, mode) => {
-  setPdfs((prev) =>
-    prev.map((pdf) => {
-      if (pdf.session_id !== selectedPdf) return pdf;
-      const chat = [...pdf.chat];
-      for (let i = chat.length - 1; i >= 0; i--) {
-        if (chat[i].role === "bot") {
-          chat[i] = {
-            ...chat[i],
-            text: text !== null ? text : chat[i].text,
-            streaming: streaming,
-            sources: sources !== undefined ? sources : chat[i].sources,
-            mode: mode !== undefined ? mode : chat[i].mode,
-          };
-          break;
-        }
-      }
-
-      return (
+const handleOpenSource = (source, page) => {
+    const matchingPdf = pdfs.find(
+      (pdf) =>
         source.document &&
         pdf.name.localeCompare(source.document, undefined, {
           sensitivity: "accent",
-        }) === 0
-      );
-    });
+        }) === 0,
+    );
 
     if (!matchingPdf) {
       toast.error("Source document is not available in the current session.");
@@ -208,7 +191,7 @@ const handleUpdateLastBotMessage = (text, streaming, sources, mode) => {
     });
   };
 
-  const handleUpdateLastBotMessage = (text, streaming, sources) => {
+  const handleUpdateLastBotMessage = (text, streaming, sources, mode) => {
     setPdfs((prev) =>
       prev.map((pdf) => {
         if (pdf.id !== selectedPdf) return pdf;
@@ -221,6 +204,7 @@ const handleUpdateLastBotMessage = (text, streaming, sources, mode) => {
               text: text !== null ? text : chat[i].text,
               streaming,
               sources: sources !== undefined ? sources : chat[i].sources,
+              mode: mode !== undefined ? mode : chat[i].mode,
             };
             break;
           }

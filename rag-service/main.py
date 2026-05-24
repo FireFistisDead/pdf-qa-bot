@@ -5,7 +5,6 @@ from pydantic import BaseModel, Field, field_validator
 from pathlib import Path
 from uuid import UUID
 from contextlib import contextmanager
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from dotenv import load_dotenv
@@ -290,6 +289,20 @@ ASK_REQUIRE_CITATIONS = os.getenv("ASK_REQUIRE_CITATIONS", "true").strip().lower
     "on",
 }
 RETRIEVAL_CACHE_LIMIT = int(os.getenv("RETRIEVAL_CACHE_LIMIT", "25"))
+
+# ── Semantic Chunking Config ─────────────────────────────────────────────────
+SEMANTIC_CHUNK_SOFT_MAX = int(os.getenv("SEMANTIC_CHUNK_SOFT_MAX", "1200"))
+SEMANTIC_CHUNK_MERGE_MIN = int(os.getenv("SEMANTIC_CHUNK_MERGE_MIN", "150"))
+SEMANTIC_CHUNK_MERGE_MAX = int(os.getenv("SEMANTIC_CHUNK_MERGE_MAX", "1400"))
+SEMANTIC_CHUNK_SIMILARITY_THRESHOLD = float(
+    os.getenv("SEMANTIC_CHUNK_SIMILARITY_THRESHOLD", "0.75")
+)
+SEMANTIC_CHUNK_MERGE_WARN_SECS = float(
+    os.getenv("SEMANTIC_CHUNK_MERGE_WARN_SECS", "5.0")
+)
+SEMANTIC_CHUNK_HIERARCHICAL = os.getenv(
+    "SEMANTIC_CHUNK_HIERARCHICAL", "true"
+).strip().lower() in {"1", "true", "yes", "on"}
 QUERY_STOPWORDS = {
     "about", "according", "also", "and", "are", "between", "compare",
     "describe", "does", "document", "documents", "explain", "from", "give",
@@ -1288,7 +1301,8 @@ def format_context(documents, max_chars=7000):
         filename = document_display_name(doc)
         page = doc.metadata.get("page")
         source_label = f"{filename}, page {page + 1}" if isinstance(page, int) else filename
-        content = doc.page_content.strip()
+        # Pass 2b: prefer richer parent context for generation; fall back to page_content
+        content = (doc.metadata.get("parent_chunk") or doc.page_content or "").strip()
         if not content:
             continue
         block = f"Document: {source_label}\nContent:\n{content}"
@@ -1354,6 +1368,265 @@ def get_embedding_model():
             logger.info("Embedding model loaded successfully")
 
     return embedding_model
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Semantic Chunking Pipeline
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Cosine similarity (numpy, no extra deps) ──────────────────────────────────
+
+def _cosine_similarity(vec_a: list, vec_b: list) -> float:
+    """Cosine similarity between two embedding vectors; safe for zero norms."""
+    a = np.array(vec_a, dtype=np.float32)
+    b = np.array(vec_b, dtype=np.float32)
+    norm_a = np.linalg.norm(a)
+    norm_b = np.linalg.norm(b)
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return float(np.dot(a, b) / (norm_a * norm_b))
+
+
+# ── Pass 1: boundary-aware splitting ─────────────────────────────────────────
+
+_HEADING_RE = re.compile(
+    r"(?m)"
+    r"(?:^#{1,3} .+$"
+    r"|.+:\s*$)"
+)
+
+
+def _split_pass1(text: str, soft_max: int) -> list:
+    """
+    Boundary-aware split in priority order:
+      1. Double-newline paragraph breaks
+      2. Markdown headings / lines ending in colon
+      3. Sentence terminals (. ? !)
+      4. Hard word-boundary split as last resort (never mid-word)
+
+    Returns a list of non-empty stripped strings.
+    Crash-safe: empty or whitespace-only text returns [].
+    """
+    if not text or not text.strip():
+        return []
+
+    paragraphs = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
+
+    chunks = []
+    for para in paragraphs:
+        if len(para) <= soft_max:
+            if _HEADING_RE.match(para):
+                chunks.append(para)
+            else:
+                if chunks and len(chunks[-1]) + len(para) + 1 <= soft_max:
+                    chunks[-1] = chunks[-1] + "\n" + para
+                else:
+                    chunks.append(para)
+        else:
+            # Split large paragraph by heading boundaries first
+            sub_parts = [s.strip() for s in _HEADING_RE.split(para) if s.strip()]
+            for sub in sub_parts:
+                if len(sub) <= soft_max:
+                    chunks.append(sub)
+                else:
+                    # Sentence-level split
+                    sentences = re.split(r"(?<=[.?!])\s+", sub)
+                    current = ""
+                    for sent in sentences:
+                        sent = sent.strip()
+                        if not sent:
+                            continue
+                        candidate = (current + " " + sent).strip()
+                        if len(candidate) <= soft_max:
+                            current = candidate
+                        else:
+                            if current:
+                                chunks.append(current)
+                            if len(sent) > soft_max:
+                                # Hard word-boundary split — last resort
+                                while sent:
+                                    piece = sent[:soft_max]
+                                    # Back up to last space so we don't cut mid-word
+                                    if len(sent) > soft_max and " " in piece:
+                                        piece = piece.rsplit(" ", 1)[0]
+                                    chunks.append(piece)
+                                    sent = sent[len(piece):].lstrip()
+                            else:
+                                current = sent
+                    if current:
+                        chunks.append(current)
+
+    return [c for c in chunks if c.strip()]
+
+
+# ── Pass 2: semantic merge of tiny adjacent chunks ────────────────────────────
+
+def _split_pass2(
+    raw_chunks: list,
+    threshold: float,
+    merge_min: int,
+    merge_max: int,
+) -> list:
+    """
+    Merge adjacent tiny chunks (< merge_min chars) when:
+      - cosine similarity >= threshold, AND
+      - merged length <= merge_max
+
+    Only tiny chunks and their immediate neighbours are embedded,
+    keeping latency proportional to fragment count, not total chunks.
+    """
+    if not raw_chunks:
+        return []
+
+    tiny_indices = [i for i, c in enumerate(raw_chunks) if len(c) < merge_min]
+    if not tiny_indices:
+        return list(raw_chunks)  # fast-path: nothing to merge
+
+    # Collect tiny chunks + their immediate neighbours for batch embedding
+    neighbour_indices = set()
+    for idx in tiny_indices:
+        neighbour_indices.add(idx)
+        if idx > 0:
+            neighbour_indices.add(idx - 1)
+        if idx < len(raw_chunks) - 1:
+            neighbour_indices.add(idx + 1)
+
+    sorted_indices = sorted(neighbour_indices)
+    texts_to_embed = [raw_chunks[i] for i in sorted_indices]
+
+    try:
+        emb_model = get_embedding_model()
+        embeddings_list = emb_model.embed_documents(texts_to_embed)
+    except Exception:
+        logger.warning("Semantic merge embedding failed — skipping merge pass", exc_info=True)
+        return list(raw_chunks)
+
+    emb_map = {idx: emb for idx, emb in zip(sorted_indices, embeddings_list)}
+
+    result = []
+    i = 0
+    while i < len(raw_chunks):
+        chunk = raw_chunks[i]
+        if len(chunk) >= merge_min:
+            result.append(chunk)
+            i += 1
+            continue
+
+        # Try to merge with next chunk
+        if i + 1 < len(raw_chunks):
+            next_chunk = raw_chunks[i + 1]
+            merged_len = len(chunk) + len(next_chunk) + 1
+            emb_a = emb_map.get(i)
+            emb_b = emb_map.get(i + 1)
+            if (
+                emb_a is not None
+                and emb_b is not None
+                and merged_len <= merge_max
+                and _cosine_similarity(emb_a, emb_b) >= threshold
+            ):
+                result.append((chunk + " " + next_chunk).strip())
+                i += 2
+                continue
+
+        # Try to append to previous chunk
+        if result:
+            prev = result[-1]
+            merged_len = len(prev) + len(chunk) + 1
+            emb_a = emb_map.get(i - 1)
+            emb_b = emb_map.get(i)
+            if (
+                emb_a is not None
+                and emb_b is not None
+                and merged_len <= merge_max
+                and _cosine_similarity(emb_a, emb_b) >= threshold
+            ):
+                result[-1] = (prev + " " + chunk).strip()
+                i += 1
+                continue
+
+        # Cannot merge — keep as orphan
+        result.append(chunk)
+        i += 1
+
+    return [c for c in result if c.strip()]
+
+
+# ── Pass 2b: parent context window ───────────────────────────────────────────
+
+def _build_parent_context(chunks: list, idx: int, window: int = 1) -> str:
+    """Return chunk at idx plus up to `window` neighbours on each side."""
+    start = max(0, idx - window)
+    end = min(len(chunks), idx + window + 1)
+    return " ".join(chunks[start:end]).strip()
+
+
+# ── Public entry point ────────────────────────────────────────────────────────
+
+def semantic_chunk(text: str, filename: str, page_number: int, document_id: str) -> list:
+    """
+    Two-pass semantic chunker returning LangChain Document objects.
+
+    Pass 1  — boundary-aware split (paragraph > heading > sentence > hard).
+    Pass 2  — merge adjacent tiny chunks by embedding cosine similarity.
+    Pass 2b — attach small_chunk + parent_chunk to each Document's metadata.
+
+    Guaranteed crash-safe for empty / single-sentence pages (returns []).
+    Metadata keys: document_id, filename, page, chunk_index,
+                   small_chunk (Pass 2b), parent_chunk (Pass 2b).
+    """
+    if not text or not text.strip():
+        logger.debug(
+            "semantic_chunk: empty text filename=%s page=%s — skipping",
+            filename, page_number,
+        )
+        return []
+
+    # Pass 1
+    raw_chunks = _split_pass1(text, soft_max=SEMANTIC_CHUNK_SOFT_MAX)
+    if not raw_chunks:
+        return []
+
+    # Pass 2
+    merge_start = time.time()
+    merged_chunks = _split_pass2(
+        raw_chunks,
+        threshold=SEMANTIC_CHUNK_SIMILARITY_THRESHOLD,
+        merge_min=SEMANTIC_CHUNK_MERGE_MIN,
+        merge_max=SEMANTIC_CHUNK_MERGE_MAX,
+    )
+    merge_elapsed = time.time() - merge_start
+    if merge_elapsed > SEMANTIC_CHUNK_MERGE_WARN_SECS:
+        logger.warning(
+            "Semantic merge took %.2fs (> %.1fs) filename=%s page=%s chunks=%s",
+            merge_elapsed,
+            SEMANTIC_CHUNK_MERGE_WARN_SECS,
+            filename,
+            page_number,
+            len(merged_chunks),
+        )
+
+    # Pass 2b + Document construction
+    try:
+        from langchain_core.documents import Document as _Doc
+    except Exception:
+        from langchain.schema import Document as _Doc  # type: ignore
+
+    documents = []
+    for idx, chunk_text in enumerate(merged_chunks):
+        if not chunk_text.strip():
+            continue
+        meta = {
+            "document_id": document_id,
+            "filename": filename,
+            "page": page_number,
+            "chunk_index": idx,
+        }
+        if SEMANTIC_CHUNK_HIERARCHICAL:
+            meta["small_chunk"] = chunk_text
+            meta["parent_chunk"] = _build_parent_context(merged_chunks, idx)
+        documents.append(_Doc(page_content=chunk_text, metadata=meta))
+
+    return documents
 
 
 def load_generation_model():
@@ -1587,18 +1860,22 @@ def process_pdf(
     if not docs:
         raise HTTPException(status_code=400, detail="No readable pages were found in the PDF.")
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-    chunks = splitter.split_documents(docs)
-    unique_chunks = []
+    # ── Semantic chunking (Pass 1 + Pass 2 + Pass 2b) ────────────────────────
+    # document_id is generated here so it can be embedded in chunk metadata
+    # at construction time, avoiding a second metadata-overwrite loop.
+    document_id = str(uuid.uuid4())
+
+    all_chunks = []
     seen_content = set()
-
-    for chunk in chunks:
-        content = chunk.page_content.strip()
-        if content not in seen_content:
-            seen_content.add(content)
-            unique_chunks.append(chunk)
-
-    chunks = unique_chunks
+    for doc in docs:
+        page_number = doc.metadata.get("page", 0)
+        page_text = doc.page_content or ""
+        for chunk_doc in semantic_chunk(page_text, filename, page_number, document_id):
+            content = chunk_doc.page_content.strip()
+            if content and content not in seen_content:
+                seen_content.add(content)
+                all_chunks.append(chunk_doc)
+    chunks = all_chunks
 
     if not chunks:
         raise HTTPException(status_code=400, detail="No text chunks generated from the PDF. Please check your file.")
@@ -1671,15 +1948,10 @@ def process_pdf(
         "chunk_count": len(chunks),
     }
 
-    for chunk_index, chunk in enumerate(chunks):
-        chunk.metadata.update(
-            {
-                "document_id": document_id,
-                "filename": filename,
-                "chunk_index": chunk_index,
-                "uploaded_at": now,
-            }
-        )
+    # Stamp uploaded_at only — document_id, filename, page, chunk_index are
+    # already set by semantic_chunk() at construction time.
+    for chunk in chunks:
+        chunk.metadata["uploaded_at"] = now
 
     try:
         embeddings = get_embedding_model()
@@ -1741,39 +2013,35 @@ def process_pdf(
                     len(chunks),
                 )
     else:
-        session_id = processing_session_id
-        try:
-            with session_store_lock(session_id):
-                session_dir = persist_vectorstore(session_id, new_vectorstore)
-
-                with sessions_lock:
-                    _cleanup_expired_sessions_unlocked()
-                    _enforce_max_sessions_unlocked()
-                    session = sessions.get(session_id)
-                    if not session:
-                        raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-                    session["vectorstore"] = new_vectorstore
-                    session["documents"] = [uploaded_document]
-                    session["session_dir"] = session_dir
-                    session["created_at"] = session.get("created_at") or now
-                    session["last_accessed"] = now
-                    session["retrieval_cache"] = {}
-                    session.setdefault("chat", [])
-                    persist_session_registry_entry(session_id, session)
-
-                logger.info(
-                    "Created session session_id=%s filename=%s chunks=%s",
-                    session_id,
-                    filename,
-                    len(chunks),
-                )
-        except Exception:
-            if created_placeholder_session and session_id:
-                with sessions_lock:
-                    meta = sessions.pop(session_id, None)
-                if meta:
-                    remove_persisted_session(session_id, meta.get("session_dir"))
-            raise
+        with session_store_lock(session_id := str(uuid.uuid4())):
+            session_secret = generate_session_secret()
+            session_dir = persist_vectorstore(session_id, new_vectorstore)
+            
+            with sessions_lock:
+                _cleanup_expired_sessions_unlocked()
+                _enforce_max_sessions_unlocked()
+                if processing_session_id in processing_progress:
+                    processing_progress[session_id] = processing_progress.pop(processing_session_id)
+                processing_session_id = session_id
+                session_lock = threading.Lock()
+                sessions[session_id] = {
+                    "vectorstore": new_vectorstore,
+                    "lock": session_lock,
+                    "documents": [uploaded_document],
+                    "session_secret": session_secret,
+                    "session_dir": session_dir,
+                    "created_at": now,
+                    "last_accessed": now,
+                    "retrieval_cache": {},
+                    "chat": [],
+                }
+                persist_session_registry_entry(session_id, sessions[session_id])
+            logger.info(
+                "Created session session_id=%s filename=%s chunks=%s",
+                session_id,
+                filename,
+                len(chunks),
+            )
 
 
     with sessions_lock:
