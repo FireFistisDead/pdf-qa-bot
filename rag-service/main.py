@@ -10,6 +10,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from dotenv import load_dotenv
 from rank_bm25 import BM25Okapi
+from pdf_parse_worker import _extract_pdf_text_worker
 from langchain_community.vectorstores import FAISS
 import numpy as np
 import json
@@ -130,77 +131,6 @@ def standard_error_response(status_code: int, detail: str, **extra):
         **extra,
     }
     return JSONResponse(status_code=status_code, content=payload)
-
-def _extract_pdf_text_worker(
-    pdf_path: str,
-    max_pages: int,
-    max_chars: int,
-    out_queue: "multiprocessing.Queue",
-):
-    """
-    Runs in a separate process so the parent can hard-timeout / terminate if PDF parsing
-    becomes pathological (DoS-grade PDFs).
-    """
-    try:
-        from pypdf import PdfReader  # local import to keep startup light
-
-        reader = PdfReader(pdf_path, strict=False)
-
-        # Some PDFs are encrypted (or malformed) and can throw lazily; attempt decrypt best-effort.
-        if getattr(reader, "is_encrypted", False):
-            try:
-                reader.decrypt("")  # type: ignore[attr-defined]
-            except Exception:
-                out_queue.put({"ok": False, "error": "Unable to read this PDF. It may be encrypted."})
-                return
-
-        pages = getattr(reader, "pages", [])
-        page_count = len(pages)
-        if page_count == 0:
-            out_queue.put({"ok": False, "error": "No readable pages were found in the PDF."})
-            return
-        if page_count > max_pages:
-            out_queue.put(
-                {
-                    "ok": False,
-                    "error": f"PDF has too many pages ({page_count}). Max allowed is {max_pages}.",
-                    "page_count": page_count,
-                }
-            )
-            return
-
-        extracted = []
-        used = 0
-        for idx, page in enumerate(pages):
-            if idx >= max_pages:
-                break
-            text = page.extract_text() or ""
-            if not text.strip():
-                continue
-
-            remaining = max_chars - used
-            if remaining <= 0:
-                break
-            if len(text) > remaining:
-                text = text[:remaining]
-            used += len(text)
-            extracted.append({"page": idx, "text": text})
-
-        if not extracted:
-            out_queue.put({"ok": False, "error": "No readable text was found in the PDF."})
-            return
-
-        out_queue.put(
-            {
-                "ok": True,
-                "page_count": page_count,
-                "extracted": extracted,
-                "extracted_chars": used,
-            }
-        )
-    except Exception as exc:
-        out_queue.put({"ok": False, "error": "Unable to read this PDF. It may be corrupted.", "details": str(exc)})
-
 
 def extract_pdf_documents_sandboxed(pdf_path: str, filename: str):
     """
@@ -1364,6 +1294,22 @@ def format_context(documents, max_chars=7000):
     return "\n\n".join(context_parts)
 
 
+def citation_source_for_document(document, index):
+    page = document.metadata.get("page")
+    display_page = page + 1 if isinstance(page, int) else None
+    text = concise_excerpt(document.page_content, 250)
+
+    return {
+        "source_id": index + 1,
+        "document": document_display_name(document) or "Unknown Document",
+        "document_id": document.metadata.get("document_id"),
+        "page": display_page,
+        "text": text,
+        "preview": concise_excerpt(document.page_content, 180),
+        "chunk_index": document.metadata.get("chunk_index", index),
+    }
+
+
 def collect_index_documents(vectorstore):
     docstore = getattr(vectorstore, "docstore", None)
     stored_docs = getattr(docstore, "_dict", {}) if docstore else {}
@@ -1381,10 +1327,26 @@ HF_GENERATION_MODEL = os.getenv("HF_GENERATION_MODEL", "google/flan-t5-base")
 generation_tokenizer = None
 generation_model = None
 generation_is_encoder_decoder = False
+embedding_model = None
 
-embedding_model = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
-)
+
+def get_embedding_model():
+    global embedding_model
+    if embedding_model is not None and hasattr(embedding_model, "embed_documents"):
+        return embedding_model
+
+    with model_load_lock:
+        if embedding_model is None or not hasattr(embedding_model, "embed_documents"):
+            logger.info("Loading embedding model")
+            loaded_embedding_model = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-MiniLM-L6-v2"
+            )
+            if loaded_embedding_model is None or not hasattr(loaded_embedding_model, "embed_documents"):
+                raise RuntimeError("Embedding model failed to initialize.")
+            embedding_model = loaded_embedding_model
+            logger.info("Embedding model loaded successfully")
+
+    return embedding_model
 
 
 def load_generation_model():
@@ -1689,7 +1651,20 @@ def process_pdf(
         )
 
     try:
-        new_vectorstore = FAISS.from_documents(chunks, embedding_model)
+        embeddings = get_embedding_model()
+    except Exception:
+        logger.exception("Failed to load embedding model filename=%s", filename)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Embedding model is unavailable. Start the RAG service once with internet access "
+                "to download sentence-transformers/all-MiniLM-L6-v2, or pre-download it into the "
+                "local Hugging Face cache."
+            ),
+        )
+
+    try:
+        new_vectorstore = FAISS.from_documents(chunks, embeddings)
     except Exception as exc:
         logger.exception("Failed to create vectorstore filename=%s", filename)
         raise HTTPException(status_code=500, detail="Failed to index the uploaded PDF.")
@@ -1981,23 +1956,10 @@ def ask_question(data: Question):
         for doc in docs
     })
 
-    citation_sources = []
-
-    for idx, doc in enumerate(docs):
-
-        citation_sources.append({
-            "source_id": idx + 1,
-            "document": document_display_name(doc),
-            "page": (
-                doc.metadata.get("page", 0) + 1
-                if "page" in doc.metadata
-                else None
-            ),
-            "preview": concise_excerpt(
-                doc.page_content,
-                180
-            ),
-        })
+    citation_sources = [
+        citation_source_for_document(doc, idx)
+        for idx, doc in enumerate(docs)
+    ]
 
     source_id_by_key = {
         document_dedupe_key(doc): idx + 1

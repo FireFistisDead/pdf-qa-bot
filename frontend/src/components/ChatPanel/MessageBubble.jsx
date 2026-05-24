@@ -1,4 +1,5 @@
 import React from "react";
+import { Button } from "react-bootstrap";
 import ReactMarkdown from "react-markdown";
 
 const MODE_BADGE = {
@@ -108,9 +109,14 @@ const MessageBubble = ({ msg, darkMode }) => {
       Sources Used
     </div>
 
-    {msg.sources.map((source, index) => (
+    {msg.sources.map((source, index) => {
+      const sourceText = getSourceText(source);
+      const sourceLabel = getSourceLabel(source);
+      const canOpenPage = hasOpenablePage(source);
+
+      return (
       <div
-        key={index}
+        key={`${source.document_id || sourceLabel}-${source.page || "unknown"}-${index}`}
         style={{
           padding: "10px",
           marginBottom: "10px",
@@ -122,7 +128,7 @@ const MessageBubble = ({ msg, darkMode }) => {
         }}
       >
         <div style={{ fontWeight: 600 }}>
-          {source.document}
+          {sourceLabel}
         </div>
 
         <div
@@ -131,19 +137,37 @@ const MessageBubble = ({ msg, darkMode }) => {
             marginBottom: "6px",
           }}
         >
-          Page {source.page}
+          {source.page ? `Page ${source.page}` : "Source page unavailable"}
         </div>
 
-        <div
+        {sourceText && (
+          <div
+            style={{
+              opacity: 0.9,
+              lineHeight: 1.5,
+            }}
+          >
+            "{sourceText}"
+          </div>
+        )}
+
+        <Button
+          variant={darkMode ? "outline-light" : "outline-dark"}
+          size="sm"
+          disabled={!canOpenPage}
+          onClick={() => onOpenSource?.(source)}
           style={{
-            opacity: 0.9,
-            lineHeight: 1.5,
+            marginTop: "10px",
+            borderRadius: "8px",
+            fontSize: "12px",
+            fontWeight: 600,
           }}
         >
-          {source.preview}
-        </div>
+          Open Page
+        </Button>
       </div>
-    ))}
+      );
+    })}
   </div>
 )}
       </div>

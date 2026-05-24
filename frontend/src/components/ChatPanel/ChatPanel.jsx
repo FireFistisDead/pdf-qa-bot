@@ -23,6 +23,7 @@ const ChatPanel = ({
   currentPdfSessionId,
   onUpdateLastBotMessage,
   onAppendMessage,
+  onOpenSource,
   handleClearChat,
 }) => {
   const [question, setQuestion] = useState("");
@@ -254,7 +255,12 @@ const askQuestion = async () => {
                 </div>
               </div>
               {currentChat.map((msg, i) => (
-                <MessageBubble key={i} msg={msg} darkMode={darkMode} />
+                <MessageBubble
+                  key={i}
+                  msg={msg}
+                  darkMode={darkMode}
+                  onOpenSource={onOpenSource}
+                />
               ))}
 
               {asking && (
