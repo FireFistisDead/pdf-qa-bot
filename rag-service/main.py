@@ -1690,8 +1690,7 @@ def processing_status(session_id: str):
     return progress
 
 
-@app.post("/ask")
-def ask_question(data: Question):
+def prepare_ask_generation(data: Question):
     cleanup_expired_sessions()
 
     question = (data.question or "").strip()
@@ -1803,9 +1802,11 @@ def ask_question(data: Question):
             len(docs),
         )
         return {
-            "answer": INSUFFICIENT_CONTEXT_MESSAGE,
-            "sources": [],
-            "retrieval_type": "refusal",
+            "response_payload": {
+                "answer": INSUFFICIENT_CONTEXT_MESSAGE,
+                "sources": [],
+                "retrieval_type": "refusal",
+            }
         }
 
     pages = sorted(set(
@@ -1876,10 +1877,12 @@ def ask_question(data: Question):
             retrieved_sources,
         )
         return {
-            "answer": grounded_answer,
-            "sources": citation_sources,
-            "retrieval_type": "citation-aware",
-            "cache_hit": cache_hit,
+            "response_payload": {
+                "answer": grounded_answer,
+                "sources": citation_sources,
+                "retrieval_type": "citation-aware",
+                "cache_hit": cache_hit,
+            }
         }
     if grounded_answer:
         if ASK_REQUIRE_CITATIONS and not answer_contains_citation(grounded_answer, len(docs)):
@@ -1892,9 +1895,11 @@ def ask_question(data: Question):
                 retrieved_sources,
             )
             return {
-                "answer": INSUFFICIENT_CONTEXT_MESSAGE,
-                "sources": citation_sources,
-                "retrieval_type": "refusal",
+                "response_payload": {
+                    "answer": INSUFFICIENT_CONTEXT_MESSAGE,
+                    "sources": citation_sources,
+                    "retrieval_type": "refusal",
+                }
             }
         logger.info(
             "Returning grounded answer session_id=%s intent=%s retrieved_chunks=%s sources=%s",
@@ -1905,10 +1910,11 @@ def ask_question(data: Question):
         )
 
         return {
-            "answer": grounded_answer,
-            "sources": citation_sources,
-            "retrieval_type": "citation-aware",
-            
+            "response_payload": {
+                "answer": grounded_answer,
+                "sources": citation_sources,
+                "retrieval_type": "citation-aware",
+            }
         }
 
     prompt = (
@@ -1937,37 +1943,139 @@ def ask_question(data: Question):
         retrieved_sources,
     )
 
-    answer = generate_response(
-        prompt,
-        max_new_tokens=256
-    )
-
-    response_payload = {
-        "answer": answer,
+    return {
+        "prompt": prompt,
+        "question": question,
+        "session_id": session_id,
         "sources": citation_sources,
         "retrieval_type": "citation-aware",
         "cache_hit": cache_hit,
     }
 
+
+def save_ask_chat(session_id: str, question: str, answer: str, sources: list):
     with sessions_lock:
 
         session = sessions.get(session_id)
 
         if session:
 
-            retrieval_cache = session.setdefault(
-                "retrieval_cache",
-                {}
-            )
-
             session.setdefault("chat", []).append({
                 "question": question,
                 "answer": answer,
-                "sources": citation_sources
+                "sources": sources
             })
             save_sessions_unlocked()
 
+
+def stream_response_tokens(prompt: str, max_new_tokens: int = 256):
+    streamer = TextIteratorStreamer(
+        tokenizer,
+        skip_prompt=True,
+        skip_special_tokens=True,
+    )
+
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True)
+    try:
+        model_device = next(model.parameters()).device
+        inputs = {key: value.to(model_device) for key, value in inputs.items()}
+    except Exception:
+        pass
+
+    generation_kwargs = {
+        **inputs,
+        "max_new_tokens": max_new_tokens,
+        "streamer": streamer,
+    }
+
+    if getattr(tokenizer, "pad_token_id", None) is not None:
+        generation_kwargs["pad_token_id"] = tokenizer.pad_token_id
+    if getattr(tokenizer, "eos_token_id", None) is not None:
+        generation_kwargs["eos_token_id"] = tokenizer.eos_token_id
+
+    generation_error = []
+
+    def run_generation():
+        try:
+            with generation_lock:
+                model.generate(**generation_kwargs)
+        except Exception as exc:
+            logger.exception("Streaming generation failed")
+            generation_error.append(exc)
+            try:
+                streamer.end()
+            except Exception:
+                pass
+
+    generation_thread = threading.Thread(target=run_generation, daemon=True)
+    generation_thread.start()
+
+    yielded = False
+    for token in streamer:
+        yielded = True
+        yield token
+
+    generation_thread.join()
+    if generation_error and not yielded:
+        yield "Unable to generate an answer right now. Please try again later."
+
+
+@app.post("/ask")
+def ask_question(data: Question):
+    prepared = prepare_ask_generation(data)
+    if "response_payload" in prepared:
+        return prepared["response_payload"]
+
+    answer = generate_response(
+        prepared["prompt"],
+        max_new_tokens=256
+    )
+
+    response_payload = {
+        "answer": answer,
+        "sources": prepared["sources"],
+        "retrieval_type": prepared["retrieval_type"],
+        "cache_hit": prepared["cache_hit"],
+    }
+
+    save_ask_chat(
+        prepared["session_id"],
+        prepared["question"],
+        answer,
+        prepared["sources"],
+    )
+
     return response_payload
+
+
+@app.post("/ask/stream")
+def ask_question_stream(data: Question):
+    prepared = prepare_ask_generation(data)
+    if "response_payload" in prepared:
+        return StreamingResponse(
+            iter([prepared["response_payload"]["answer"]]),
+            media_type="text/plain; charset=utf-8",
+        )
+
+    def token_stream():
+        chunks = []
+        for token in stream_response_tokens(prepared["prompt"], max_new_tokens=256):
+            chunks.append(token)
+            yield token
+
+        answer = "".join(chunks).strip()
+        if answer:
+            save_ask_chat(
+                prepared["session_id"],
+                prepared["question"],
+                answer,
+                prepared["sources"],
+            )
+
+    return StreamingResponse(
+        token_stream(),
+        media_type="text/plain; charset=utf-8",
+    )
 
 @app.post("/summarize")
 def summarize_pdf(data: SummarizeRequest):
