@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from rank_bm25 import BM25Okapi
 from langchain_community.vectorstores import FAISS
 import numpy as np
-import os
+import json
 import uuid
 import uvicorn
 import torch
@@ -38,8 +38,47 @@ logging.basicConfig(
 )
 
 app = FastAPI()
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+UPLOADS_DIR = (BASE_DIR / "uploads").resolve()
+DATA_DIR = (BASE_DIR / "rag-service" / "data").resolve()
+FAISS_DIR = DATA_DIR / "faiss"
+SESSIONS_FILE = DATA_DIR / "sessions.json"
+
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(FAISS_DIR, exist_ok=True)
+
+def load_sessions():
+    if SESSIONS_FILE.exists():
+        try:
+            with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for sid, meta in data.items():
+                    meta["lock"] = threading.Lock()
+                    meta["vectorstore"] = None
+                return data
+        except Exception as e:
+            logger.error(f"Failed to load sessions: {e}")
+    return {}
+
+def save_sessions_unlocked():
+    try:
+        data = {}
+        for sid, meta in sessions.items():
+            data[sid] = {
+                "created_at": meta.get("created_at"),
+                "last_accessed": meta.get("last_accessed"),
+                "documents": meta.get("documents", []),
+                "retrieval_cache": meta.get("retrieval_cache", {}),
+                "chat": meta.get("chat", []),
+            }
+        with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception as e:
+        logger.error(f"Failed to save sessions: {e}")
+
 # Global session store
-sessions = {}
+sessions = load_sessions()
 processing_progress = {}
 def update_processing_progress(session_id, stage, progress):
     processing_progress[session_id] = {
@@ -273,8 +312,8 @@ model_load_lock = threading.Lock()
 generation_lock = threading.Lock()
 
 # Configurable session TTL and max cap
-SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "30"))
-MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "100"))
+SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "43200"))  # 30 days default for persistence
+MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "1000"))
 MAX_DOCUMENTS_PER_SESSION = int(os.getenv("MAX_DOCUMENTS_PER_SESSION", "5"))
 MAX_CHUNKS_PER_SESSION = int(os.getenv("MAX_CHUNKS_PER_SESSION", "2000"))
 ASK_RETRIEVAL_CANDIDATES = int(os.getenv("ASK_RETRIEVAL_CANDIDATES", "12"))
@@ -312,8 +351,7 @@ OVERVIEW_QUERY_TERMS = {
     "multiple", "overall", "overview", "summarize", "topics",
 }
 INSUFFICIENT_CONTEXT_MESSAGE = "The uploaded documents do not contain enough information to answer this question."
-BASE_DIR = Path(__file__).resolve().parent.parent
-UPLOADS_DIR = (BASE_DIR / "uploads").resolve()
+
 UPLOAD_FILENAME_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyz"
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -351,6 +389,8 @@ def cleanup_expired_sessions():
             del sessions[oldest]
             evicted_count += 1
         active_sessions = len(sessions)
+        if expired or evicted_count:
+            save_sessions_unlocked()
     if expired or evicted_count:
         logger.info(
             "Session cleanup completed expired=%s evicted=%s active=%s",
@@ -1120,15 +1160,31 @@ class SummarizeRequest(BaseModel):
     pdf: str | None = None
     session_id: UUID
 
+@app.get("/sessions")
+def get_sessions():
+    cleanup_expired_sessions()
+    with sessions_lock:
+        return [
+            {
+                "session_id": sid,
+                "created_at": meta.get("created_at"),
+                "last_accessed": meta.get("last_accessed"),
+                "documents": meta.get("documents", []),
+                "chat": meta.get("chat", []),
+            }
+            for sid, meta in sorted(sessions.items(), key=lambda x: x[1].get("last_accessed", 0), reverse=True)
+        ]
 
 @app.post("/process-pdf")
 def process_pdf(
     file: UploadFile = File(...),
-    session_id: str | None = Form(None)
+    session_id: str | None = Form(None),
+    original_filename: str | None = Form(None)
 ):
     cleanup_expired_sessions()
 
-    filename = file.filename or "uploaded.pdf"
+    # If original_filename is provided, use it for display, otherwise fallback to the file's name (which might be a UUID)
+    filename = original_filename or file.filename or "uploaded.pdf"
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF documents are supported.")
     requested_session_id = (session_id or "").strip() or None
@@ -1242,6 +1298,7 @@ def process_pdf(
     uploaded_document = {
         "document_id": document_id,
         "filename": filename,
+        "static_url": f"/uploads/{os.path.basename(file.filename)}" if file.filename else None,
         "uploaded_at": now,
         "chunk_count": len(chunks),
     }
@@ -1271,6 +1328,12 @@ def process_pdf(
             if "lock" not in session:
                 session["lock"] = threading.Lock()
             session_lock = session["lock"]
+            if not session.get("vectorstore"):
+                try:
+                    session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / requested_session_id), embedding_model, allow_dangerous_deserialization=True)
+                except Exception as e:
+                    logger.error(f"Failed to lazy load vectorstore: {e}")
+                    raise HTTPException(status_code=500, detail="Failed to load session index.")
             vectorstore = session["vectorstore"]
         else:
             _cleanup_expired_sessions_unlocked()
@@ -1278,6 +1341,7 @@ def process_pdf(
             session_id = str(uuid.uuid4())
             temp_tracking_id = session_id
             session_lock = threading.Lock()
+            new_vectorstore.save_local(str(FAISS_DIR / session_id))
             sessions[session_id] = {
                 "vectorstore": new_vectorstore,
                 "lock": session_lock,
@@ -1285,7 +1349,9 @@ def process_pdf(
                 "created_at": now,
                 "last_accessed": now,
                 "retrieval_cache": {},
+                "chat": [],
             }
+            save_sessions_unlocked()
             logger.info(
                 "Created session session_id=%s filename=%s chunks=%s",
                 session_id,
@@ -1297,6 +1363,7 @@ def process_pdf(
         with session_lock:
             try:
                 vectorstore.merge_from(new_vectorstore)
+                vectorstore.save_local(str(FAISS_DIR / requested_session_id))
             except Exception:
                 logger.exception(
                     "Failed to merge vectorstore session_id=%s filename=%s",
@@ -1311,6 +1378,7 @@ def process_pdf(
             session.setdefault("documents", []).append(uploaded_document)
             session["last_accessed"] = now
             session["retrieval_cache"] = {}
+            save_sessions_unlocked()
             session_id = requested_session_id
             logger.info(
                 "Merged PDF into session session_id=%s filename=%s documents=%s chunks=%s",
@@ -1374,7 +1442,7 @@ def ask_question(data: Question):
 
         session = _touch_session_unlocked(session_id)
 
-        if not session or not session.get("vectorstore"):
+        if not session:
             raise HTTPException(
                 status_code=404,
                 detail="Session expired or invalid. Please re-upload your PDFs."
@@ -1384,6 +1452,12 @@ def ask_question(data: Question):
             session["lock"] = threading.Lock()
 
         session_lock = session["lock"]
+        if not session.get("vectorstore"):
+            try:
+                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), embedding_model, allow_dangerous_deserialization=True)
+            except Exception as e:
+                logger.error(f"Failed to lazy load vectorstore: {e}")
+                raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
 
         retrieval_cache = session.setdefault("retrieval_cache", {})
@@ -1600,6 +1674,12 @@ def ask_question(data: Question):
                 "sources": citation_sources,
                 "retrieval_type": "citation-aware",
             }
+            session.setdefault("chat", []).append({
+                "question": question,
+                "answer": answer,
+                "sources": citation_sources
+            })
+            save_sessions_unlocked()
 
     return response_payload
 
@@ -1609,11 +1689,17 @@ def summarize_pdf(data: SummarizeRequest):
     session_id = str(data.session_id)
     with sessions_lock:
         session = _touch_session_unlocked(session_id)
-        if not session or not session.get("vectorstore"):
+        if not session:
             raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
         if "lock" not in session:
             session["lock"] = threading.Lock()
         session_lock = session["lock"]
+        if not session.get("vectorstore"):
+            try:
+                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), embedding_model, allow_dangerous_deserialization=True)
+            except Exception as e:
+                logger.error(f"Failed to lazy load vectorstore: {e}")
+                raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
         uploaded_documents = list(session.get("documents", []))
 
