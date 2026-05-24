@@ -337,13 +337,51 @@ const sendUploadError = (res, statusCode, message, details = message) => {
   });
 };
 
-const extractServiceDetails = (err) => {
-  const upstreamDetails = err.response?.data;
+const stringifyServiceDetails = (details) => {
+  if (details == null) return "";
+
+  if (Buffer.isBuffer(details)) {
+    return details.toString("utf8").trim();
+  }
+
+  if (typeof details === "string") {
+    return details.trim();
+  }
+
+  if (typeof details === "object") {
+    const nested =
+      stringifyServiceDetails(details.detail) ||
+      stringifyServiceDetails(details.error) ||
+      stringifyServiceDetails(details.message);
+
+    if (nested) return nested;
+
+    const hasKnownErrorField =
+      Object.prototype.hasOwnProperty.call(details, "detail") ||
+      Object.prototype.hasOwnProperty.call(details, "error") ||
+      Object.prototype.hasOwnProperty.call(details, "message");
+
+    if (hasKnownErrorField && Object.keys(details).length <= 3) {
+      return "";
+    }
+
+    try {
+      const serialized = JSON.stringify(details);
+      return serialized === "{}" ? "" : serialized;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  return String(details).trim();
+};
+
+const extractServiceDetails = (err, fallbackMessage = "Upstream service request failed.") => {
   return (
-    upstreamDetails?.detail ||
-    upstreamDetails?.error ||
-    upstreamDetails ||
-    err.message
+    stringifyServiceDetails(err.response?.data) ||
+    stringifyServiceDetails(err.message) ||
+    stringifyServiceDetails(err.code) ||
+    fallbackMessage
   );
 };
 
@@ -419,7 +457,7 @@ if (signatureBuffer.toString() !== "%PDF") {
 
     const statusCode =
       err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
-    const details = extractServiceDetails(err);
+    const details = extractServiceDetails(err, "PDF processing failed");
     console.error("Upload processing failed:", details);
 
     return res.status(statusCode).json({
@@ -457,7 +495,7 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
     });
   } catch (err) {
     const statusCode = err.response?.status || 500;
-    const details = extractServiceDetails(err);
+    const details = extractServiceDetails(err, "Error answering question");
     console.error("Question answering failed:", details);
 
     return res.status(statusCode).json({
@@ -503,7 +541,7 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
     });
   } catch (err) {
     const statusCode = err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
-    const details = extractServiceDetails(err);
+    const details = extractServiceDetails(err, "Error answering question");
     console.error("Streaming question answering failed:", details);
     return res.status(statusCode).json({
       error: typeof details === "string" ? details : "Error answering question",
@@ -532,7 +570,7 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
     });
   } catch (err) {
     const statusCode = err.response?.status || 500;
-    const details = extractServiceDetails(err);
+    const details = extractServiceDetails(err, "Error summarizing PDF");
     console.error("Summarization failed:", details);
 
     return res.status(statusCode).json({
@@ -594,4 +632,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, askSchema, summarizeSchema };
+module.exports = { app, askSchema, summarizeSchema, extractServiceDetails };
