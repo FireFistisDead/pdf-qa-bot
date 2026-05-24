@@ -19,6 +19,7 @@ const LandingNavbar = () => {
         <a href="#features" className="navbar-link">Features</a>
         <a href="#how-it-works" className="navbar-link">How It Works</a>
         <a href="#pricing" className="navbar-link">Pricing</a>
+        <a href="#faq" className="navbar-link">FAQ</a>
       </div>
 
       {/* Actions */}
