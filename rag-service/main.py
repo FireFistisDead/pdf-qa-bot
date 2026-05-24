@@ -1,9 +1,10 @@
 from fastapi import FastAPI, Request, HTTPException, File, UploadFile, Form
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field, field_validator
 from pathlib import Path
 from uuid import UUID
+from contextlib import contextmanager
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -11,17 +12,27 @@ from dotenv import load_dotenv
 from rank_bm25 import BM25Okapi
 from langchain_community.vectorstores import FAISS
 import numpy as np
-import os
-import shutil
+import json
 import uuid
 import uvicorn
 import torch
 import multiprocessing
+import os
+import secrets
+import shutil
+import sys
+fcntl = None
+msvcrt = None
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 from transformers import (
     AutoConfig,
     AutoTokenizer,
     AutoModelForSeq2SeqLM,
     AutoModelForCausalLM,
+    TextIteratorStreamer,
 )
 import threading
 import time
@@ -30,8 +41,6 @@ import re
 
 load_dotenv()
 
-
-PERSIST_DIR = "faiss_store"
 # ── Logger (must be defined before exception handlers that use it) ─────────────
 logger = logging.getLogger("pdf_qa_rag")
 logging.basicConfig(
@@ -40,8 +49,50 @@ logging.basicConfig(
 )
 
 app = FastAPI()
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+UPLOADS_DIR = (BASE_DIR / "uploads").resolve()
+DATA_DIR = (BASE_DIR / "rag-service" / "data").resolve()
+FAISS_DIR = DATA_DIR / "faiss"
+SESSIONS_FILE = DATA_DIR / "sessions.json"
+PERSIST_PATH = DATA_DIR
+SESSION_REGISTRY_FILE = PERSIST_PATH / "session_registry.json"
+SESSION_REGISTRY_LOCK_FILE = PERSIST_PATH / "session_registry.lock"
+
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(FAISS_DIR, exist_ok=True)
+
+def load_sessions():
+    if SESSIONS_FILE.exists():
+        try:
+            with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for sid, meta in data.items():
+                    meta["lock"] = threading.Lock()
+                    meta["vectorstore"] = None
+                return data
+        except Exception as e:
+            logger.error(f"Failed to load sessions: {e}")
+    return {}
+
+def save_sessions_unlocked():
+    try:
+        data = {}
+        for sid, meta in sessions.items():
+            data[sid] = {
+                "created_at": meta.get("created_at"),
+                "last_accessed": meta.get("last_accessed"),
+                "documents": meta.get("documents", []),
+                "retrieval_cache": meta.get("retrieval_cache", {}),
+                "chat": meta.get("chat", []),
+            }
+        with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception as e:
+        logger.error(f"Failed to save sessions: {e}")
+
 # Global session store
-sessions = {}
+sessions = load_sessions()
 processing_progress = {}
 def update_processing_progress(session_id, stage, progress):
     processing_progress[session_id] = {
@@ -66,6 +117,10 @@ def internal_token_valid(provided: str | None, expected: str) -> bool:
         return True
     candidate = (provided or "").strip()
     return bool(candidate) and candidate == expected
+
+
+def generate_session_secret() -> str:
+    return secrets.token_urlsafe(32)
 
 
 def standard_error_response(status_code: int, detail: str, **extra):
@@ -236,7 +291,7 @@ async def internal_auth_middleware(request: Request, call_next):
         "/process-pdf",
         "/ask",
         "/summarize",
-        "/upload_pdf",
+        "/validate-session-write",
     }:
         provided = request.headers.get("X-Internal-Token")
         if not internal_token_valid(provided, INTERNAL_RAG_TOKEN):
@@ -276,8 +331,8 @@ model_load_lock = threading.Lock()
 generation_lock = threading.Lock()
 
 # Configurable session TTL and max cap
-SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "30"))
-MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "100"))
+SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "43200"))  # 30 days default for persistence
+MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "1000"))
 MAX_DOCUMENTS_PER_SESSION = int(os.getenv("MAX_DOCUMENTS_PER_SESSION", "5"))
 MAX_CHUNKS_PER_SESSION = int(os.getenv("MAX_CHUNKS_PER_SESSION", "2000"))
 ASK_RETRIEVAL_CANDIDATES = int(os.getenv("ASK_RETRIEVAL_CANDIDATES", "12"))
@@ -297,6 +352,7 @@ ASK_REQUIRE_CITATIONS = os.getenv("ASK_REQUIRE_CITATIONS", "true").strip().lower
     "yes",
     "on",
 }
+RETRIEVAL_CACHE_LIMIT = int(os.getenv("RETRIEVAL_CACHE_LIMIT", "25"))
 QUERY_STOPWORDS = {
     "about", "according", "also", "and", "are", "between", "compare",
     "describe", "does", "document", "documents", "explain", "from", "give",
@@ -315,8 +371,7 @@ OVERVIEW_QUERY_TERMS = {
     "multiple", "overall", "overview", "summarize", "topics",
 }
 INSUFFICIENT_CONTEXT_MESSAGE = "The uploaded documents do not contain enough information to answer this question."
-BASE_DIR = Path(__file__).resolve().parent.parent
-UPLOADS_DIR = (BASE_DIR / "uploads").resolve()
+
 UPLOAD_FILENAME_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyz"
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -335,11 +390,210 @@ def now_ts():
     return time.time()
 
 
+def session_expires_at(last_accessed: float) -> float:
+    return last_accessed + (SESSION_TTL_MINUTES * 60)
+
+
+def normalize_session_id(session_id: str) -> str:
+    if not session_id or not str(session_id).strip():
+        raise ValueError("Missing session id.")
+    return str(UUID(str(session_id).strip()))
+
+
+def get_session_dir(session_id: str) -> str:
+    safe_session_id = normalize_session_id(session_id)
+    return os.fspath(PERSIST_PATH / safe_session_id)
+
+
+@contextmanager
+def session_store_lock(session_id: str):
+    safe_session_id = normalize_session_id(session_id)
+    PERSIST_PATH.mkdir(parents=True, exist_ok=True)
+    lock_path = PERSIST_PATH / f"{safe_session_id}.lock"
+    with open(lock_path, "a+b") as lock_file:
+        if fcntl:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        elif msvcrt:
+            lock_file.seek(0)
+            lock_file.write(b"0")
+            lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            if fcntl:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            elif msvcrt:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+@contextmanager
+def session_registry_lock():
+    PERSIST_PATH.mkdir(parents=True, exist_ok=True)
+    with open(SESSION_REGISTRY_LOCK_FILE, "a+b") as lock_file:
+        if fcntl:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        elif msvcrt:
+            lock_file.seek(0)
+            lock_file.write(b"0")
+            lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            if fcntl:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            elif msvcrt:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def read_session_registry_unlocked() -> dict:
+    if not SESSION_REGISTRY_FILE.exists():
+        return {}
+    try:
+        with open(SESSION_REGISTRY_FILE, "r", encoding="utf-8") as registry_file:
+            registry = json.load(registry_file)
+            return registry if isinstance(registry, dict) else {}
+    except Exception:
+        logger.exception("Failed to read session registry")
+        return {}
+
+
+def read_session_registry() -> dict:
+    with session_registry_lock():
+        return read_session_registry_unlocked()
+
+
+def write_session_registry_unlocked(registry: dict):
+    PERSIST_PATH.mkdir(parents=True, exist_ok=True)
+    temp_path = SESSION_REGISTRY_FILE.with_suffix(".tmp")
+    with open(temp_path, "w", encoding="utf-8") as registry_file:
+        json.dump(registry, registry_file, separators=(",", ":"), sort_keys=True)
+    os.replace(temp_path, SESSION_REGISTRY_FILE)
+
+
+def write_session_registry(registry: dict):
+    with session_registry_lock():
+        write_session_registry_unlocked(registry)
+
+
+def persist_session_registry_entry(session_id: str, meta: dict):
+    with session_registry_lock():
+        registry = read_session_registry_unlocked()
+        last_accessed = meta.get("last_accessed", now_ts())
+        session_dir = get_session_dir(session_id)
+        registry[session_id] = {
+            "created_at": meta.get("created_at", last_accessed),
+            "last_accessed": last_accessed,
+            "expires_at": session_expires_at(last_accessed),
+            "documents": list(meta.get("documents", [])),
+            "session_dir": session_dir,
+            "session_secret": meta.get("session_secret"),
+        }
+        write_session_registry_unlocked(registry)
+
+
+def remove_persisted_session(session_id: str, session_dir: str | None = None):
+    with session_registry_lock():
+        registry = read_session_registry_unlocked()
+        registry_entry = registry.pop(session_id, None)
+        write_session_registry_unlocked(registry)
+
+    try:
+        target_path = Path(get_session_dir(session_id)).resolve()
+        if target_path.is_dir() and PERSIST_PATH in target_path.parents:
+            shutil.rmtree(target_path)
+    except Exception:
+        logger.exception("Failed to remove persisted session session_id=%s", session_id)
+
+
+def cleanup_expired_persisted_sessions(extra_session_dirs: dict | None = None):
+    now = now_ts()
+    expired_dirs = {}
+    with session_registry_lock():
+        registry = read_session_registry_unlocked()
+        expired_ids = [
+            sid
+            for sid, entry in registry.items()
+            if now > float(entry.get("expires_at", 0) or 0)
+        ]
+        for sid in extra_session_dirs or {}:
+            if sid not in expired_ids:
+                expired_ids.append(sid)
+
+        for sid in expired_ids:
+            expired_dirs[sid] = get_session_dir(sid)
+            registry.pop(sid, None)
+
+        if expired_ids:
+            write_session_registry_unlocked(registry)
+
+    for sid, session_dir in expired_dirs.items():
+        try:
+            target_path = Path(get_session_dir(sid)).resolve()
+            if target_path.is_dir() and PERSIST_PATH in target_path.parents:
+                shutil.rmtree(target_path)
+        except Exception:
+            logger.exception("Failed to remove persisted session session_id=%s", sid)
+
+
+def persist_vectorstore(session_id: str, vectorstore):
+    session_dir = get_session_dir(session_id)
+    os.makedirs(session_dir, exist_ok=True)
+    vectorstore.save_local(session_dir)
+    return session_dir
+
+
+def _recover_session_unlocked(session_id: str):
+    registry = read_session_registry()
+    entry = registry.get(session_id)
+    if not entry:
+        return None
+
+    last_accessed = float(entry.get("last_accessed", 0) or 0)
+    if now_ts() > float(entry.get("expires_at", session_expires_at(last_accessed))):
+        remove_persisted_session(session_id, entry.get("session_dir"))
+        return None
+
+    session_dir = get_session_dir(session_id)
+    if not os.path.isdir(session_dir):
+        remove_persisted_session(session_id, session_dir)
+        return None
+
+    try:
+        vectorstore = FAISS.load_local(
+            session_dir,
+            embedding_model,
+            allow_dangerous_deserialization=True,
+        )
+    except Exception:
+        logger.exception("Failed to recover persisted session session_id=%s", session_id)
+        return None
+
+    meta = {
+        "vectorstore": vectorstore,
+        "lock": threading.Lock(),
+        "documents": list(entry.get("documents", [])),
+        "session_secret": entry.get("session_secret"),
+        "session_dir": session_dir,
+        "created_at": float(entry.get("created_at", last_accessed) or last_accessed),
+        "last_accessed": last_accessed,
+    }
+    sessions[session_id] = meta
+    logger.info("Recovered persisted session session_id=%s", session_id)
+    return meta
+
+
 def cleanup_expired_sessions():
     """
     Remove expired sessions and enforce max session cap.
     """
     expired = []
+    expired_dirs = {}
     evicted_count = 0
     active_sessions = 0
     with sessions_lock:
@@ -347,13 +601,19 @@ def cleanup_expired_sessions():
         for sid, meta in list(sessions.items()):
             if now_ts() - meta["last_accessed"] > ttl_seconds:
                 expired.append(sid)
+                expired_dirs[sid] = meta.get("session_dir")
         for sid in expired:
             del sessions[sid]
         while len(sessions) > MAX_ACTIVE_SESSIONS:
             oldest = min(sessions.items(), key=lambda x: x[1]["created_at"])[0]
+            expired_dirs[oldest] = sessions[oldest].get("session_dir")
             del sessions[oldest]
+            expired.append(oldest)
             evicted_count += 1
         active_sessions = len(sessions)
+        if expired or evicted_count:
+            save_sessions_unlocked()
+            cleanup_expired_persisted_sessions(expired_dirs)
     if expired or evicted_count:
         logger.info(
             "Session cleanup completed expired=%s evicted=%s active=%s",
@@ -371,12 +631,17 @@ def _is_session_expired(meta: dict) -> bool:
 def _touch_session_unlocked(session_id: str):
     meta = sessions.get(session_id)
     if not meta:
-        return None
+        meta = _recover_session_unlocked(session_id)
+        if not meta:
+            return None
     if _is_session_expired(meta):
+        session_dir = meta.get("session_dir")
         del sessions[session_id]
+        remove_persisted_session(session_id, session_dir)
         logger.info("Session expired session_id=%s", session_id)
         return None
     meta["last_accessed"] = now_ts()
+    persist_session_registry_entry(session_id, meta)
     return meta
 
 
@@ -391,9 +656,13 @@ def _peek_session_unlocked(session_id: str):
     """
     meta = sessions.get(session_id)
     if not meta:
-        return None
+        meta = _recover_session_unlocked(session_id)
+        if not meta:
+            return None
     if _is_session_expired(meta):
+        session_dir = meta.get("session_dir")
         del sessions[session_id]
+        remove_persisted_session(session_id, session_dir)
         logger.info("Session expired session_id=%s", session_id)
         return None
     return meta
@@ -407,7 +676,9 @@ def _cleanup_expired_sessions_unlocked():
         if now_ts() - meta["last_accessed"] > ttl_seconds
     ]
     for sid in expired:
+        session_dir = sessions[sid].get("session_dir")
         del sessions[sid]
+        remove_persisted_session(sid, session_dir)
     if expired:
         logger.info("Expired sessions removed count=%s", len(expired))
 
@@ -415,7 +686,9 @@ def _cleanup_expired_sessions_unlocked():
 def _enforce_max_sessions_unlocked():
     while len(sessions) >= MAX_ACTIVE_SESSIONS:
         oldest = min(sessions.items(), key=lambda x: x[1]["created_at"])[0]
+        session_dir = sessions[oldest].get("session_dir")
         del sessions[oldest]
+        remove_persisted_session(oldest, session_dir)
         logger.info("Evicted oldest session session_id=%s", oldest)
 
 
@@ -1123,27 +1396,46 @@ class SummarizeRequest(BaseModel):
     pdf: str | None = None
     session_id: UUID
 
+@app.get("/sessions")
+def get_sessions():
+    cleanup_expired_sessions()
+    with sessions_lock:
+        return [
+            {
+                "session_id": sid,
+                "created_at": meta.get("created_at"),
+                "last_accessed": meta.get("last_accessed"),
+                "documents": meta.get("documents", []),
+                "chat": meta.get("chat", []),
+            }
+            for sid, meta in sorted(sessions.items(), key=lambda x: x[1].get("last_accessed", 0), reverse=True)
+        ]
+
+class SessionWriteRequest(BaseModel):
+    session_id: UUID
+    session_secret: str
+
 
 @app.post("/process-pdf")
 def process_pdf(
     file: UploadFile = File(...),
-    session_id: str | None = Form(None)
+    session_id: str | None = Form(None),
+    original_filename: str | None = Form(None),
+    session_secret: str | None = Form(None)
 ):
     cleanup_expired_sessions()
 
-    filename = file.filename or "uploaded.pdf"
+    # If original_filename is provided, use it for display, otherwise fallback to the file's name (which might be a UUID)
+    filename = original_filename or file.filename or "uploaded.pdf"
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF documents are supported.")
-    requested_session_id = (session_id or "").strip() or None
-
-    # ─── Quota pre-flight checks ──────────────────────────────────────────────────
-    if requested_session_id:
-        with sessions_lock:
-            session = _peek_session_unlocked(requested_session_id)
-            if not session:
-                raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-            if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
-                raise HTTPException(status_code=400, detail="Maximum number of documents per session reached.")
+    requested_session_id = None
+    if session_id:
+        try:
+            requested_session_id = normalize_session_id(session_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid session ID format.")
+    requested_session_secret = (session_secret or "").strip() or None
 
     logger.info(
         "Processing PDF filename=%s existing_session=%s",
@@ -1220,18 +1512,24 @@ def process_pdf(
             ),
         )
     if requested_session_id:
-        with sessions_lock:
-            session = _peek_session_unlocked(requested_session_id)
-            if session:
+        with session_store_lock(requested_session_id):
+            with sessions_lock:
+                session = _peek_session_unlocked(requested_session_id)
+                if not session:
+                    raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+                expected_secret = (session.get("session_secret") or "").strip()
+                if not expected_secret or not requested_session_secret or not secrets.compare_digest(requested_session_secret, expected_secret):
+                    raise HTTPException(status_code=403, detail="Forbidden")
+                if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
+                    raise HTTPException(status_code=400, detail="Maximum number of documents per session reached.")
                 current_chunks = sum(doc.get("chunk_count", 0) for doc in session.get("documents", []))
                 if current_chunks + len(chunks) > MAX_CHUNKS_PER_SESSION:
                     raise HTTPException(status_code=400, detail="Maximum number of chunks per session exceeded.")
-    else:
-        if len(chunks) > MAX_CHUNKS_PER_SESSION:
-            raise HTTPException(
-                status_code=400,
-                detail=f"PDF is too large to index. A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks.",
-            )
+    elif len(chunks) > MAX_CHUNKS_PER_SESSION:
+        raise HTTPException(
+            status_code=400,
+            detail=f"PDF is too large to index. A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks.",
+        )
 
     document_id = str(uuid.uuid4())
     temp_tracking_id = requested_session_id or str(uuid.uuid4())
@@ -1245,6 +1543,7 @@ def process_pdf(
     uploaded_document = {
         "document_id": document_id,
         "filename": filename,
+        "static_url": f"/uploads/{os.path.basename(file.filename)}" if file.filename else None,
         "uploaded_at": now,
         "chunk_count": len(chunks),
     }
@@ -1265,30 +1564,71 @@ def process_pdf(
         logger.exception("Failed to create vectorstore filename=%s", filename)
         raise HTTPException(status_code=500, detail="Failed to index the uploaded PDF.")
 
-    with sessions_lock:
-        if requested_session_id:
-            session = _touch_session_unlocked(requested_session_id)
-            if not session:
-                raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-            session.setdefault("retrieval_cache", {})
-            if "lock" not in session:
-                session["lock"] = threading.Lock()
-            session_lock = session["lock"]
-            vectorstore = session["vectorstore"]
-        else:
-            _cleanup_expired_sessions_unlocked()
-            _enforce_max_sessions_unlocked()
-            session_id = str(uuid.uuid4())
-            temp_tracking_id = session_id
-            session_lock = threading.Lock()
-            sessions[session_id] = {
-                "vectorstore": new_vectorstore,
-                "lock": session_lock,
-                "documents": [uploaded_document],
-                "created_at": now,
-                "last_accessed": now,
-                "retrieval_cache": {},
-            }
+    if requested_session_id:
+        with session_store_lock(requested_session_id):
+            with sessions_lock:
+                session = _touch_session_unlocked(requested_session_id)
+                if not session:
+                    raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+                session.setdefault("retrieval_cache", {})
+                if "lock" not in session:
+                    session["lock"] = threading.Lock()
+                session_lock = session["lock"]
+                vectorstore = session["vectorstore"]
+
+            with session_lock:
+                try:
+                    vectorstore.merge_from(new_vectorstore)
+                    persist_vectorstore(requested_session_id, vectorstore)
+                except Exception:
+                    logger.exception(
+                        "Failed to merge vectorstore session_id=%s filename=%s",
+                        requested_session_id,
+                        filename,
+                    )
+                    raise HTTPException(status_code=500, detail="Failed to merge the uploaded PDF into this session.")
+
+            with sessions_lock:
+                session = _touch_session_unlocked(requested_session_id)
+                if not session:
+                    raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+                session.setdefault("documents", []).append(uploaded_document)
+                session["last_accessed"] = now
+                session["retrieval_cache"] = {}
+                session_id = requested_session_id
+                persist_session_registry_entry(session_id, session)
+                logger.info(
+                    "Merged PDF into session session_id=%s filename=%s documents=%s chunks=%s",
+                    session_id,
+                    filename,
+                    len(session["documents"]),
+                    len(chunks),
+                )
+    else:
+        with session_store_lock(session_id := str(uuid.uuid4())):
+            session_secret = generate_session_secret()
+            session_dir = persist_vectorstore(session_id, new_vectorstore)
+            
+            with sessions_lock:
+                _cleanup_expired_sessions_unlocked()
+                _enforce_max_sessions_unlocked()
+                previous_tracking_id = temp_tracking_id
+                temp_tracking_id = session_id
+                if previous_tracking_id != session_id and previous_tracking_id in processing_progress:
+                    processing_progress[session_id] = processing_progress.pop(previous_tracking_id)
+                session_lock = threading.Lock()
+                sessions[session_id] = {
+                    "vectorstore": new_vectorstore,
+                    "lock": session_lock,
+                    "documents": [uploaded_document],
+                    "session_secret": session_secret,
+                    "session_dir": session_dir,
+                    "created_at": now,
+                    "last_accessed": now,
+                    "retrieval_cache": {},
+                    "chat": [],
+                }
+                persist_session_registry_entry(session_id, sessions[session_id])
             logger.info(
                 "Created session session_id=%s filename=%s chunks=%s",
                 session_id,
@@ -1296,32 +1636,6 @@ def process_pdf(
                 len(chunks),
             )
 
-    if requested_session_id:
-        with session_lock:
-            try:
-                vectorstore.merge_from(new_vectorstore)
-            except Exception:
-                logger.exception(
-                    "Failed to merge vectorstore session_id=%s filename=%s",
-                    requested_session_id,
-                    filename,
-                )
-                raise HTTPException(status_code=500, detail="Failed to merge the uploaded PDF into this session.")
-        with sessions_lock:
-            session = _touch_session_unlocked(requested_session_id)
-            if not session:
-                raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-            session.setdefault("documents", []).append(uploaded_document)
-            session["last_accessed"] = now
-            session["retrieval_cache"] = {}
-            session_id = requested_session_id
-            logger.info(
-                "Merged PDF into session session_id=%s filename=%s documents=%s chunks=%s",
-                session_id,
-                filename,
-                len(session["documents"]),
-                len(chunks),
-            )
 
     with sessions_lock:
         documents = list(sessions[session_id].get("documents", []))
@@ -1333,9 +1647,31 @@ def process_pdf(
     return {
         "message": "PDF processed successfully",
         "session_id": session_id,
+        "session_secret": sessions[session_id].get("session_secret"),
         "document": uploaded_document,
         "documents": documents,
     }
+
+
+@app.post("/validate-session-write")
+def validate_session_write(data: SessionWriteRequest):
+    session_id = str(data.session_id)
+    provided_secret = (data.session_secret or "").strip()
+
+    if not provided_secret:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    with session_store_lock(session_id):
+        with sessions_lock:
+            session = _peek_session_unlocked(session_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+
+            expected_secret = (session.get("session_secret") or "").strip()
+            if not expected_secret or not secrets.compare_digest(provided_secret, expected_secret):
+                raise HTTPException(status_code=403, detail="Forbidden")
+
+    return {"allowed": True}
 
 
 
@@ -1371,13 +1707,13 @@ def ask_question(data: Question):
 
     # Normalize query for cache reuse
     normalized_query = normalize_query(question)
-    cache_hit = False
+    
 
     with sessions_lock:
 
         session = _touch_session_unlocked(session_id)
 
-        if not session or not session.get("vectorstore"):
+        if not session:
             raise HTTPException(
                 status_code=404,
                 detail="Session expired or invalid. Please re-upload your PDFs."
@@ -1387,36 +1723,62 @@ def ask_question(data: Question):
             session["lock"] = threading.Lock()
 
         session_lock = session["lock"]
+        if not session.get("vectorstore"):
+            try:
+                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), embedding_model, allow_dangerous_deserialization=True)
+            except Exception as e:
+                logger.error(f"Failed to lazy load vectorstore: {e}")
+                raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
 
-        retrieval_cache = session.setdefault("retrieval_cache", {})
+        # Session-level retrieval cache
+        retrieval_cache = session.setdefault(
+            "retrieval_cache",
+            {}
+        )
 
+        # Cache hit
         if normalized_query in retrieval_cache:
 
             logger.info(
-                "Retrieval cache hit session_id=%s",
-                session_id
+                "Retrieval cache hit session_id=%s query=%s",
+                session_id,
+                normalized_query,
             )
 
-            cached_result = retrieval_cache[normalized_query]
+            scored_candidates = retrieval_cache[
+                normalized_query
+            ]
 
-            return {
-                **cached_result,
-                "cache_hit": True
-            }
+            cache_hit = True
 
-        logger.info(
-            "Retrieval cache miss session_id=%s",
-            session_id
-        )
+        else:
+            cache_hit = False
+
     try:
         with session_lock:
             indexed_documents = collect_index_documents(vectorstore)
-            scored_candidates = search_retrieval_candidates(
-                vectorstore,
-                question,
-                ASK_RETRIEVAL_CANDIDATES,
-            )
+
+            if not cache_hit:
+                logger.info(
+                    "Retrieval cache miss session_id=%s query=%s",
+                    session_id,
+                    normalized_query,
+                )
+                scored_candidates = search_retrieval_candidates(
+                    vectorstore,
+                    question,
+                    ASK_RETRIEVAL_CANDIDATES,
+                )
+
+                with sessions_lock:
+                    session = sessions.get(session_id)
+                    if session:
+                        retrieval_cache = session.setdefault("retrieval_cache", {})
+                        if len(retrieval_cache) >= RETRIEVAL_CACHE_LIMIT:
+                            oldest_key = next(iter(retrieval_cache))
+                            del retrieval_cache[oldest_key]
+                        retrieval_cache[normalized_query] = scored_candidates
 
     except Exception:
         logger.exception("Similarity search failed session_id=%s", session_id)
@@ -1516,9 +1878,9 @@ def ask_question(data: Question):
         return {
             "answer": grounded_answer,
             "sources": citation_sources,
-            "retrieval_type": "refusal",
+            "retrieval_type": "citation-aware",
+            "cache_hit": cache_hit,
         }
-
     if grounded_answer:
         if ASK_REQUIRE_CITATIONS and not answer_contains_citation(grounded_answer, len(docs)):
             logger.info(
@@ -1546,7 +1908,7 @@ def ask_question(data: Question):
             "answer": grounded_answer,
             "sources": citation_sources,
             "retrieval_type": "citation-aware",
-            "cache_hit": cache_hit
+            
         }
 
     prompt = (
@@ -1584,7 +1946,7 @@ def ask_question(data: Question):
         "answer": answer,
         "sources": citation_sources,
         "retrieval_type": "citation-aware",
-        "cache_hit": False
+        "cache_hit": cache_hit,
     }
 
     with sessions_lock:
@@ -1598,11 +1960,12 @@ def ask_question(data: Question):
                 {}
             )
 
-            retrieval_cache[normalized_query] = {
+            session.setdefault("chat", []).append({
+                "question": question,
                 "answer": answer,
-                "sources": citation_sources,
-                "retrieval_type": "citation-aware",
-            }
+                "sources": citation_sources
+            })
+            save_sessions_unlocked()
 
     return response_payload
 
@@ -1612,11 +1975,17 @@ def summarize_pdf(data: SummarizeRequest):
     session_id = str(data.session_id)
     with sessions_lock:
         session = _touch_session_unlocked(session_id)
-        if not session or not session.get("vectorstore"):
+        if not session:
             raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
         if "lock" not in session:
             session["lock"] = threading.Lock()
         session_lock = session["lock"]
+        if not session.get("vectorstore"):
+            try:
+                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), embedding_model, allow_dangerous_deserialization=True)
+            except Exception as e:
+                logger.error(f"Failed to lazy load vectorstore: {e}")
+                raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
         uploaded_documents = list(session.get("documents", []))
 
@@ -1633,7 +2002,6 @@ def summarize_pdf(data: SummarizeRequest):
     )
 
     return {"summary": build_session_summary(uploaded_documents, indexed_documents)}
-
 if __name__ == "__main__":
     is_production = os.getenv("ENVIRONMENT", "development").lower() == "production"
     host = os.getenv("HOST", "0.0.0.0")
