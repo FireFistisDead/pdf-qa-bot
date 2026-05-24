@@ -168,17 +168,22 @@ function App() {
   setPdfJumpTarget(null);
 };
 
-  const handleOpenSource = (source) => {
-    const page = Number(source?.page);
-
-    if (!Number.isFinite(page)) {
-      toast.error("Source page is unavailable.");
-      return;
-    }
-
-    const matchingPdf = pdfs.find((pdf) => {
-      if (source.document_id && pdf.document_id === source.document_id) {
-        return true;
+const handleUpdateLastBotMessage = (text, streaming, sources, mode) => {
+  setPdfs((prev) =>
+    prev.map((pdf) => {
+      if (pdf.session_id !== selectedPdf) return pdf;
+      const chat = [...pdf.chat];
+      for (let i = chat.length - 1; i >= 0; i--) {
+        if (chat[i].role === "bot") {
+          chat[i] = {
+            ...chat[i],
+            text: text !== null ? text : chat[i].text,
+            streaming: streaming,
+            sources: sources !== undefined ? sources : chat[i].sources,
+            mode: mode !== undefined ? mode : chat[i].mode,
+          };
+          break;
+        }
       }
 
       return (

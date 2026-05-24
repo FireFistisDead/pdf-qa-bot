@@ -2,14 +2,15 @@ import React from "react";
 import { Button } from "react-bootstrap";
 import ReactMarkdown from "react-markdown";
 
-const MessageBubble = ({ msg, darkMode, onOpenSource }) => {
-  const getSourceText = (source) => source.text || source.preview || "";
-  const getSourceLabel = (source) =>
-    source.document || "Unknown Document";
-  const hasOpenablePage = (source) =>
-    Boolean(source.document || source.document_id) &&
-    Number.isFinite(Number(source.page));
+const MODE_BADGE = {
+  default:  { label: "Standard",  bg: "rgba(107,114,128,0.15)", color: "#6B7280" },
+  tutor:    { label: "Tutor",     bg: "rgba(59,130,246,0.15)",  color: "#3B82F6" },
+  socratic: { label: "Socratic",  bg: "rgba(139,92,246,0.15)", color: "#8B5CF6" },
+  eli5:     { label: "Simple",    bg: "rgba(34,197,94,0.15)",  color: "#22C55E" },
+  concise:  { label: "Concise",   bg: "rgba(249,115,22,0.15)", color: "#F97316" },
+};
 
+const MessageBubble = ({ msg, darkMode }) => {
   return (
     <div
       className={`d-flex ${
@@ -67,6 +68,25 @@ const MessageBubble = ({ msg, darkMode, onOpenSource }) => {
         ) : (
           <span>{msg.text}</span>
         )}
+
+        {msg.role === "bot" && msg.mode && msg.mode !== "default" && (() => {
+          const badge = MODE_BADGE[msg.mode] || MODE_BADGE.default;
+          return (
+            <div style={{ marginTop: "8px" }}>
+              <span style={{
+                fontSize: "0.7rem",
+                fontWeight: 600,
+                padding: "2px 8px",
+                borderRadius: "10px",
+                background: badge.bg,
+                color: badge.color,
+                letterSpacing: "0.02em",
+              }}>
+                {badge.label}
+              </span>
+            </div>
+          );
+        })()}
 
         {msg.role === "bot" && msg.sources?.length > 0 && (
   <div
