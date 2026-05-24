@@ -1846,16 +1846,17 @@ def ask_question(data: Question):
         )
 
         # Cache hit
-        if normalized_query in retrieval_cache:
+        cache_key = f"{mode}:{normalized_query}"
+        if cache_key in retrieval_cache:
 
             logger.info(
-                "Retrieval cache hit session_id=%s query=%s",
+                "Retrieval cache hit session_id=%s cache_key=%s",
                 session_id,
-                normalized_query,
+                cache_key,
             )
 
             scored_candidates = retrieval_cache[
-                normalized_query
+                cache_key
             ]
 
             cache_hit = True
@@ -1869,9 +1870,9 @@ def ask_question(data: Question):
 
             if not cache_hit:
                 logger.info(
-                    "Retrieval cache miss session_id=%s query=%s",
+                    "Retrieval cache miss session_id=%s cache_key=%s",
                     session_id,
-                    normalized_query,
+                    cache_key,
                 )
                 scored_candidates = search_retrieval_candidates(
                     vectorstore,
@@ -1886,7 +1887,7 @@ def ask_question(data: Question):
                         if len(retrieval_cache) >= RETRIEVAL_CACHE_LIMIT:
                             oldest_key = next(iter(retrieval_cache))
                             del retrieval_cache[oldest_key]
-                        retrieval_cache[normalized_query] = scored_candidates
+                        retrieval_cache[cache_key] = scored_candidates
 
     except Exception:
         logger.exception("Similarity search failed session_id=%s", session_id)
