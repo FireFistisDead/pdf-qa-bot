@@ -1,6 +1,42 @@
 import React from "react";
 import { Button } from "react-bootstrap";
 import ReactMarkdown from "react-markdown";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+
+// Strict allowlist for AI-generated markdown content.
+//
+// ReactMarkdown converts markdown to a virtual DOM; rehype-sanitize then
+// walks that DOM and strips anything not in this schema before React renders
+// it. This is the defence-in-depth layer that prevents a crafted LLM response
+// from injecting <script>, <iframe>, event handlers, or javascript: URIs —
+// even if a future change to the AI prompt or model allows them through.
+//
+// Rules:
+//   - All elements in the default schema are kept (headings, lists, code, etc.)
+//   - `href` values on <a> are restricted to http/https/mailto — no javascript:.
+//   - Event handler attributes (onclick, onerror, …) are stripped globally.
+//   - Protocol-relative links (//) are blocked at the attribute level.
+const MARKDOWN_SANITIZE_SCHEMA = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    // Override the default link allowlist: strip javascript: and data: URIs.
+    a: [
+      ...(defaultSchema.attributes?.a ?? []).filter((attr) => attr !== "href"),
+      ["href", /^https?:\/\//, /^mailto:/],
+    ],
+    // Disallow all event handlers on every element via the wildcard "*" key.
+    // defaultSchema already omits them, but this makes the policy explicit and
+    // survives future schema updates from the rehype-sanitize package.
+    "*": [
+      ...(defaultSchema.attributes?.["*"] ?? []).filter(
+        (attr) =>
+          typeof attr !== "string" ||
+          !attr.startsWith("on"),
+      ),
+    ],
+  },
+};
 
 const MODE_BADGE = {
   default:  { label: "Standard",  bg: "rgba(107,114,128,0.15)", color: "#6B7280" },
@@ -59,7 +95,7 @@ const MessageBubble = ({ msg, darkMode, onOpenSource }) => {
       >
         {msg.role === "bot" ? (
           <span>
-            <ReactMarkdown>{msg.text}</ReactMarkdown>
+            <ReactMarkdown rehypePlugins={[[rehypeSanitize, MARKDOWN_SANITIZE_SCHEMA]]}>{msg.text}</ReactMarkdown>
             {msg.streaming && (
               <span style={{
                 display: "inline-block", width: "2px", height: "1em",

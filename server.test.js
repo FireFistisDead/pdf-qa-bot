@@ -144,6 +144,101 @@ describe("summarizeSchema validation", () => {
   });
 });
 
+// ── session_secret schema validation — regression tests for issue #234 ────────
+//
+// These tests verify that the Zod schemas reject requests carrying empty,
+// whitespace-only, or missing session_secret values. This is the server-side
+// boundary check that prevents a caller from omitting the credential and
+// gaining access to sessions they do not own.
+//
+// The root fix (sessionStorage instead of localStorage) lives in the frontend,
+// but schema enforcement here ensures that even if a client sends a malformed
+// or stripped secret, the Express gateway rejects it before forwarding the
+// request to the RAG service.
+describe("session_secret schema enforcement", () => {
+  test("askSchema rejects missing session_secret", () => {
+    const result = askSchema.safeParse({
+      question: "What is this document about?",
+      session_id: "550e8400-e29b-41d4-a716-446655440000",
+      // session_secret intentionally omitted
+    });
+    assert.equal(result.success, false);
+    const errors = result.error.flatten().fieldErrors;
+    assert.ok(
+      errors.session_secret,
+      "Expected validation error on session_secret field",
+    );
+  });
+
+  test("askSchema rejects empty string session_secret", () => {
+    const result = askSchema.safeParse({
+      question: "What is this document about?",
+      session_id: "550e8400-e29b-41d4-a716-446655440000",
+      session_secret: "",
+    });
+    assert.equal(result.success, false);
+    const errors = result.error.flatten().fieldErrors;
+    assert.ok(errors.session_secret);
+  });
+
+  test("askSchema rejects whitespace-only session_secret", () => {
+    const result = askSchema.safeParse({
+      question: "What is this document about?",
+      session_id: "550e8400-e29b-41d4-a716-446655440000",
+      session_secret: "   ",
+    });
+    assert.equal(result.success, false);
+    const errors = result.error.flatten().fieldErrors;
+    assert.ok(errors.session_secret);
+  });
+
+  test("askSchema accepts non-empty session_secret", () => {
+    const result = askSchema.safeParse({
+      question: "What is this document about?",
+      session_id: "550e8400-e29b-41d4-a716-446655440000",
+      session_secret: "valid-secret-value",
+    });
+    assert.equal(result.success, true);
+  });
+
+  test("summarizeSchema rejects missing session_secret", () => {
+    const result = summarizeSchema.safeParse({
+      session_id: "550e8400-e29b-41d4-a716-446655440000",
+      // session_secret intentionally omitted
+    });
+    assert.equal(result.success, false);
+    const errors = result.error.flatten().fieldErrors;
+    assert.ok(
+      errors.session_secret,
+      "Expected validation error on session_secret field",
+    );
+  });
+
+  test("summarizeSchema rejects empty string session_secret", () => {
+    const result = summarizeSchema.safeParse({
+      session_id: "550e8400-e29b-41d4-a716-446655440000",
+      session_secret: "",
+    });
+    assert.equal(result.success, false);
+  });
+
+  test("summarizeSchema rejects whitespace-only session_secret", () => {
+    const result = summarizeSchema.safeParse({
+      session_id: "550e8400-e29b-41d4-a716-446655440000",
+      session_secret: "  \t  ",
+    });
+    assert.equal(result.success, false);
+  });
+
+  test("summarizeSchema accepts non-empty session_secret", () => {
+    const result = summarizeSchema.safeParse({
+      session_id: "550e8400-e29b-41d4-a716-446655440000",
+      session_secret: "any-non-empty-secret",
+    });
+    assert.equal(result.success, true);
+  });
+});
+
 describe("route error responses", () => {
   let server;
   let baseUrl;
