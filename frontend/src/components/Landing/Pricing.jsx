@@ -128,6 +128,22 @@ const Pricing = () => {
           <button className="pricing-btn btn-secondary">Contact Sales</button>
         </div>
       </div>
+
+      {/* Bottom Marquee Divider */}
+      <div className="pricing-bottom-marquee">
+        <div className="divider-track reverse-track">
+          <span>KNOWLEDGE BASE</span><span className="divider-dot"></span>
+          <span>LOCAL AI SUPPORT</span><span className="divider-dot"></span>
+          <span>FAQS</span><span className="divider-dot"></span>
+          <span>COMMUNITY</span><span className="divider-dot"></span>
+          <span>KNOWLEDGE BASE</span><span className="divider-dot"></span>
+          <span>LOCAL AI SUPPORT</span><span className="divider-dot"></span>
+          <span>FAQS</span><span className="divider-dot"></span>
+          <span>COMMUNITY</span><span className="divider-dot"></span>
+          <span>KNOWLEDGE BASE</span><span className="divider-dot"></span>
+          <span>LOCAL AI SUPPORT</span><span className="divider-dot"></span>
+        </div>
+      </div>
     </section>
   );
 };

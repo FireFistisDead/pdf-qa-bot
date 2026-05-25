@@ -3,7 +3,7 @@
    ═══════════════════════════════════════════════════════════ */
 
 .pricing-section {
-  padding: 140px 32px;
+  padding: 60px 32px 0px 32px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -53,6 +53,30 @@
 @keyframes scroll-divider {
   0% { transform: translateX(0); }
   100% { transform: translateX(-50%); }
+}
+
+/* ─── Bottom Divider Marquee ─── */
+.pricing-bottom-marquee {
+  position: absolute;
+  bottom: 0;
+  left: -5vw;
+  width: 110vw;
+  overflow: hidden;
+  background: var(--accent);
+  color: #000;
+  padding: 12px 0;
+  transform: translateY(50%) rotate(1.5deg);
+  box-shadow: 0 0 40px rgba(200, 255, 0, 0.15);
+  z-index: 20;
+}
+
+.reverse-track {
+  animation: scroll-divider-reverse 25s linear infinite;
+}
+
+@keyframes scroll-divider-reverse {
+  0% { transform: translateX(-50%); }
+  100% { transform: translateX(0); }
 }
 
 /* ─── Crazy Background ─── */
@@ -223,7 +247,7 @@
   gap: 32px; 
   width: 100%;
   max-width: 1200px;
-  padding-bottom: 80px;
+  padding-bottom: 60px;
 }
 
 /* ─── Base Card Styles ─── */

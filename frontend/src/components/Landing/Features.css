@@ -3,7 +3,7 @@
    ═══════════════════════════════════════════════════════════ */
 
 .features-section {
-  padding: 120px 32px;
+  padding: 120px 32px 60px 32px;
   position: relative;
   z-index: 10;
   display: flex;
