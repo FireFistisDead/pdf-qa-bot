@@ -16,7 +16,7 @@ const { createRedisClient } = require("./security/redis");
 const authRoutes = require("./src/routes/authRoutes");
 
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
-const INTERNAL_RAG_TOKEN = process.env.INTERNAL_RAG_TOKEN || "";
+const INTERNAL_RAG_TOKEN = (process.env.INTERNAL_RAG_TOKEN || "").trim();
 const PORT = process.env.PORT || 4000;
 
 const app = express();
@@ -391,8 +391,16 @@ const extractServiceDetails = (err, fallbackMessage = "Upstream service request 
   );
 };
 
-const ragAuthHeaders = () =>
-  INTERNAL_RAG_TOKEN ? { "X-Internal-Token": INTERNAL_RAG_TOKEN } : {};
+const requireInternalRagToken = () => {
+  if (!INTERNAL_RAG_TOKEN) {
+    throw new Error("INTERNAL_RAG_TOKEN must be configured for RAG service requests.");
+  }
+};
+
+const ragAuthHeaders = () => {
+  requireInternalRagToken();
+  return { "X-Internal-Token": INTERNAL_RAG_TOKEN };
+};
 
 const normalizeSessionSecret = (value) =>
   typeof value === "string" ? value.trim() || null : null;
@@ -738,6 +746,8 @@ app.use((err, req, res, next) => {
 
 if (require.main === module) {
   (async () => {
+    requireInternalRagToken();
+
     if (redisConnectPromise) {
       console.log("[redis] connecting for distributed rate limiting...");
       await redisConnectPromise;
@@ -760,4 +770,11 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, askSchema, summarizeSchema, extractServiceDetails };
+module.exports = {
+  app,
+  askSchema,
+  summarizeSchema,
+  extractServiceDetails,
+  ragAuthHeaders,
+  requireInternalRagToken,
+};

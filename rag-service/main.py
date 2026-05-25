@@ -65,6 +65,42 @@ SESSION_REGISTRY_LOCK_FILE = PERSIST_PATH / "session_registry.lock"
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(FAISS_DIR, exist_ok=True)
 
+def normalize_chat_history(chat):
+    normalized = []
+
+    for item in chat or []:
+        if not isinstance(item, dict):
+            continue
+
+        if item.get("role") in {"user", "bot"}:
+            message = dict(item)
+            if message.get("role") == "bot":
+                message.setdefault("sources", [])
+                message.setdefault("streaming", False)
+                message.setdefault("mode", "default")
+            normalized.append(message)
+            continue
+
+        if "question" in item or "answer" in item:
+            question = item.get("question")
+            answer = item.get("answer")
+            mode = item.get("mode") or "default"
+
+            if question:
+                normalized.append({"role": "user", "text": question})
+
+            if answer:
+                normalized.append({
+                    "role": "bot",
+                    "text": answer,
+                    "sources": item.get("sources", []),
+                    "streaming": False,
+                    "mode": mode,
+                })
+
+    return normalized
+
+
 def load_sessions():
     if SESSIONS_FILE.exists():
         try:
@@ -73,6 +109,7 @@ def load_sessions():
                 for sid, meta in data.items():
                     meta["lock"] = threading.Lock()
                     meta["vectorstore"] = None
+                    meta["chat"] = normalize_chat_history(meta.get("chat", []))
                 return data
         except Exception as e:
             logger.error(f"Failed to load sessions: {e}")
@@ -123,8 +160,6 @@ def update_processing_progress(session_id, stage, progress):
             meta["processing_progress"] = payload
 
 INTERNAL_RAG_TOKEN = os.getenv("INTERNAL_RAG_TOKEN", "").strip()
-if not INTERNAL_RAG_TOKEN:
-    raise RuntimeError("INTERNAL_RAG_TOKEN must be configured for protected endpoints.")
 
 PDF_PARSE_TIMEOUT_SECONDS = int(os.getenv("PDF_PARSE_TIMEOUT_SECONDS", "20"))
 MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "200"))
@@ -138,6 +173,16 @@ except Exception:  # pragma: no cover
 def internal_token_valid(provided: str | None, expected: str) -> bool:
     candidate = (provided or "").strip()
     return bool(expected) and bool(candidate) and secrets.compare_digest(candidate, expected)
+
+
+def require_internal_rag_token_configured():
+    if not INTERNAL_RAG_TOKEN:
+        raise RuntimeError("INTERNAL_RAG_TOKEN must be configured for protected endpoints.")
+
+
+@app.on_event("startup")
+def validate_internal_rag_token_on_startup():
+    require_internal_rag_token_configured()
 
 
 def generate_session_secret() -> str:
@@ -154,22 +199,26 @@ def standard_error_response(status_code: int, detail: str, **extra):
 
 
 def append_chat_exchange(session: dict, question: str, answer: str, sources: list, mode: str | None = None):
+    chat = normalize_chat_history(session.get("chat", []))
+    session["chat"] = chat
+
+    normalized_mode = mode or "default"
     bot_message = {
         "role": "bot",
         "text": answer,
         "sources": sources,
         "streaming": False,
+        "mode": normalized_mode,
     }
-    if mode:
-        bot_message["mode"] = mode
 
-    session.setdefault("chat", []).extend([
+    chat.extend([
         {
             "role": "user",
             "text": question,
         },
         bot_message,
     ])
+
 
 def extract_pdf_documents_sandboxed(pdf_path: str, filename: str):
     """
@@ -2770,6 +2819,11 @@ def ask_question_stream(data: Question):
             intent,
             best_score,
         )
+        with sessions_lock:
+            current_session = sessions.get(session_id)
+            if current_session:
+                append_chat_exchange(current_session, question, INSUFFICIENT_CONTEXT_MESSAGE, [], mode)
+                save_sessions_unlocked()
 
         def _refuse_stream():
             yield INSUFFICIENT_CONTEXT_MESSAGE

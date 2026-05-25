@@ -27,6 +27,9 @@ from main import (
     document_dedupe_key,
     citation_source_for_document,
     internal_token_valid,
+    append_chat_exchange,
+    normalize_chat_history,
+    require_internal_rag_token_configured,
     normalize_session_id,
     get_session_dir,
     _extract_pdf_text_worker,
@@ -96,6 +99,15 @@ def test_internal_token_valid_rejects_missing_when_set():
 
 def test_internal_token_valid_accepts_exact_match():
     assert internal_token_valid("secret", "secret") is True
+
+
+def test_require_internal_rag_token_configured_fails_fast_when_unset(monkeypatch):
+    import main as main_module
+
+    monkeypatch.setattr(main_module, "INTERNAL_RAG_TOKEN", "")
+
+    with pytest.raises(RuntimeError, match="INTERNAL_RAG_TOKEN"):
+        require_internal_rag_token_configured()
 
 
 def test_internal_auth_middleware_protects_validate_session_write():
@@ -368,6 +380,67 @@ def test_citation_source_for_document_handles_missing_metadata():
     assert source["document"] == "uploaded document"
     assert source["page"] is None
     assert source["chunk_index"] == 2
+
+
+def test_normalize_chat_history_converts_legacy_exchange_shape():
+    legacy_chat = [
+        {
+            "question": "What is covered?",
+            "answer": "The document covers onboarding.",
+            "sources": [{"document": "policy.pdf", "page": 1}],
+            "mode": "default",
+        }
+    ]
+
+    assert normalize_chat_history(legacy_chat) == [
+        {"role": "user", "text": "What is covered?"},
+        {
+            "role": "bot",
+            "text": "The document covers onboarding.",
+            "sources": [{"document": "policy.pdf", "page": 1}],
+            "streaming": False,
+            "mode": "default",
+        },
+    ]
+
+
+def test_append_chat_exchange_normalizes_and_persists_message_schema():
+    session = {
+        "chat": [
+            {
+                "question": "Old question?",
+                "answer": "Old answer.",
+                "sources": [],
+            }
+        ]
+    }
+
+    append_chat_exchange(
+        session,
+        "New question?",
+        "New answer.",
+        [{"document": "new.pdf", "page": 2}],
+        None,
+    )
+
+    assert session["chat"] == [
+        {"role": "user", "text": "Old question?"},
+        {
+            "role": "bot",
+            "text": "Old answer.",
+            "sources": [],
+            "streaming": False,
+            "mode": "default",
+        },
+        {"role": "user", "text": "New question?"},
+        {
+            "role": "bot",
+            "text": "New answer.",
+            "sources": [{"document": "new.pdf", "page": 2}],
+            "streaming": False,
+            "mode": "default",
+        },
+    ]
 
 
 # ─── /ask/stream auth enforcement regression tests ───────────────────────────

@@ -4,9 +4,12 @@ const http = require("node:http");
 const axios = require("axios");
 const { Blob } = require("node:buffer");
 
+process.env.INTERNAL_RAG_TOKEN = process.env.INTERNAL_RAG_TOKEN || "test-internal-rag-token";
+process.env.JWT_SECRET = process.env.JWT_SECRET || "test-jwt-secret";
+
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
-let app, askSchema, summarizeSchema, extractServiceDetails;
+let app, askSchema, summarizeSchema, extractServiceDetails, ragAuthHeaders;
 let clientIpFromRequest, normalizeIp;
 test("module loads without error", () => {
   const mod = require("./server.js");
@@ -14,6 +17,7 @@ test("module loads without error", () => {
   askSchema = mod.askSchema;
   summarizeSchema = mod.summarizeSchema;
   extractServiceDetails = mod.extractServiceDetails;
+  ragAuthHeaders = mod.ragAuthHeaders;
 
   ({ clientIpFromRequest, normalizeIp } = require("./security/ip"));
 
@@ -21,6 +25,10 @@ test("module loads without error", () => {
   assert.ok(typeof askSchema.safeParse === "function", "askSchema should be a Zod schema");
   assert.ok(typeof summarizeSchema.safeParse === "function", "summarizeSchema should be a Zod schema");
   assert.ok(typeof extractServiceDetails === "function", "extractServiceDetails should be exported for tests");
+});
+
+test("ragAuthHeaders requires and forwards the internal token", () => {
+  assert.deepEqual(ragAuthHeaders(), { "X-Internal-Token": process.env.INTERNAL_RAG_TOKEN });
 });
 
 const createPdfUploadBody = ({ sessionId = null, sessionSecret = null } = {}) => {
