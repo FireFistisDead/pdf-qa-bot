@@ -1,5 +1,7 @@
 # PDF Q&A Bot
 
+![PDF Q&A Bot Logo](logo.svg)
+
 Upload PDF documents, ask natural-language questions grounded in their content, and generate concise summaries — all through a local, three-service stack. The React UI talks to a Node.js API gateway, which orchestrates a Python RAG (retrieval-augmented generation) service powered by Hugging Face embeddings and a configurable text-generation model.
 
 ---
@@ -27,6 +29,7 @@ Upload PDF documents, ask natural-language questions grounded in their content, 
 |------------|-------------|
 | **PDF upload** | Multipart upload with server-side parsing, chunking, and vector indexing |
 | **Question answering** | Semantic search over document chunks, then local HF model generation |
+| **Reading Modes** | Choose between Standard, Tutor, Socratic, Simple, or Concise answering styles |
 | **Summarization** | Bullet-style summaries from retrieved context |
 | **Multi-document UI** | Upload and switch between multiple PDFs (`frontend/`) |
 | **In-browser viewer** | Page-by-page PDF preview with `react-pdf` |
