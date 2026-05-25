@@ -31,7 +31,7 @@ import threading
 import time
 import logging
 import re
-
+from collections import OrderedDict
 try:  # pragma: no cover
     import fcntl  # type: ignore
 except Exception:  # pragma: no cover
@@ -81,33 +81,46 @@ def load_sessions():
 def save_sessions_unlocked():
     try:
         data = {}
+
         for sid, meta in sessions.items():
+
+            safe_cache = {}
+
+            for key, value in meta.get("retrieval_cache", {}).items():
+                if isinstance(value, dict):
+                    safe_cache[key] = value
+
             data[sid] = {
                 "created_at": meta.get("created_at"),
                 "last_accessed": meta.get("last_accessed"),
                 "documents": meta.get("documents", []),
-                "retrieval_cache": meta.get("retrieval_cache", {}),
+                "retrieval_cache": safe_cache,
                 "chat": meta.get("chat", []),
                 "session_secret": meta.get("session_secret"),
             }
+
         with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f)
+
     except Exception as e:
         logger.error(f"Failed to save sessions: {e}")
 
 # Global session store
 sessions = load_sessions()
+processing_progress = {}
 def update_processing_progress(session_id, stage, progress):
     payload = {
         "stage": stage,
         "progress": progress,
         "updated_at": now_ts(),
     }
+
+    processing_progress[session_id] = payload
+
     with sessions_lock:
         meta = sessions.get(session_id)
-        if not meta:
-            return
-        meta["processing_progress"] = payload
+        if meta:
+            meta["processing_progress"] = payload
 
 INTERNAL_RAG_TOKEN = os.getenv("INTERNAL_RAG_TOKEN", "").strip()
 
@@ -296,6 +309,9 @@ ASK_REQUIRE_CITATIONS = os.getenv("ASK_REQUIRE_CITATIONS", "true").strip().lower
     "on",
 }
 RETRIEVAL_CACHE_LIMIT = int(os.getenv("RETRIEVAL_CACHE_LIMIT", "25"))
+RETRIEVAL_CACHE_TTL_SECONDS = int(
+    os.getenv("RETRIEVAL_CACHE_TTL_SECONDS", "1800")
+)
 
 # ── Semantic Chunking Config ─────────────────────────────────────────────────
 SEMANTIC_CHUNK_SOFT_MAX = int(os.getenv("SEMANTIC_CHUNK_SOFT_MAX", "1200"))
@@ -346,6 +362,37 @@ FACTUAL_QUESTION_PREFIXES = (
 def now_ts():
     return time.time()
 
+def cleanup_retrieval_cache(retrieval_cache):
+    expired_keys = []
+
+    current_time = now_ts()
+
+    for key, value in retrieval_cache.items():
+
+        if not isinstance(value, dict):
+            expired_keys.append(key)
+            continue
+
+        cached_at = value.get("cached_at")
+
+        if not cached_at:
+            expired_keys.append(key)
+            continue
+
+        age = current_time - cached_at
+
+        if age > RETRIEVAL_CACHE_TTL_SECONDS:
+            expired_keys.append(key)
+
+    for key in expired_keys:
+        retrieval_cache.pop(key, None)
+
+    if expired_keys:
+        logger.info(
+            "Retrieval cache cleanup removed=%s remaining=%s",
+            len(expired_keys),
+            len(retrieval_cache),
+        )
 
 def session_expires_at(last_accessed: float) -> float:
     return last_accessed + (SESSION_TTL_MINUTES * 60)
@@ -524,7 +571,7 @@ def _recover_session_unlocked(session_id: str):
     try:
         vectorstore = FAISS.load_local(
             session_dir,
-            embedding_model,
+            get_embedding_model(),
             allow_dangerous_deserialization=True,
         )
     except Exception:
@@ -1376,23 +1423,28 @@ HF_GENERATION_MODEL = os.getenv("HF_GENERATION_MODEL", "google/flan-t5-base")
 generation_tokenizer = None
 generation_model = None
 generation_is_encoder_decoder = False
-embedding_model = None
 
+
+
+embedding_model = None
 
 def get_embedding_model():
     global embedding_model
+
     if embedding_model is not None and hasattr(embedding_model, "embed_documents"):
         return embedding_model
 
     with model_load_lock:
         if embedding_model is None or not hasattr(embedding_model, "embed_documents"):
             logger.info("Loading embedding model")
-            loaded_embedding_model = HuggingFaceEmbeddings(
+
+            embedding_model = HuggingFaceEmbeddings(
                 model_name="sentence-transformers/all-MiniLM-L6-v2"
             )
-            if loaded_embedding_model is None or not hasattr(loaded_embedding_model, "embed_documents"):
+
+            if embedding_model is None or not hasattr(embedding_model, "embed_documents"):
                 raise RuntimeError("Embedding model failed to initialize.")
-            embedding_model = loaded_embedding_model
+
             logger.info("Embedding model loaded successfully")
 
     return embedding_model
@@ -2172,6 +2224,7 @@ def processing_status(session_id: str, session_secret: str | None = None):
 
 
 @app.post("/ask")
+
 def ask_question(data: Question):
     cleanup_expired_sessions()
 
@@ -2209,7 +2262,7 @@ def ask_question(data: Question):
         session_lock = session["lock"]
         if not session.get("vectorstore"):
             try:
-                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), embedding_model, allow_dangerous_deserialization=True)
+                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), get_embedding_model(), allow_dangerous_deserialization=True)
             except Exception as e:
                 logger.error(f"Failed to lazy load vectorstore: {e}")
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
@@ -2218,9 +2271,10 @@ def ask_question(data: Question):
         # Session-level retrieval cache
         retrieval_cache = session.setdefault(
             "retrieval_cache",
-            {}
+            OrderedDict()
         )
 
+        cleanup_retrieval_cache(retrieval_cache)
         # Cache hit
         cache_key = f"{mode}:{normalized_query}"
         if cache_key in retrieval_cache:
@@ -2551,7 +2605,7 @@ def summarize_pdf(data: SummarizeRequest):
         session_lock = session["lock"]
         if not session.get("vectorstore"):
             try:
-                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), embedding_model, allow_dangerous_deserialization=True)
+                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), get_embedding_model(), allow_dangerous_deserialization=True)
             except Exception as e:
                 logger.error(f"Failed to lazy load vectorstore: {e}")
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
