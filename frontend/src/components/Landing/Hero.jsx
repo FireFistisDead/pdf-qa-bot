@@ -1,7 +1,10 @@
 import React, { useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import './Hero.css';
 
 const Hero = () => {
+  const navigate = useNavigate();
+
   useEffect(() => {
     // Add staggered entrance animations
     const elements = document.querySelectorAll('.animate-on-load');
@@ -52,7 +55,7 @@ const Hero = () => {
           </div>
 
           <div className="hero-actions animate-on-load">
-            <button className="hero-btn-primary" onClick={() => window.location.href = '/'}>
+            <button className="hero-btn-primary" onClick={() => navigate('/signup')}>
               <span className="btn-text">GET STARTED</span>
               <span className="btn-glare"></span>
             </button>
