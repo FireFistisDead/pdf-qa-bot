@@ -51,12 +51,12 @@ def test_processing_status_is_pruned_with_session_ttl(monkeypatch):
 
     # With a long TTL, the status should be available.
     monkeypatch.setattr(main, "SESSION_TTL_MINUTES", 60)
-    res = client.get(f"/processing-status/{session_id}", headers={"X-Internal-Token": "secret"})
+    res = client.get(f"/processing-status/{session_id}?session_secret=s", headers={"X-Internal-Token": "secret"})
     assert res.status_code == 200
     assert res.json()["stage"] == "Starting"
 
     # With a zero TTL, the session should be pruned and status should disappear.
     monkeypatch.setattr(main, "SESSION_TTL_MINUTES", 0)
-    res = client.get(f"/processing-status/{session_id}", headers={"X-Internal-Token": "secret"})
+    res = client.get(f"/processing-status/{session_id}?session_secret=s", headers={"X-Internal-Token": "secret"})
     assert res.status_code == 404
 
