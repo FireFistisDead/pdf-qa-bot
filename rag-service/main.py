@@ -88,6 +88,7 @@ def save_sessions_unlocked():
                 "documents": meta.get("documents", []),
                 "retrieval_cache": meta.get("retrieval_cache", {}),
                 "chat": meta.get("chat", []),
+                "session_secret": meta.get("session_secret"),
             }
         with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f)
@@ -223,12 +224,18 @@ async def internal_auth_middleware(request: Request, call_next):
     This prevents attackers from bypassing the API gateway's rate limits by calling
     the RAG service directly (for example when port 5000 is accidentally exposed).
     """
-    if INTERNAL_RAG_TOKEN and request.url.path in {
+    protected_paths = {
         "/process-pdf",
         "/ask",
         "/summarize",
         "/validate-session-write",
-    }:
+        "/sessions/lookup",
+    }
+
+    if INTERNAL_RAG_TOKEN and (
+        request.url.path in protected_paths
+        or request.url.path.startswith("/processing-status/")
+    ):
         provided = request.headers.get("X-Internal-Token")
         if not internal_token_valid(provided, INTERNAL_RAG_TOKEN):
             return standard_error_response(403, "Forbidden")
@@ -584,6 +591,18 @@ def _touch_session_unlocked(session_id: str):
         meta = _recover_session_unlocked(session_id)
         if not meta:
             return None
+    # Hard-disable legacy sessions created before session secrets existed.
+    # These are effectively "session_id-only" capabilities and must be invalidated
+    # to avoid cross-user access.
+    if not (meta.get("session_secret") or "").strip():
+        session_dir = meta.get("session_dir")
+        try:
+            del sessions[session_id]
+        except Exception:
+            pass
+        remove_persisted_session(session_id, session_dir)
+        logger.info("Invalidated legacy session without secret session_id=%s", session_id)
+        return None
     if _is_session_expired(meta):
         session_dir = meta.get("session_dir")
         del sessions[session_id]
@@ -609,6 +628,15 @@ def _peek_session_unlocked(session_id: str):
         meta = _recover_session_unlocked(session_id)
         if not meta:
             return None
+    if not (meta.get("session_secret") or "").strip():
+        session_dir = meta.get("session_dir")
+        try:
+            del sessions[session_id]
+        except Exception:
+            pass
+        remove_persisted_session(session_id, session_dir)
+        logger.info("Invalidated legacy session without secret session_id=%s", session_id)
+        return None
     if _is_session_expired(meta):
         session_dir = meta.get("session_dir")
         del sessions[session_id]
@@ -1747,6 +1775,7 @@ class Question(BaseModel):
     question: str = Field(..., min_length=1, description="Question cannot be empty")
     session_id: UUID
     mode: str = Field(default="default")
+    session_secret: str | None = None
 
     @field_validator("question")
     @classmethod
@@ -1768,20 +1797,61 @@ class SummarizeRequest(BaseModel):
     pdf: str | None = None
     session_id: UUID
 
+    session_secret: str | None = None
+
+
+class SessionLookupItem(BaseModel):
+    session_id: UUID
+    session_secret: str = Field(..., min_length=1)
+
+
+class SessionsLookupRequest(BaseModel):
+    sessions: list[SessionLookupItem] = Field(..., min_length=1, max_length=50)
+
 @app.get("/sessions")
 def get_sessions():
+    raise HTTPException(
+        status_code=410,
+        detail="Endpoint removed. Use /sessions/lookup with session_id + session_secret.",
+    )
+
+
+def _require_session_secret(session: dict, provided_secret: str | None):
+    candidate = (provided_secret or "").strip()
+    if not candidate:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    expected = (session.get("session_secret") or "").strip()
+    if not expected or not secrets.compare_digest(candidate, expected):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
+@app.post("/sessions/lookup")
+def lookup_sessions(data: SessionsLookupRequest):
     cleanup_expired_sessions()
+
+    sessions_out = []
+
     with sessions_lock:
-        return [
-            {
-                "session_id": sid,
-                "created_at": meta.get("created_at"),
-                "last_accessed": meta.get("last_accessed"),
-                "documents": meta.get("documents", []),
-                "chat": meta.get("chat", []),
-            }
-            for sid, meta in sorted(sessions.items(), key=lambda x: x[1].get("last_accessed", 0), reverse=True)
-        ]
+        for item in data.sessions:
+            sid = str(item.session_id)
+            session = _touch_session_unlocked(sid)
+            if not session:
+                continue
+
+            _require_session_secret(session, item.session_secret)
+
+            sessions_out.append(
+                {
+                    "session_id": sid,
+                    "created_at": session.get("created_at"),
+                    "last_accessed": session.get("last_accessed"),
+                    "documents": session.get("documents", []),
+                    "chat": session.get("chat", []),
+                }
+            )
+
+    return sessions_out
 
 class SessionWriteRequest(BaseModel):
     session_id: UUID
@@ -2084,10 +2154,12 @@ def validate_session_write(data: SessionWriteRequest):
 
 
 @app.get("/processing-status/{session_id}")
-def processing_status(session_id: str):
+def processing_status(session_id: str, session_secret: str | None = None):
 
     with sessions_lock:
-        meta = sessions.get(session_id)
+        meta = _touch_session_unlocked(session_id)
+        if meta:
+            _require_session_secret(meta, session_secret)
         progress = meta.get("processing_progress") if meta else None
 
     if not progress:
@@ -2128,6 +2200,8 @@ def ask_question(data: Question):
                 status_code=404,
                 detail="Session expired or invalid. Please re-upload your PDFs."
             )
+
+        _require_session_secret(session, data.session_secret)
 
         if "lock" not in session:
             session["lock"] = threading.Lock()
@@ -2471,6 +2545,7 @@ def summarize_pdf(data: SummarizeRequest):
         session = _touch_session_unlocked(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+        _require_session_secret(session, data.session_secret)
         if "lock" not in session:
             session["lock"] = threading.Lock()
         session_lock = session["lock"]

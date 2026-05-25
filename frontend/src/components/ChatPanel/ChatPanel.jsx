@@ -21,6 +21,7 @@ const ChatPanel = ({
   selectedPdf,
   currentPdfName,
   currentPdfSessionId,
+  currentPdfSessionSecret,
   onUpdateLastBotMessage,
   onAppendMessage,
   onOpenSource,
@@ -50,7 +51,7 @@ const askQuestion = async () => {
     toast.error("Please enter a question before submitting.");
     return;
   }
-  if (!selectedPdf || !currentPdfSessionId) {
+  if (!selectedPdf || !currentPdfSessionId || !currentPdfSessionSecret) {
     toast.error("Please upload and select a PDF document first.");
     return;
   }
@@ -62,14 +63,14 @@ const askQuestion = async () => {
   onAppendMessage({ role: "bot", text: "", streaming: true, sources: [], mode });
 
   try {
-    await askQuestionStreamApi(trimmedQuestion, currentPdfSessionId, mode, (partialText) => {
+    await askQuestionStreamApi(trimmedQuestion, currentPdfSessionId, currentPdfSessionSecret, mode, (partialText) => {
       onUpdateLastBotMessage(partialText, true);
     });
     onUpdateLastBotMessage(null, false);
   } catch (streamErr) {
     console.warn("Streaming failed, falling back to /ask:", streamErr.message);
     try {
-      const data = await askQuestionApi(trimmedQuestion, currentPdfSessionId, mode);
+      const data = await askQuestionApi(trimmedQuestion, currentPdfSessionId, currentPdfSessionSecret, mode);
       onUpdateLastBotMessage(data.answer, false, data.sources || [], data.mode);
     } catch (e) {
       let errorMessage = "Error getting answer. Please try again.";
@@ -92,7 +93,7 @@ const askQuestion = async () => {
 };
 
   const summarizePDF = async () => {
-    if (!selectedPdf || !currentPdfSessionId) {
+    if (!selectedPdf || !currentPdfSessionId || !currentPdfSessionSecret) {
       toast.error("Please upload and select a PDF document first.");
       return;
     }
@@ -101,7 +102,7 @@ const askQuestion = async () => {
     const loadingToast = toast.loading("Summarizing PDF...");
 
     try {
-      const data = await summarizePdfApi(currentPdfName, currentPdfSessionId);
+      const data = await summarizePdfApi(currentPdfName, currentPdfSessionId, currentPdfSessionSecret);
       onAppendMessage({ role: "bot", text: data.summary });
       toast.success("PDF summarized successfully!", {
         id: loadingToast,

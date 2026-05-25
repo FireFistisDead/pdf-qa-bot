@@ -93,6 +93,7 @@ describe("askSchema validation", () => {
     const result = askSchema.safeParse({
       question: "What is this PDF about?",
       session_id: "550e8400-e29b-41d4-a716-446655440000",
+      session_secret: "session-secret-123",
     });
     assert.equal(result.success, true);
   });
@@ -125,6 +126,7 @@ describe("summarizeSchema validation", () => {
   test("accepts valid input", () => {
     const result = summarizeSchema.safeParse({
       session_id: "550e8400-e29b-41d4-a716-446655440000",
+      session_secret: "session-secret-123",
     });
     assert.equal(result.success, true);
   });

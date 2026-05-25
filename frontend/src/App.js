@@ -20,12 +20,37 @@ function App() {
   const [uploading, setUploading] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
 
+  const loadKnownSessions = React.useCallback(() => {
+    try {
+      const raw = localStorage.getItem("pdfqa_sessions");
+      const parsed = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .filter((s) => s && typeof s.session_id === "string" && typeof s.session_secret === "string")
+        .map((s) => ({ session_id: s.session_id, session_secret: s.session_secret }));
+    } catch (_) {
+      return [];
+    }
+  }, []);
+
+  const upsertKnownSession = React.useCallback((sessionId, sessionSecret) => {
+    if (!sessionId || !sessionSecret) return;
+    const existing = loadKnownSessions();
+    const next = [
+      { session_id: sessionId, session_secret: sessionSecret },
+      ...existing.filter((s) => s.session_id !== sessionId),
+    ];
+    localStorage.setItem("pdfqa_sessions", JSON.stringify(next.slice(0, 50)));
+  }, [loadKnownSessions]);
+
   React.useEffect(() => {
     // Load historical sessions on initial mount
     const fetchHistory = async () => {
       try {
-        const sessions = await getSessionsApi();
+        const knownSessions = loadKnownSessions();
+        const sessions = await getSessionsApi(knownSessions);
         if (sessions && sessions.length > 0) {
+          const secretById = new Map(knownSessions.map((s) => [s.session_id, s.session_secret]));
           const apiUrl = process.env.REACT_APP_API_URL || "";
           const formattedPdfs = sessions.map(s => {
             const doc = s.documents?.[0];
@@ -43,7 +68,7 @@ function App() {
               url: url,
               chat: s.chat || [],
               session_id: s.session_id,
-              session_secret: s.session_secret || null,
+              session_secret: secretById.get(s.session_id) || null,
             };
           });
           setPdfs(formattedPdfs);
@@ -54,7 +79,7 @@ function App() {
       }
     };
     fetchHistory();
-  }, []);
+  }, [loadKnownSessions]);
 
   // Router logic to serve new UI on /new
   const path = window.location.pathname;
@@ -97,6 +122,10 @@ function App() {
       const serverUrl = data.url ? (data.url.startsWith('http') ? data.url : `${apiUrl}${data.url}`) : null;
       const url = URL.createObjectURL(file);
       const pdfId = data.document?.document_id || data.session_id;
+
+      if (data.session_id && data.session_secret) {
+        upsertKnownSession(data.session_id, data.session_secret);
+      }
 
     setPdfs((prev) => {
   const updated = [
@@ -221,6 +250,7 @@ const handleOpenSource = (source, page) => {
   const currentChat = currentPdf?.chat || [];
   const currentPdfUrl = currentPdf?.url || null;
   const currentPdfSessionId = currentPdf?.session_id || null;
+  const currentPdfSessionSecret = currentPdf?.session_secret || null;
   const currentPdfName = currentPdf?.name || null;
 
   return (
@@ -310,6 +340,7 @@ const handleOpenSource = (source, page) => {
                     selectedPdf={selectedPdf}
                     currentPdfName={currentPdfName}
                     currentPdfSessionId={currentPdfSessionId}
+                    currentPdfSessionSecret={currentPdfSessionSecret}
                     onAppendMessage={handleAppendMessage}
                     onOpenSource={handleOpenSource}
                     onUpdateLastBotMessage={handleUpdateLastBotMessage}
