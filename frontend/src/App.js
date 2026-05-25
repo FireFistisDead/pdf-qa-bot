@@ -357,8 +357,8 @@ function App() {
       <Routes>
         <Route path="/" element={<MainApp />} />
         <Route path="/new" element={<LandingPage />} />
-        <Route path="/signin" element={<SignIn />} />
-        <Route path="/signup" element={<SignUp />} />
+        <Route path="/signin" element={<Login />} />
+        <Route path="/signup" element={<Signup />} />
       </Routes>
     </BrowserRouter>
   );
