@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { pdfjs } from "react-pdf";
 import "bootstrap/dist/css/bootstrap.min.css";
 import { Container, Row, Col } from "react-bootstrap";
@@ -15,7 +16,7 @@ import { extractApiErrorMessage, uploadPdfApi, getSessionsApi } from "./services
 
 pdfjs.GlobalWorkerOptions.workerSrc = `${process.env.PUBLIC_URL}/pdf.worker.min.js`;
 
-function App() {
+function MainApp() {
   const [pdfs, setPdfs] = useState([]); // {id, name, document_id, url, chat: [], session_id: ""}
   const [selectedPdf, setSelectedPdf] = useState(null);
   const [pdfJumpTarget, setPdfJumpTarget] = useState(null);
@@ -268,7 +269,6 @@ const handleOpenSource = (source, page) => {
         position="top-right"
         toastOptions={{
           duration: 3500,
-
           style: {
             background: "#111827",
             color: "#fff",
@@ -278,20 +278,8 @@ const handleOpenSource = (source, page) => {
             backdropFilter: "blur(12px)",
             boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
           },
-
-          success: {
-            iconTheme: {
-              primary: "#8B5CF6",
-              secondary: "#fff",
-            },
-          },
-
-          error: {
-            iconTheme: {
-              primary: "#EF4444",
-              secondary: "#fff",
-            },
-          },
+          success: { iconTheme: { primary: "#8B5CF6", secondary: "#fff" } },
+          error: { iconTheme: { primary: "#EF4444", secondary: "#fff" } },
         }}
       />
       <div
@@ -306,34 +294,33 @@ const handleOpenSource = (source, page) => {
             onUpload={handleUpload}
           />
           {/* PDF LIST */}
-{pdfs.length > 0 && (
-  <div style={{ marginBottom: "16px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
-    {pdfs.map((pdf) => (
-      <button
-        key={pdf.id}
-        onClick={() => {
-          setSelectedPdf(pdf.id);
-          setPdfJumpTarget(null);
-        }}
-        style={{
-          padding: "8px 16px",
-          borderRadius: "12px",
-          border: "none",
-          background: selectedPdf === pdf.id ? "#8B5CF6" : "#e0e0e0",
-          color: selectedPdf === pdf.id ? "#fff" : "#333",
-          cursor: "pointer",
-          fontWeight: 600,
-        }}
-      >
-        {pdf.name}
-      </button>
-    ))}
-  </div>
-)}
+          {pdfs.length > 0 && (
+            <div style={{ marginBottom: "16px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              {pdfs.map((pdf) => (
+                <button
+                  key={pdf.id}
+                  onClick={() => {
+                    setSelectedPdf(pdf.id);
+                    setPdfJumpTarget(null);
+                  }}
+                  style={{
+                    padding: "8px 16px",
+                    borderRadius: "12px",
+                    border: "none",
+                    background: selectedPdf === pdf.id ? "#8B5CF6" : "#e0e0e0",
+                    color: selectedPdf === pdf.id ? "#fff" : "#333",
+                    cursor: "pointer",
+                    fontWeight: 600,
+                  }}
+                >
+                  {pdf.name}
+                </button>
+              ))}
+            </div>
+          )}
           <Row className="justify-content-center">
             <Col md={11}>
               <Row className="g-4">
-                {/* LEFT PANEL — PDF VIEWER */}
                 <Col md={7}>
                   <PdfViewer
                     darkMode={darkMode}
@@ -341,7 +328,6 @@ const handleOpenSource = (source, page) => {
                     jumpTarget={pdfJumpTarget}
                   />
                 </Col>
-                {/* RIGHT PANEL — CHAT */}
                 <Col md={5}>
                   <ChatPanel
                     darkMode={darkMode}
@@ -362,6 +348,19 @@ const handleOpenSource = (source, page) => {
         </Container>
       </div>
     </>
+  );
+}
+
+function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<MainApp />} />
+        <Route path="/new" element={<LandingPage />} />
+        <Route path="/signin" element={<SignIn />} />
+        <Route path="/signup" element={<SignUp />} />
+      </Routes>
+    </BrowserRouter>
   );
 }
 

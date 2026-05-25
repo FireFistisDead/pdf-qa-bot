@@ -10,7 +10,7 @@ import {
 
 import LightModeIcon from "@mui/icons-material/LightMode";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
-import PictureAsPdfIcon from "@mui/icons-material/PictureAsPdf";
+import logo from "./Nav_logo.png";
 
 const Navbar = ({ darkMode, setDarkMode }) => {
   return (
@@ -31,14 +31,14 @@ const Navbar = ({ darkMode, setDarkMode }) => {
         <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
           
           <Avatar
+            src={logo}
+            alt="Logo"
             sx={{
-              bgcolor: "#7C4DFF",
               width: 48,
               height: 48,
+              bgcolor: "transparent",
             }}
-          >
-            <PictureAsPdfIcon />
-          </Avatar>
+          />
 
           <Box>
             <Typography
