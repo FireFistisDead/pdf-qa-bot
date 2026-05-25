@@ -12,9 +12,23 @@ services:
   rag-service:
     build:
       context: ./rag-service
-    # Do NOT publish the RAG service to the host network by default.
-    # It is an internal dependency of the API gateway and publishing it allows
-    # bypassing gateway rate-limits / bans by calling FastAPI endpoints directly.
+    # ── Security: RAG service is intentionally NOT exposed to the host ──────────
+    # There is no `ports:` entry here. The service is reachable only from other
+    # containers on the default Compose bridge network (via http://rag-service:5000).
+    #
+    # Why this matters: all inference endpoints — including /ask, /ask/stream,
+    # /summarize, and /process-pdf — consume significant compute. Publishing port
+    # 5000 to the host (e.g. "5000:5000") would let any network client invoke the
+    # LLM pipeline directly, bypassing every rate limiter, slow-down delay, and IP
+    # ban that the Express gateway enforces.
+    #
+    # The INTERNAL_RAG_TOKEN environment variable provides a second layer of
+    # defence (the RAG service rejects requests without the correct header), but
+    # port isolation is the primary control — set INTERNAL_RAG_TOKEN in .env too.
+    #
+    # If you need to inspect the RAG service during development:
+    #   docker compose exec rag-service curl http://localhost:5000/docs
+    # or add a temporary ports entry and remove it before merging.
     volumes:
       - shared_uploads:/app/uploads
       - hf_cache:/root/.cache/huggingface

@@ -31,7 +31,7 @@ import threading
 import time
 import logging
 import re
-
+from collections import OrderedDict
 try:  # pragma: no cover
     import fcntl  # type: ignore
 except Exception:  # pragma: no cover
@@ -81,7 +81,15 @@ def load_sessions():
 def save_sessions_unlocked():
     try:
         data = {}
+
         for sid, meta in sessions.items():
+
+            safe_cache = {}
+
+            for key, value in meta.get("retrieval_cache", {}).items():
+                if isinstance(value, dict):
+                    safe_cache[key] = value
+
             data[sid] = {
                 "created_at": meta.get("created_at"),
                 "last_accessed": meta.get("last_accessed"),
@@ -90,24 +98,29 @@ def save_sessions_unlocked():
                 "chat": meta.get("chat", []),
                 "session_secret": meta.get("session_secret"),
             }
+
         with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f)
+
     except Exception as e:
         logger.error(f"Failed to save sessions: {e}")
 
 # Global session store
 sessions = load_sessions()
+processing_progress = {}
 def update_processing_progress(session_id, stage, progress):
     payload = {
         "stage": stage,
         "progress": progress,
         "updated_at": now_ts(),
     }
+
+    processing_progress[session_id] = payload
+
     with sessions_lock:
         meta = sessions.get(session_id)
-        if not meta:
-            return
-        meta["processing_progress"] = payload
+        if meta:
+            meta["processing_progress"] = payload
 
 INTERNAL_RAG_TOKEN = os.getenv("INTERNAL_RAG_TOKEN", "").strip()
 
@@ -223,21 +236,42 @@ async def internal_auth_middleware(request: Request, call_next):
 
     This prevents attackers from bypassing the API gateway's rate limits by calling
     the RAG service directly (for example when port 5000 is accidentally exposed).
+
+    Protection is applied via two mechanisms:
+      1. Exact-match set — covers named endpoints that must never be publicly reachable.
+      2. Prefix set — covers entire sub-trees so that any future sub-route (e.g.
+         /ask/v2/stream) is automatically protected without requiring a code change here.
     """
     protected_paths = {
         "/process-pdf",
         "/ask",
+        "/ask/stream",
         "/summarize",
         "/validate-session-write",
         "/sessions/lookup",
     }
 
+    # Prefix-based guard: any sub-path under these trees is also protected.
+    # This ensures that adding a new streaming variant or versioned route can
+    # never silently bypass auth because a developer forgot to update the set above.
+    protected_prefixes = (
+        "/ask/",
+        "/processing-status/",
+    )
+
+    path = request.url.path
+
     if INTERNAL_RAG_TOKEN and (
-        request.url.path in protected_paths
-        or request.url.path.startswith("/processing-status/")
+        path in protected_paths
+        or any(path.startswith(prefix) for prefix in protected_prefixes)
     ):
         provided = request.headers.get("X-Internal-Token")
         if not internal_token_valid(provided, INTERNAL_RAG_TOKEN):
+            logger.warning(
+                "Internal auth rejected path=%s ip=%s",
+                path,
+                request.client.host if request.client else "unknown",
+            )
             return standard_error_response(403, "Forbidden")
 
     return await call_next(request)
@@ -301,6 +335,9 @@ ASK_REQUIRE_CITATIONS = os.getenv("ASK_REQUIRE_CITATIONS", "true").strip().lower
     "on",
 }
 RETRIEVAL_CACHE_LIMIT = int(os.getenv("RETRIEVAL_CACHE_LIMIT", "25"))
+RETRIEVAL_CACHE_TTL_SECONDS = int(
+    os.getenv("RETRIEVAL_CACHE_TTL_SECONDS", "1800")
+)
 
 # ── Semantic Chunking Config ─────────────────────────────────────────────────
 SEMANTIC_CHUNK_SOFT_MAX = int(os.getenv("SEMANTIC_CHUNK_SOFT_MAX", "1200"))
@@ -351,6 +388,37 @@ FACTUAL_QUESTION_PREFIXES = (
 def now_ts():
     return time.time()
 
+def cleanup_retrieval_cache(retrieval_cache):
+    expired_keys = []
+
+    current_time = now_ts()
+
+    for key, value in retrieval_cache.items():
+
+        if not isinstance(value, dict):
+            expired_keys.append(key)
+            continue
+
+        cached_at = value.get("cached_at")
+
+        if not cached_at:
+            expired_keys.append(key)
+            continue
+
+        age = current_time - cached_at
+
+        if age > RETRIEVAL_CACHE_TTL_SECONDS:
+            expired_keys.append(key)
+
+    for key in expired_keys:
+        retrieval_cache.pop(key, None)
+
+    if expired_keys:
+        logger.info(
+            "Retrieval cache cleanup removed=%s remaining=%s",
+            len(expired_keys),
+            len(retrieval_cache),
+        )
 
 def session_expires_at(last_accessed: float) -> float:
     return last_accessed + (SESSION_TTL_MINUTES * 60)
@@ -549,7 +617,45 @@ def _recover_session_unlocked(session_id: str):
     logger.info("Recovered persisted session session_id=%s", session_id)
     return meta
 
+def cleanup_failed_session(session_id: str):
+    """
+    Best-effort rollback cleanup for partially created sessions.
 
+    Used when PDF ingestion fails after placeholder session creation
+    but before the session becomes fully usable.
+    """
+    try:
+        with sessions_lock:
+            session = sessions.pop(session_id, None)
+
+            if session_id in processing_progress:
+                processing_progress.pop(session_id, None)
+
+        try:
+            remove_persisted_session(session_id)
+        except Exception:
+            logger.exception(
+                "Failed to remove persisted session registry entry session_id=%s",
+                session_id,
+            )
+
+        if session:
+            session_dir = session.get("session_dir")
+            if session_dir and os.path.exists(session_dir):
+                try:
+                    shutil.rmtree(session_dir, ignore_errors=True)
+                except Exception:
+                    logger.exception(
+                        "Failed to remove session directory session_id=%s path=%s",
+                        session_id,
+                        session_dir,
+                    )
+
+    except Exception:
+        logger.exception(
+            "Unexpected cleanup failure for partially created session session_id=%s",
+            session_id,
+        )
 def cleanup_expired_sessions():
     """
     Remove expired sessions and enforce max session cap.
@@ -1381,23 +1487,28 @@ HF_GENERATION_MODEL = os.getenv("HF_GENERATION_MODEL", "google/flan-t5-base")
 generation_tokenizer = None
 generation_model = None
 generation_is_encoder_decoder = False
-embedding_model = None
 
+
+
+embedding_model = None
 
 def get_embedding_model():
     global embedding_model
+
     if embedding_model is not None and hasattr(embedding_model, "embed_documents"):
         return embedding_model
 
     with model_load_lock:
         if embedding_model is None or not hasattr(embedding_model, "embed_documents"):
             logger.info("Loading embedding model")
-            loaded_embedding_model = HuggingFaceEmbeddings(
+
+            embedding_model = HuggingFaceEmbeddings(
                 model_name="sentence-transformers/all-MiniLM-L6-v2"
             )
-            if loaded_embedding_model is None or not hasattr(loaded_embedding_model, "embed_documents"):
+
+            if embedding_model is None or not hasattr(embedding_model, "embed_documents"):
                 raise RuntimeError("Embedding model failed to initialize.")
-            embedding_model = loaded_embedding_model
+
             logger.info("Embedding model loaded successfully")
 
     return embedding_model
@@ -2032,6 +2143,10 @@ def process_pdf(
         embeddings = get_embedding_model()
     except Exception:
         logger.exception("Failed to load embedding model filename=%s", filename)
+
+        if created_placeholder_session and processing_session_id:
+            cleanup_failed_session(processing_session_id)
+
         raise HTTPException(
             status_code=503,
             detail=(
@@ -2043,9 +2158,16 @@ def process_pdf(
 
     try:
         new_vectorstore = FAISS.from_documents(chunks, embeddings)
-    except Exception as exc:
+    except Exception:
         logger.exception("Failed to create vectorstore filename=%s", filename)
-        raise HTTPException(status_code=500, detail="Failed to index the uploaded PDF.")
+
+        if created_placeholder_session and processing_session_id:
+            cleanup_failed_session(processing_session_id)
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to index the uploaded PDF.",
+        )
 
     if requested_session_id:
         with session_store_lock(requested_session_id):
@@ -2088,10 +2210,22 @@ def process_pdf(
                     len(chunks),
                 )
     else:
-        with session_store_lock(session_id := str(uuid.uuid4())):
-            session_secret = generate_session_secret()
+        session_id = processing_session_id
+
+        with session_store_lock(session_id):
+            with sessions_lock:
+                existing_session = sessions.get(session_id)
+                if not existing_session:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Session initialization failed."
+                    )
+
+                session_secret = existing_session.get("session_secret")
+                created_at = existing_session.get("created_at", now)
+
             session_dir = persist_vectorstore(session_id, new_vectorstore)
-            
+
             with sessions_lock:
                 _cleanup_expired_sessions_unlocked()
                 _enforce_max_sessions_unlocked()
@@ -2101,11 +2235,11 @@ def process_pdf(
                 session_lock = threading.Lock()
                 sessions[session_id] = {
                     "vectorstore": new_vectorstore,
-                    "lock": session_lock,
+                    "lock": threading.Lock(),
                     "documents": [uploaded_document],
                     "session_secret": session_secret,
                     "session_dir": session_dir,
-                    "created_at": now,
+                    "created_at": created_at,
                     "last_accessed": now,
                     "retrieval_cache": {},
                     "chat": [],
@@ -2179,6 +2313,7 @@ def processing_status(session_id: str, session_secret: str | None = None):
 
 
 @app.post("/ask")
+
 def ask_question(data: Question):
     cleanup_expired_sessions()
 
@@ -2216,7 +2351,7 @@ def ask_question(data: Question):
         session_lock = session["lock"]
         if not session.get("vectorstore"):
             try:
-                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), embedding_model, allow_dangerous_deserialization=True)
+                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), get_embedding_model(), allow_dangerous_deserialization=True)
             except Exception as e:
                 logger.error(f"Failed to lazy load vectorstore: {e}")
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
@@ -2225,9 +2360,10 @@ def ask_question(data: Question):
         # Session-level retrieval cache
         retrieval_cache = session.setdefault(
             "retrieval_cache",
-            {}
+            OrderedDict()
         )
 
+        cleanup_retrieval_cache(retrieval_cache)
         # Cache hit
         cache_key = f"{mode}:{normalized_query}"
         if cache_key in retrieval_cache:
@@ -2544,6 +2680,246 @@ def ask_question(data: Question):
 
     return response_payload
 
+@app.post("/ask/stream")
+def ask_question_stream(data: Question):
+    """
+    Streaming variant of /ask. Returns the generated answer as a plain-text
+    chunked response so the frontend can render tokens progressively.
+
+    Retrieval and evidence-gating are identical to /ask. Generation is run in
+    a background thread using TextIteratorStreamer so the HTTP response can
+    begin before the model has finished producing all tokens.
+
+    Authentication is enforced by internal_auth_middleware — this endpoint is
+    in both `protected_paths` (exact match) and under the `/ask/` prefix guard,
+    so it cannot be reached without a valid X-Internal-Token when
+    INTERNAL_RAG_TOKEN is configured.
+    """
+    cleanup_expired_sessions()
+
+    question = (data.question or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Question is required.")
+
+    intent = detect_question_intent(question)
+    session_id = str(data.session_id)
+    mode = data.mode
+    normalized_query = normalize_query(question)
+
+    with sessions_lock:
+        session = _touch_session_unlocked(session_id)
+        if not session:
+            raise HTTPException(
+                status_code=404,
+                detail="Session expired or invalid. Please re-upload your PDFs.",
+            )
+
+        _require_session_secret(session, data.session_secret)
+
+        if "lock" not in session:
+            session["lock"] = threading.Lock()
+
+        session_lock = session["lock"]
+        if not session.get("vectorstore"):
+            try:
+                session["vectorstore"] = FAISS.load_local(
+                    str(FAISS_DIR / session_id),
+                    embedding_model,
+                    allow_dangerous_deserialization=True,
+                )
+            except Exception as exc:
+                logger.error("Failed to lazy load vectorstore session_id=%s error=%s", session_id, exc)
+                raise HTTPException(status_code=500, detail="Failed to load session index.")
+        vectorstore = session["vectorstore"]
+
+        retrieval_cache = session.setdefault("retrieval_cache", {})
+        cache_key = f"{mode}:{normalized_query}"
+        if cache_key in retrieval_cache:
+            logger.info(
+                "Stream retrieval cache hit session_id=%s cache_key=%s",
+                session_id,
+                cache_key,
+            )
+            scored_candidates = retrieval_cache[cache_key]
+            cache_hit = True
+        else:
+            cache_hit = False
+
+    try:
+        with session_lock:
+            indexed_documents = collect_index_documents(vectorstore)
+            if not cache_hit:
+                logger.info(
+                    "Stream retrieval cache miss session_id=%s cache_key=%s",
+                    session_id,
+                    cache_key,
+                )
+                scored_candidates = search_retrieval_candidates(
+                    vectorstore,
+                    question,
+                    ASK_RETRIEVAL_CANDIDATES,
+                )
+                with sessions_lock:
+                    current_session = sessions.get(session_id)
+                    if current_session:
+                        rc = current_session.setdefault("retrieval_cache", {})
+                        if len(rc) >= RETRIEVAL_CACHE_LIMIT:
+                            oldest = next(iter(rc))
+                            del rc[oldest]
+                        rc[cache_key] = scored_candidates
+    except Exception:
+        logger.exception("Stream similarity search failed session_id=%s", session_id)
+        raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
+
+    docs = (
+        representative_documents_by_source(indexed_documents)
+        if intent == "overview"
+        else diversify_retrieved_documents(scored_candidates, question)
+    )
+
+    best_score = scored_candidates[0][1] if scored_candidates else None
+    if not passes_evidence_gate(question, docs, best_score, intent):
+        logger.info(
+            "Stream evidence gate refused session_id=%s intent=%s best_score=%s",
+            session_id,
+            intent,
+            best_score,
+        )
+
+        def _refuse_stream():
+            yield INSUFFICIENT_CONTEXT_MESSAGE
+
+        return StreamingResponse(_refuse_stream(), media_type="text/plain; charset=utf-8")
+
+    context = format_context(docs)
+
+    grounded_answer = build_answer_from_documents(
+        question,
+        docs,
+        intent,
+        source_id_by_key={document_dedupe_key(doc): idx + 1 for idx, doc in enumerate(docs)},
+    )
+
+    # For grounded (non-LLM) answers, stream the result directly without
+    # spinning up a generation thread — there are no tokens to generate.
+    if grounded_answer != INSUFFICIENT_CONTEXT_MESSAGE and grounded_answer:
+        citation_sources = [citation_source_for_document(doc, idx) for idx, doc in enumerate(docs)]
+        framed = apply_mode_framing(grounded_answer, question, mode, docs, context)
+        if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
+            framed = grounded_answer
+
+        with sessions_lock:
+            current_session = sessions.get(session_id)
+            if current_session:
+                current_session.setdefault("chat", []).append({
+                    "question": question,
+                    "answer": framed,
+                    "sources": citation_sources,
+                    "mode": mode,
+                })
+                save_sessions_unlocked()
+
+        def _grounded_stream():
+            yield framed
+
+        return StreamingResponse(_grounded_stream(), media_type="text/plain; charset=utf-8")
+
+    # LLM generation path — run in a background thread so we can stream tokens
+    # back to the caller as they are produced rather than waiting for the full
+    # completion before sending anything.
+    prompt = (
+        "You are a careful assistant answering questions over one or more uploaded PDF documents. "
+        "Use only the provided context. The context may include excerpts from multiple PDFs. "
+        "When the question asks for a relationship, comparison, or synthesis, connect the relevant facts across documents. "
+        "If the context does not contain enough information, say that briefly and do not invent details.\n\n"
+        "Reference the provided source numbers naturally whenever the answer is directly supported by the context.\n"
+        "Cite sources using formats like 'According to Source 1' or 'Source 2 explains that...'\n"
+        "You are a helpful AI assistant.\n"
+        "Give clear, conversational, human-friendly answers.\n"
+        "Do not return raw PDF text or chunks.\n"
+        "Summarize properly in readable sentences.\n\n"
+        f"Context:\n{context}\n\n"
+        f"Question: {question}\n"
+        "Answer:"
+    )
+
+    logger.info(
+        "Stream executing query session_id=%s retrieved_chunks=%s",
+        session_id,
+        len(docs),
+    )
+
+    def _generate_and_stream():
+        try:
+            tokenizer, model, is_encoder_decoder = load_generation_model()
+            model_device = next(model.parameters()).device
+            encoded = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+            encoded = {k: v.to(model_device) for k, v in encoded.items()}
+            pad_token_id = (
+                tokenizer.pad_token_id
+                if tokenizer.pad_token_id is not None
+                else tokenizer.eos_token_id
+            )
+            streamer = TextIteratorStreamer(
+                tokenizer,
+                skip_prompt=True,
+                skip_special_tokens=True,
+            )
+
+            generate_kwargs = {
+                **encoded,
+                "max_new_tokens": 256,
+                "do_sample": False,
+                "pad_token_id": pad_token_id,
+                "streamer": streamer,
+            }
+
+            generation_thread = threading.Thread(
+                target=_run_generation_locked,
+                args=(model, generate_kwargs),
+                daemon=True,
+            )
+            generation_thread.start()
+
+            full_answer_parts = []
+            for token_text in streamer:
+                if token_text:
+                    full_answer_parts.append(token_text)
+                    yield token_text
+
+            generation_thread.join(timeout=180)
+
+            full_answer = "".join(full_answer_parts).strip()
+            citation_sources = [citation_source_for_document(doc, idx) for idx, doc in enumerate(docs)]
+            with sessions_lock:
+                current_session = sessions.get(session_id)
+                if current_session:
+                    current_session.setdefault("chat", []).append({
+                        "question": question,
+                        "answer": full_answer,
+                        "sources": citation_sources,
+                        "mode": mode,
+                    })
+                    save_sessions_unlocked()
+        except Exception:
+            logger.exception("Stream generation failed session_id=%s", session_id)
+            yield "\n[Generation error. Please try again.]"
+
+    return StreamingResponse(_generate_and_stream(), media_type="text/plain; charset=utf-8")
+
+
+def _run_generation_locked(model, generate_kwargs):
+    """Run model.generate() under the global generation lock in a background thread.
+
+    Keeping the forward pass serialised prevents concurrent GPU/CPU memory
+    exhaustion while still allowing the calling thread to iterate the streamer
+    and forward tokens to the HTTP client as they arrive.
+    """
+    with generation_lock:
+        with torch.no_grad():
+            model.generate(**generate_kwargs)
+
+
 @app.post("/summarize")
 def summarize_pdf(data: SummarizeRequest):
     cleanup_expired_sessions()
@@ -2558,7 +2934,7 @@ def summarize_pdf(data: SummarizeRequest):
         session_lock = session["lock"]
         if not session.get("vectorstore"):
             try:
-                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), embedding_model, allow_dangerous_deserialization=True)
+                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), get_embedding_model(), allow_dangerous_deserialization=True)
             except Exception as e:
                 logger.error(f"Failed to lazy load vectorstore: {e}")
                 raise HTTPException(status_code=500, detail="Failed to load session index.")

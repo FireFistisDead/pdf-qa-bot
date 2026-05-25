@@ -1,4 +1,4 @@
-// feat: file type and size validation added for /upload endpoint (closes #179)
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
@@ -13,6 +13,7 @@ const helmet = require("helmet");
 const { askSchema, summarizeSchema, sessionsLookupSchema } = require("./validators/schemas");
 const { clientIpFromRequest } = require("./security/ip");
 const { createRedisClient } = require("./security/redis");
+const authRoutes = require("./src/routes/authRoutes");
 
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
 const INTERNAL_RAG_TOKEN = process.env.INTERNAL_RAG_TOKEN || "";
@@ -285,6 +286,7 @@ const inferenceLimiter = rateLimit({
 // Apply the ban guard and global limiter to every single route.
 app.use(banGuard);
 app.use(globalLimiter);
+app.use("/api/auth", authRoutes);
 
 const MAX_PDF_SIZE_BYTES = 20 * 1024 * 1024;
 const UPLOADS_DIR = path.resolve("uploads");

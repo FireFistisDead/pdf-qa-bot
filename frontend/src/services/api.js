@@ -46,7 +46,7 @@ export const uploadPdfApi = async (file, sessionId = null, sessionSecret = null)
     formData.append("session_secret", sessionSecret);
   }
 
-  const res = await axios.post(`${API_BASE}/upload`, formData, {
+  const res = await axios.post(`${API_BASE}/process-pdf`, formData, {
     timeout: 30000, // 30 second timeout
   });
   return res.data;
