@@ -1,5 +1,5 @@
 import React from "react";
-import { Button } from "react-bootstrap";
+
 import ReactMarkdown from "react-markdown";
 
 const MODE_BADGE = {
@@ -11,7 +11,7 @@ const MODE_BADGE = {
 };
 
 const MessageBubble = ({ msg, darkMode, onOpenSource }) => {
-  const getSourceText = (source) => source.preview || source.text;
+
   const getSourceLabel = (source) => source.document || "Source Document";
   const hasOpenablePage = (source) => Boolean(source.page && source.document);
 
