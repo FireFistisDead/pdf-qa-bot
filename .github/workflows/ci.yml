@@ -53,7 +53,7 @@ jobs:
       - name: Run RAG tests
         run: |
           cd rag-service
-          python -m pytest tests/ -v --tb=short || echo "No tests found"
+          python -m pytest . -v --tb=short
 
   frontend:
     name: Frontend Build Check
