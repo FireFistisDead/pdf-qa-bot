@@ -40,16 +40,41 @@ const questionSchema = z.preprocess(
   z.string().trim().min(1, "Question is required."),
 );
 
+const modeSchema = z.preprocess(
+  (val) => (typeof val === "string" ? val : "default"),
+  z.enum(["default", "tutor", "socratic", "eli5", "concise"]).default("default")
+);
+
+const sessionSecretSchema = z.preprocess(
+  (val) => (typeof val === "string" ? val : ""),
+  z.string().trim().min(1, "session_secret is required."),
+);
+
 const askSchema = z.object({
   question: questionSchema,
   session_id: uuidSchema,
+  session_secret: sessionSecretSchema,
+  mode: modeSchema,
 });
 
 const summarizeSchema = z.object({
   session_id: uuidSchema,
+  session_secret: sessionSecretSchema,
+});
+
+const sessionsLookupSchema = z.object({
+  sessions: z
+    .array(
+      z.object({
+        session_id: uuidSchema,
+        session_secret: sessionSecretSchema,
+      }),
+    )
+    .min(1, "sessions is required."),
 });
 
 module.exports = {
   askSchema,
   summarizeSchema,
+  sessionsLookupSchema,
 };

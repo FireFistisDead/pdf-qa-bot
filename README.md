@@ -1,5 +1,7 @@
 # PDF Q&A Bot
 
+![PDF Q&A Bot Logo](logo.svg)
+
 Upload PDF documents, ask natural-language questions grounded in their content, and generate concise summaries — all through a local, three-service stack. The React UI talks to a Node.js API gateway, which orchestrates a Python RAG (retrieval-augmented generation) service powered by Hugging Face embeddings and a configurable text-generation model.
 
 ---
@@ -27,6 +29,7 @@ Upload PDF documents, ask natural-language questions grounded in their content, 
 |------------|-------------|
 | **PDF upload** | Multipart upload with server-side parsing, chunking, and vector indexing |
 | **Question answering** | Semantic search over document chunks, then local HF model generation |
+| **Reading Modes** | Choose between Standard, Tutor, Socratic, Simple, or Concise answering styles |
 | **Summarization** | Bullet-style summaries from retrieved context |
 | **Multi-document UI** | Upload and switch between multiple PDFs (`frontend/`) |
 | **In-browser viewer** | Page-by-page PDF preview with `react-pdf` |
@@ -70,7 +73,7 @@ flowchart LR
 
 > **Security note:** The FastAPI RAG service (`:5000`) is meant to be an **internal** dependency of the Express gateway (`:4000`).
 > Do not expose it publicly — otherwise attackers can bypass gateway rate limiting by calling RAG endpoints directly.
-> For defense-in-depth, set `INTERNAL_RAG_TOKEN` so the RAG service rejects requests missing `X-Internal-Token`.
+> `INTERNAL_RAG_TOKEN` is required so the RAG service rejects requests missing `X-Internal-Token`.
 
 ### Default ports
 
@@ -306,7 +309,7 @@ Environment variables are read from `rag-service/.env` (create from `.env.exampl
 | `OPENAI_API_KEY` | *(empty)* | Reserved; not used by the current local HF pipeline |
 | `HOST` | `127.0.0.1` | Documented for optional deployment tuning |
 | `PORT` | `5000` | Documented RAG port (uvicorn CLI flag takes precedence in dev) |
-| `INTERNAL_RAG_TOKEN` | *(empty)* | Optional shared secret: when set, RAG endpoints require `X-Internal-Token` |
+| `INTERNAL_RAG_TOKEN` | *(required)* | Shared secret required by protected RAG endpoints. Requests must include the same value in `X-Internal-Token` |
 | `PDF_PARSE_TIMEOUT_SECONDS` | `20` | Hard timeout for PDF parsing/extraction (mitigates DoS-grade PDFs) |
 | `MAX_PDF_PAGES` | `200` | Reject PDFs with too many pages |
 | `MAX_PDF_EXTRACT_CHARS` | `400000` | Cap extracted text before chunking |

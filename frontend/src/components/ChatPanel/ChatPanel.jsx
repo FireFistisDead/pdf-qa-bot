@@ -7,20 +7,39 @@ import MessageBubble from "./MessageBubble";
 import ExportMenu from "./ExportMenu";
 import { askQuestionApi, askQuestionStreamApi, extractApiErrorMessage, summarizePdfApi } from "../../services/api";
 
+const MODE_OPTIONS = [
+  { value: "default",  label: "Standard",  tooltip: "Balanced answers grounded in your document. Best for general-purpose reading." },
+  { value: "tutor",    label: "Tutor",     tooltip: "Full answer + one thoughtful follow-up question to push your understanding further." },
+  { value: "socratic", label: "Socratic",  tooltip: "Guides you to the answer through 2–3 questions. Never reveals the answer directly." },
+  { value: "eli5",     label: "Simple",    tooltip: "Plain language, everyday analogies, no jargon. Best for dense academic or legal documents." },
+  { value: "concise",  label: "Concise",   tooltip: "1–2 sentence answer, 60-word maximum. Best for quick fact-checking." },
+];
+
 const ChatPanel = ({
   darkMode,
   currentChat,
   selectedPdf,
   currentPdfName,
   currentPdfSessionId,
+  currentPdfSessionSecret,
   onUpdateLastBotMessage,
   onAppendMessage,
+  onOpenSource,
   handleClearChat,
 }) => {
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
   const [summarizing, setSummarizing] = useState(false);
+  const [mode, setMode] = useState(() => {
+    const saved = localStorage.getItem("pdfqa_preferred_mode");
+    return MODE_OPTIONS.some(opt => opt.value === saved) ? saved : "default";
+  });
   const messagesEndRef = useRef(null);
+
+  const handleModeChange = (newMode) => {
+    setMode(newMode);
+    localStorage.setItem("pdfqa_preferred_mode", newMode);
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({
@@ -32,7 +51,7 @@ const askQuestion = async () => {
     toast.error("Please enter a question before submitting.");
     return;
   }
-  if (!selectedPdf || !currentPdfSessionId) {
+  if (!selectedPdf || !currentPdfSessionId || !currentPdfSessionSecret) {
     toast.error("Please upload and select a PDF document first.");
     return;
   }
@@ -41,18 +60,18 @@ const askQuestion = async () => {
   setAsking(true);
   setQuestion("");
   onAppendMessage({ role: "user", text: trimmedQuestion });
-  onAppendMessage({ role: "bot", text: "", streaming: true, sources: [] });
+  onAppendMessage({ role: "bot", text: "", streaming: true, sources: [], mode });
 
   try {
-    await askQuestionStreamApi(trimmedQuestion, currentPdfSessionId, (partialText) => {
+    await askQuestionStreamApi(trimmedQuestion, currentPdfSessionId, currentPdfSessionSecret, mode, (partialText) => {
       onUpdateLastBotMessage(partialText, true);
     });
     onUpdateLastBotMessage(null, false);
   } catch (streamErr) {
     console.warn("Streaming failed, falling back to /ask:", streamErr.message);
     try {
-      const data = await askQuestionApi(trimmedQuestion, currentPdfSessionId);
-      onUpdateLastBotMessage(data.answer, false, data.sources || []);
+      const data = await askQuestionApi(trimmedQuestion, currentPdfSessionId, currentPdfSessionSecret, mode);
+      onUpdateLastBotMessage(data.answer, false, data.sources || [], data.mode);
     } catch (e) {
       let errorMessage = "Error getting answer. Please try again.";
       if (e.code === "ECONNABORTED") {
@@ -74,7 +93,7 @@ const askQuestion = async () => {
 };
 
   const summarizePDF = async () => {
-    if (!selectedPdf || !currentPdfSessionId) {
+    if (!selectedPdf || !currentPdfSessionId || !currentPdfSessionSecret) {
       toast.error("Please upload and select a PDF document first.");
       return;
     }
@@ -83,7 +102,7 @@ const askQuestion = async () => {
     const loadingToast = toast.loading("Summarizing PDF...");
 
     try {
-      const data = await summarizePdfApi(currentPdfName, currentPdfSessionId);
+      const data = await summarizePdfApi(currentPdfName, currentPdfSessionId, currentPdfSessionSecret);
       onAppendMessage({ role: "bot", text: data.summary });
       toast.success("PDF summarized successfully!", {
         id: loadingToast,
@@ -237,7 +256,12 @@ const askQuestion = async () => {
                 </div>
               </div>
               {currentChat.map((msg, i) => (
-                <MessageBubble key={i} msg={msg} darkMode={darkMode} />
+                <MessageBubble
+                  key={i}
+                  msg={msg}
+                  darkMode={darkMode}
+                  onOpenSource={onOpenSource}
+                />
               ))}
 
               {asking && (
@@ -384,6 +408,41 @@ const askQuestion = async () => {
           )}
         </div>
         <div ref={messagesEndRef} />
+        {/* MODE SELECTOR */}
+        <div style={{ marginBottom: "10px" }}>
+          <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
+            {MODE_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                id={`mode-btn-${opt.value}`}
+                title={opt.tooltip}
+                onClick={() => handleModeChange(opt.value)}
+                style={{
+                  padding: "4px 12px",
+                  borderRadius: "20px",
+                  border: mode === opt.value
+                    ? "1.5px solid #8B5CF6"
+                    : darkMode ? "1px solid rgba(255,255,255,0.15)" : "1px solid rgba(0,0,0,0.12)",
+                  background: mode === opt.value
+                    ? "rgba(139,92,246,0.15)"
+                    : "transparent",
+                  color: mode === opt.value
+                    ? "#8B5CF6"
+                    : darkMode ? "#A1A1AA" : "#666",
+                  fontSize: "12px",
+                  fontWeight: mode === opt.value ? 600 : 400,
+                  cursor: "pointer",
+                  transition: "all 0.15s ease",
+                }}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <div style={{ fontSize: "11px", color: darkMode ? "#6B7280" : "#9CA3AF", marginTop: "4px" }}>
+            {MODE_OPTIONS.find(o => o.value === mode)?.tooltip}
+          </div>
+        </div>
         {/* INPUT */}
         <div
           style={{

@@ -1,4 +1,4 @@
-// feat: file type and size validation added for /upload endpoint (closes #179)
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
@@ -10,9 +10,10 @@ const crypto = require("crypto");
 const { rateLimit } = require("express-rate-limit");
 const slowDown = require("express-slow-down");
 const helmet = require("helmet");
-const { askSchema, summarizeSchema } = require("./validators/schemas");
+const { askSchema, summarizeSchema, sessionsLookupSchema } = require("./validators/schemas");
 const { clientIpFromRequest } = require("./security/ip");
 const { createRedisClient } = require("./security/redis");
+const authRoutes = require("./src/routes/authRoutes");
 
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
 const INTERNAL_RAG_TOKEN = process.env.INTERNAL_RAG_TOKEN || "";
@@ -59,7 +60,7 @@ app.use(helmet());
 
 app.use(cors({
   origin: process.env.ALLOWED_ORIGIN || "http://localhost:3000",
-  methods: ["POST"],
+  methods: ["GET", "POST"],
 }));
 
 // ─── Body Size Limit ─────────────────────────────────────────────────────────
@@ -285,6 +286,7 @@ const inferenceLimiter = rateLimit({
 // Apply the ban guard and global limiter to every single route.
 app.use(banGuard);
 app.use(globalLimiter);
+app.use("/api/auth", authRoutes);
 
 const MAX_PDF_SIZE_BYTES = 20 * 1024 * 1024;
 const UPLOADS_DIR = path.resolve("uploads");
@@ -341,13 +343,51 @@ const sendUploadError = (res, statusCode, message, details = message) => {
   });
 };
 
-const extractServiceDetails = (err) => {
-  const upstreamDetails = err.response?.data;
+const stringifyServiceDetails = (details) => {
+  if (details == null) return "";
+
+  if (Buffer.isBuffer(details)) {
+    return details.toString("utf8").trim();
+  }
+
+  if (typeof details === "string") {
+    return details.trim();
+  }
+
+  if (typeof details === "object") {
+    const nested =
+      stringifyServiceDetails(details.detail) ||
+      stringifyServiceDetails(details.error) ||
+      stringifyServiceDetails(details.message);
+
+    if (nested) return nested;
+
+    const hasKnownErrorField =
+      Object.prototype.hasOwnProperty.call(details, "detail") ||
+      Object.prototype.hasOwnProperty.call(details, "error") ||
+      Object.prototype.hasOwnProperty.call(details, "message");
+
+    if (hasKnownErrorField && Object.keys(details).length <= 3) {
+      return "";
+    }
+
+    try {
+      const serialized = JSON.stringify(details);
+      return serialized === "{}" ? "" : serialized;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  return String(details).trim();
+};
+
+const extractServiceDetails = (err, fallbackMessage = "Upstream service request failed.") => {
   return (
-    upstreamDetails?.detail ||
-    upstreamDetails?.error ||
-    upstreamDetails ||
-    err.message
+    stringifyServiceDetails(err.response?.data) ||
+    stringifyServiceDetails(err.message) ||
+    stringifyServiceDetails(err.code) ||
+    fallbackMessage
   );
 };
 
@@ -460,8 +500,17 @@ if (signatureBuffer.toString() !== "%PDF") {
       file: fs.createReadStream(absoluteFilePath),
       original_filename: req.file.originalname,
     };
-    if (sessionId) {
+    if (sessionId && sessionSecret) {
       formData.session_id = sessionId;
+      formData.session_secret = sessionSecret;
+    } else if (sessionId || sessionSecret) {
+      await cleanupFile(uploadedFilePath);
+
+      return sendUploadError(
+        res,
+        403,
+        "session_id and session_secret must be provided together to extend an existing session.",
+      );
     }
     if (sessionSecret) {
       formData.session_secret = sessionSecret;
@@ -489,7 +538,7 @@ if (signatureBuffer.toString() !== "%PDF") {
 
     const statusCode =
       err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
-    const details = extractServiceDetails(err);
+    const details = extractServiceDetails(err, "PDF processing failed");
     console.error("Upload processing failed:", details);
 
     return res.status(statusCode).json({
@@ -509,14 +558,17 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
     });
   }
 
-  const { question, session_id } = validation.data;
+  const { question, session_id, mode } = validation.data;
+  const session_secret = validation.data.session_secret;
 
   try {
     const response = await axios.post(
       `${RAG_SERVICE_URL}/ask`,
       {
-      question,
-      session_id,
+        question,
+        session_id,
+        session_secret,
+        mode,
       },
       { headers: ragAuthHeaders() },
     );
@@ -524,10 +576,11 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
     return res.json({
       answer: response.data.answer,
       sources: response.data.sources ?? [],
+      mode: response.data.mode ?? "default",
     });
   } catch (err) {
     const statusCode = err.response?.status || 500;
-    const details = extractServiceDetails(err);
+    const details = extractServiceDetails(err, "Error answering question");
     console.error("Question answering failed:", details);
 
     return res.status(statusCode).json({
@@ -546,12 +599,13 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
     });
   }
 
-  const { question, session_id } = validation.data;
+  const { question, session_id, mode } = validation.data;
+  const session_secret = validation.data.session_secret;
 
   try {
     const ragResponse = await axios.post(
       `${RAG_SERVICE_URL}/ask/stream`,
-      { question, session_id },
+      { question, session_id, session_secret, mode },
       {
         headers: ragAuthHeaders(),
         responseType: "stream",
@@ -577,7 +631,7 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
     });
   } catch (err) {
     const statusCode = err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
-    const details = extractServiceDetails(err);
+    const details = extractServiceDetails(err, "Error answering question");
     console.error("Streaming question answering failed:", details);
     return res.status(statusCode).json({
       error: typeof details === "string" ? details : "Error answering question",
@@ -606,7 +660,7 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
     });
   } catch (err) {
     const statusCode = err.response?.status || 500;
-    const details = extractServiceDetails(err);
+    const details = extractServiceDetails(err, "Error summarizing PDF");
     console.error("Summarization failed:", details);
 
     return res.status(statusCode).json({
@@ -617,20 +671,41 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
 });
 
 app.get("/sessions", async (req, res) => {
-  try {
-    const response = await axios.get(`${RAG_SERVICE_URL}/sessions`, {
-      headers: ragAuthHeaders(),
+  return res.status(410).json({
+    error: "Endpoint removed. Use /sessions/lookup with session_id + session_secret.",
+  });
+});
+
+app.post("/sessions/lookup", async (req, res) => {
+  const validation = sessionsLookupSchema.safeParse(req.body);
+
+  if (!validation.success) {
+    return res.status(400).json({
+      error: "Validation failed",
+      details: validation.error.flatten(),
     });
+  }
+
+  try {
+    const response = await axios.post(
+      `${RAG_SERVICE_URL}/sessions/lookup`,
+      validation.data,
+      { headers: ragAuthHeaders() },
+    );
     return res.json(response.data);
   } catch (err) {
     const statusCode = err.response?.status || 500;
     const details = extractServiceDetails(err);
-    console.error("Failed to fetch sessions:", details);
+    console.error("Failed to lookup sessions:", details);
     return res.status(statusCode).json({
-      error: "Failed to fetch sessions",
+      error: "Failed to lookup sessions",
       details: isDevelopment ? details : "Internal processing error",
     });
   }
+});
+
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
 });
 
 app.use((req, res, next) => {
@@ -685,4 +760,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, askSchema, summarizeSchema };
+module.exports = { app, askSchema, summarizeSchema, extractServiceDetails };

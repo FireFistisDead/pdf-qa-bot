@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { pdfjs } from "react-pdf";
 import "bootstrap/dist/css/bootstrap.min.css";
 import { Container, Row, Col } from "react-bootstrap";
@@ -8,23 +9,51 @@ import PdfViewer from "./components/PdfViewer/PdfViewer";
 import ChatPanel from "./components/ChatPanel/ChatPanel";
 import toast, { Toaster } from "react-hot-toast";
 import LandingPage from "./components/Landing/LandingPage";
+import Signup from "./pages/Signup";
+import Login from "./pages/Login";
 
 import { extractApiErrorMessage, uploadPdfApi, getSessionsApi } from "./services/api";
 
 pdfjs.GlobalWorkerOptions.workerSrc = `${process.env.PUBLIC_URL}/pdf.worker.min.js`;
 
-function App() {
-  const [pdfs, setPdfs] = useState([]); // {name, url, chat: [], session_id: ""}
+function MainApp() {
+  const [pdfs, setPdfs] = useState([]); // {id, name, document_id, url, chat: [], session_id: ""}
   const [selectedPdf, setSelectedPdf] = useState(null);
+  const [pdfJumpTarget, setPdfJumpTarget] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
+
+  const loadKnownSessions = React.useCallback(() => {
+    try {
+      const raw = localStorage.getItem("pdfqa_sessions");
+      const parsed = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .filter((s) => s && typeof s.session_id === "string" && typeof s.session_secret === "string")
+        .map((s) => ({ session_id: s.session_id, session_secret: s.session_secret }));
+    } catch (_) {
+      return [];
+    }
+  }, []);
+
+  const upsertKnownSession = React.useCallback((sessionId, sessionSecret) => {
+    if (!sessionId || !sessionSecret) return;
+    const existing = loadKnownSessions();
+    const next = [
+      { session_id: sessionId, session_secret: sessionSecret },
+      ...existing.filter((s) => s.session_id !== sessionId),
+    ];
+    localStorage.setItem("pdfqa_sessions", JSON.stringify(next.slice(0, 50)));
+  }, [loadKnownSessions]);
 
   React.useEffect(() => {
     // Load historical sessions on initial mount
     const fetchHistory = async () => {
       try {
-        const sessions = await getSessionsApi();
+        const knownSessions = loadKnownSessions();
+        const sessions = await getSessionsApi(knownSessions);
         if (sessions && sessions.length > 0) {
+          const secretById = new Map(knownSessions.map((s) => [s.session_id, s.session_secret]));
           const apiUrl = process.env.REACT_APP_API_URL || "";
           const formattedPdfs = sessions.map(s => {
             const doc = s.documents?.[0];
@@ -36,27 +65,36 @@ function App() {
               }
             }
             return {
+              id: doc?.document_id || s.session_id,
               name: doc?.filename || "Unknown PDF",
+              document_id: doc?.document_id || null,
               url: url,
               chat: s.chat || [],
               session_id: s.session_id,
-              session_secret: s.session_secret || null,
+              session_secret: secretById.get(s.session_id) || null,
             };
           });
           setPdfs(formattedPdfs);
-          setSelectedPdf(formattedPdfs[0].session_id);
+          setSelectedPdf(formattedPdfs[0].id);
         }
       } catch (e) {
         console.error("Failed to load session history:", e);
       }
     };
     fetchHistory();
-  }, []);
+  }, [loadKnownSessions]);
 
   // Router logic to serve new UI on /new
   const path = window.location.pathname;
-  if (path === '/new' || path === '/new/') {
+  if (path === "/new" || path === "/new/") {
     return <LandingPage />;
+  }
+  if (path === "/signup" || path === "/signup/") {
+    return <Signup />;
+  }
+
+  if (path === "/login" || path === "/login/") {
+    return <Login />;
   }
 
   const handleUpload = async (file) => {
@@ -84,17 +122,28 @@ function App() {
     const loadingToast = toast.loading("Uploading PDF...");
 
     try {
-      const currentPdfForUpload = pdfs.find(p => p.session_id === selectedPdf);
-      const data = await uploadPdfApi(file, selectedPdf, currentPdfForUpload?.session_secret);
+      const currentPdfForUpload = pdfs.find(p => p.id === selectedPdf);
+      const data = await uploadPdfApi(
+        file,
+        currentPdfForUpload?.session_id,
+        currentPdfForUpload?.session_secret,
+      );
       const apiUrl = process.env.REACT_APP_API_URL || "";
       const serverUrl = data.url ? (data.url.startsWith('http') ? data.url : `${apiUrl}${data.url}`) : null;
       const url = URL.createObjectURL(file);
+      const pdfId = data.document?.document_id || data.session_id;
+
+      if (data.session_id && data.session_secret) {
+        upsertKnownSession(data.session_id, data.session_secret);
+      }
 
     setPdfs((prev) => {
   const updated = [
     ...prev,
     {
+      id: pdfId,
       name: file.name,
+      document_id: data.document?.document_id || null,
       url: serverUrl || url,
       chat: [],
       session_id: data.session_id,
@@ -103,10 +152,10 @@ function App() {
   ];
  
   if (prev.length === 0) {
-    setSelectedPdf(data.session_id);
+    setSelectedPdf(pdfId);
   } else {
     // Switch to the newly uploaded pdf immediately
-    setSelectedPdf(data.session_id);
+    setSelectedPdf(pdfId);
   }
   return updated;
 });
@@ -141,7 +190,7 @@ function App() {
   const handleAppendMessage = (message) => {
     setPdfs((prev) =>
       prev.map((pdf) =>
-        pdf.session_id === selectedPdf
+        pdf.id === selectedPdf
           ? { ...pdf, chat: [...pdf.chat, message] }
           : pdf,
       ),
@@ -150,40 +199,68 @@ function App() {
   const handleClearChat = () => {
   setPdfs((prev) =>
     prev.map((pdf) =>
-      pdf.session_id === selectedPdf
+      pdf.id === selectedPdf
         ? { ...pdf, chat: [] }
         : pdf,
     ),
   );
+  setPdfJumpTarget(null);
 };
 
-const handleUpdateLastBotMessage = (text, streaming, sources) => {
-  setPdfs((prev) =>
-    prev.map((pdf) => {
-      if (pdf.session_id !== selectedPdf) return pdf;
-      const chat = [...pdf.chat];
-      for (let i = chat.length - 1; i >= 0; i--) {
-        if (chat[i].role === "bot") {
-          chat[i] = {
-            ...chat[i],
-            text: text !== null ? text : chat[i].text,
-            streaming: streaming,
-            sources: sources !== undefined ? sources : chat[i].sources,
-          };
-          break;
+const handleOpenSource = (source, page) => {
+    const matchingPdf = pdfs.find(
+      (pdf) =>
+        source.document &&
+        pdf.name.localeCompare(source.document, undefined, {
+          sensitivity: "accent",
+        }) === 0,
+    );
+
+    if (!matchingPdf) {
+      toast.error("Source document is not available in the current session.");
+      return;
+    }
+
+    setSelectedPdf(matchingPdf.id);
+    setPdfJumpTarget({
+      document: matchingPdf.name,
+      document_id: matchingPdf.document_id,
+      page,
+      requestedAt: Date.now(),
+    });
+  };
+
+  const handleUpdateLastBotMessage = (text, streaming, sources, mode) => {
+    setPdfs((prev) =>
+      prev.map((pdf) => {
+        if (pdf.id !== selectedPdf) return pdf;
+
+        const chat = [...pdf.chat];
+        for (let i = chat.length - 1; i >= 0; i--) {
+          if (chat[i].role === "bot") {
+            chat[i] = {
+              ...chat[i],
+              text: text !== null ? text : chat[i].text,
+              streaming,
+              sources: sources !== undefined ? sources : chat[i].sources,
+              mode: mode !== undefined ? mode : chat[i].mode,
+            };
+            break;
+          }
         }
-      }
-      return { ...pdf, chat };
-    }),
-  );
-};
+
+        return { ...pdf, chat };
+      }),
+    );
+  };
 
   const themeClass = darkMode ? "bg-dark text-light" : "bg-light text-dark";
 
-  const currentPdf = pdfs.find((pdf) => pdf.session_id === selectedPdf);
+  const currentPdf = pdfs.find((pdf) => pdf.id === selectedPdf);
   const currentChat = currentPdf?.chat || [];
   const currentPdfUrl = currentPdf?.url || null;
   const currentPdfSessionId = currentPdf?.session_id || null;
+  const currentPdfSessionSecret = currentPdf?.session_secret || null;
   const currentPdfName = currentPdf?.name || null;
 
   return (
@@ -192,7 +269,6 @@ const handleUpdateLastBotMessage = (text, streaming, sources) => {
         position="top-right"
         toastOptions={{
           duration: 3500,
-
           style: {
             background: "#111827",
             color: "#fff",
@@ -202,20 +278,8 @@ const handleUpdateLastBotMessage = (text, streaming, sources) => {
             backdropFilter: "blur(12px)",
             boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
           },
-
-          success: {
-            iconTheme: {
-              primary: "#8B5CF6",
-              secondary: "#fff",
-            },
-          },
-
-          error: {
-            iconTheme: {
-              primary: "#EF4444",
-              secondary: "#fff",
-            },
-          },
+          success: { iconTheme: { primary: "#8B5CF6", secondary: "#fff" } },
+          error: { iconTheme: { primary: "#EF4444", secondary: "#fff" } },
         }}
       />
       <div
@@ -230,38 +294,40 @@ const handleUpdateLastBotMessage = (text, streaming, sources) => {
             onUpload={handleUpload}
           />
           {/* PDF LIST */}
-{pdfs.length > 0 && (
-  <div style={{ marginBottom: "16px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
-    {pdfs.map((pdf) => (
-      <button
-        key={pdf.session_id}
-        onClick={() => setSelectedPdf(pdf.session_id)}
-        style={{
-          padding: "8px 16px",
-          borderRadius: "12px",
-          border: "none",
-          background: selectedPdf === pdf.session_id ? "#8B5CF6" : "#e0e0e0",
-          color: selectedPdf === pdf.session_id ? "#fff" : "#333",
-          cursor: "pointer",
-          fontWeight: 600,
-        }}
-      >
-        {pdf.name}
-      </button>
-    ))}
-  </div>
-)}
+          {pdfs.length > 0 && (
+            <div style={{ marginBottom: "16px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              {pdfs.map((pdf) => (
+                <button
+                  key={pdf.id}
+                  onClick={() => {
+                    setSelectedPdf(pdf.id);
+                    setPdfJumpTarget(null);
+                  }}
+                  style={{
+                    padding: "8px 16px",
+                    borderRadius: "12px",
+                    border: "none",
+                    background: selectedPdf === pdf.id ? "#8B5CF6" : "#e0e0e0",
+                    color: selectedPdf === pdf.id ? "#fff" : "#333",
+                    cursor: "pointer",
+                    fontWeight: 600,
+                  }}
+                >
+                  {pdf.name}
+                </button>
+              ))}
+            </div>
+          )}
           <Row className="justify-content-center">
             <Col md={11}>
               <Row className="g-4">
-                {/* LEFT PANEL — PDF VIEWER */}
                 <Col md={7}>
                   <PdfViewer
                     darkMode={darkMode}
                     currentPdfUrl={currentPdfUrl}
+                    jumpTarget={pdfJumpTarget}
                   />
                 </Col>
-                {/* RIGHT PANEL — CHAT */}
                 <Col md={5}>
                   <ChatPanel
                     darkMode={darkMode}
@@ -269,7 +335,9 @@ const handleUpdateLastBotMessage = (text, streaming, sources) => {
                     selectedPdf={selectedPdf}
                     currentPdfName={currentPdfName}
                     currentPdfSessionId={currentPdfSessionId}
+                    currentPdfSessionSecret={currentPdfSessionSecret}
                     onAppendMessage={handleAppendMessage}
+                    onOpenSource={handleOpenSource}
                     onUpdateLastBotMessage={handleUpdateLastBotMessage}
                     handleClearChat={handleClearChat}
                   />
@@ -280,6 +348,19 @@ const handleUpdateLastBotMessage = (text, streaming, sources) => {
         </Container>
       </div>
     </>
+  );
+}
+
+function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<MainApp />} />
+        <Route path="/new" element={<LandingPage />} />
+        <Route path="/signin" element={<Login />} />
+        <Route path="/signup" element={<Signup />} />
+      </Routes>
+    </BrowserRouter>
   );
 }
 
