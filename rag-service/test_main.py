@@ -3,8 +3,6 @@ import sys
 from unittest.mock import MagicMock
 import multiprocessing
 
-os.environ.setdefault("INTERNAL_RAG_TOKEN", "test-secret")
-
 # Prevent downloading/loading Hugging Face embeddings during testing by mocking the class
 import langchain_community.embeddings
 langchain_community.embeddings.HuggingFaceEmbeddings = MagicMock()
@@ -27,6 +25,8 @@ from main import (
     document_dedupe_key,
     citation_source_for_document,
     internal_token_valid,
+    require_internal_rag_token_configured,
+    validate_internal_rag_token_on_startup,
     normalize_session_id,
     get_session_dir,
     _extract_pdf_text_worker,
@@ -96,6 +96,23 @@ def test_internal_token_valid_rejects_missing_when_set():
 
 def test_internal_token_valid_accepts_exact_match():
     assert internal_token_valid("secret", "secret") is True
+
+
+def test_startup_validation_fails_when_internal_token_unset(monkeypatch):
+    import main as main_module
+
+    monkeypatch.setattr(main_module, "INTERNAL_RAG_TOKEN", "")
+
+    with pytest.raises(RuntimeError, match="INTERNAL_RAG_TOKEN"):
+        validate_internal_rag_token_on_startup()
+
+
+def test_internal_token_validation_passes_when_configured(monkeypatch):
+    import main as main_module
+
+    monkeypatch.setattr(main_module, "INTERNAL_RAG_TOKEN", "configured-secret")
+
+    assert require_internal_rag_token_configured() is None
 
 
 def test_internal_auth_middleware_protects_validate_session_write():
@@ -464,8 +481,8 @@ def test_ask_stream_passes_middleware_with_correct_token():
         main_module.INTERNAL_RAG_TOKEN = original
 
 
-def test_ask_stream_rejected_when_no_token_configured():
-    """When INTERNAL_RAG_TOKEN is empty, /ask/stream must fail closed."""
+def test_ask_stream_rejected_when_token_is_cleared_after_startup():
+    """Protected endpoints fail closed if token config becomes unavailable."""
     import main as main_module
 
     original = main_module.INTERNAL_RAG_TOKEN

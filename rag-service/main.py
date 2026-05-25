@@ -136,9 +136,6 @@ PROTECTED_RAG_PREFIXES = (
     "/processing-status/",
 )
 
-if not INTERNAL_RAG_TOKEN:
-    raise RuntimeError("INTERNAL_RAG_TOKEN must be configured for protected endpoints.")
-
 PDF_PARSE_TIMEOUT_SECONDS = int(os.getenv("PDF_PARSE_TIMEOUT_SECONDS", "20"))
 MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "200"))
 MAX_PDF_EXTRACT_CHARS = int(os.getenv("MAX_PDF_EXTRACT_CHARS", "400000"))
@@ -151,6 +148,18 @@ except Exception:  # pragma: no cover
 def internal_token_valid(provided: str | None, expected: str) -> bool:
     candidate = (provided or "").strip()
     return bool(expected) and bool(candidate) and secrets.compare_digest(candidate, expected)
+
+
+def require_internal_rag_token_configured():
+    if not INTERNAL_RAG_TOKEN:
+        raise RuntimeError("INTERNAL_RAG_TOKEN must be configured for protected endpoints.")
+
+
+def validate_internal_rag_token_on_startup():
+    require_internal_rag_token_configured()
+
+
+app.on_event("startup")(validate_internal_rag_token_on_startup)
 
 
 def generate_session_secret() -> str:

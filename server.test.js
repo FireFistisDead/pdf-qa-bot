@@ -1,6 +1,7 @@
 const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const http = require("node:http");
+const { spawnSync } = require("node:child_process");
 const axios = require("axios");
 const { Blob } = require("node:buffer");
 
@@ -27,8 +28,27 @@ test("module loads without error", () => {
   assert.ok(typeof extractServiceDetails === "function", "extractServiceDetails should be exported for tests");
 });
 
-test("ragAuthHeaders requires and forwards the internal token", () => {
+test("ragAuthHeaders forwards the internal token", () => {
   assert.deepEqual(ragAuthHeaders(), { "X-Internal-Token": process.env.INTERNAL_RAG_TOKEN });
+});
+
+test("server initialization fails when INTERNAL_RAG_TOKEN is unset", () => {
+  const result = spawnSync(
+    process.execPath,
+    ["-e", "require('./server.js')"],
+    {
+      cwd: __dirname,
+      env: {
+        ...process.env,
+        INTERNAL_RAG_TOKEN: "",
+        JWT_SECRET: "test-jwt-secret",
+      },
+      encoding: "utf8",
+    },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stderr}${result.stdout}`, /INTERNAL_RAG_TOKEN must be configured/);
 });
 
 const createPdfUploadBody = ({ sessionId = null, sessionSecret = null } = {}) => {

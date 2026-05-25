@@ -402,6 +402,8 @@ const ragAuthHeaders = () => {
   return { "X-Internal-Token": INTERNAL_RAG_TOKEN };
 };
 
+requireInternalRagToken();
+
 const normalizeSessionSecret = (value) =>
   typeof value === "string" ? value.trim() || null : null;
 
@@ -742,8 +744,6 @@ app.use((err, req, res, next) => {
 
 if (require.main === module) {
   (async () => {
-    requireInternalRagToken();
-
     if (redisConnectPromise) {
       console.log("[redis] connecting for distributed rate limiting...");
       await redisConnectPromise;
