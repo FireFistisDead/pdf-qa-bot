@@ -86,7 +86,7 @@ def save_sessions_unlocked():
                 "created_at": meta.get("created_at"),
                 "last_accessed": meta.get("last_accessed"),
                 "documents": meta.get("documents", []),
-                "retrieval_cache": meta.get("retrieval_cache", {}),
+                "retrieval_cache": {},  # Do not persist retrieval cache (contains Document objects)
                 "chat": meta.get("chat", []),
                 "session_secret": meta.get("session_secret"),
             }
@@ -529,7 +529,7 @@ def _recover_session_unlocked(session_id: str):
     try:
         vectorstore = FAISS.load_local(
             session_dir,
-            embedding_model,
+            get_embedding_model(),
             allow_dangerous_deserialization=True,
         )
     except Exception:
@@ -2095,8 +2095,8 @@ def process_pdf(
             with sessions_lock:
                 _cleanup_expired_sessions_unlocked()
                 _enforce_max_sessions_unlocked()
-                if processing_session_id in processing_progress:
-                    processing_progress[session_id] = processing_progress.pop(processing_session_id)
+                old_session = sessions.pop(processing_session_id, None)
+                progress = old_session.get("processing_progress") if old_session else None
                 processing_session_id = session_id
                 session_lock = threading.Lock()
                 sessions[session_id] = {
@@ -2110,6 +2110,8 @@ def process_pdf(
                     "retrieval_cache": {},
                     "chat": [],
                 }
+                if progress:
+                    sessions[session_id]["processing_progress"] = progress
                 persist_session_registry_entry(session_id, sessions[session_id])
             logger.info(
                 "Created session session_id=%s filename=%s chunks=%s",
