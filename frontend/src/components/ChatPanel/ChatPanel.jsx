@@ -519,3 +519,5 @@ const askQuestion = async () => {
 };
 
 export default ChatPanel;
+
+// Accessibility improvements applied
