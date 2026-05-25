@@ -21,6 +21,10 @@ const Signup = () => {
   const strength = checkPasswordStrength(password);
 
     const handleSignup = async () => {
+    if (!email || !password) {
+    setMessage("All fields are required");
+    return;
+    }
 
     if (strength === "Weak") {
         setMessage("Password too weak");
@@ -29,7 +33,7 @@ const Signup = () => {
 
     try {
         const res = await axios.post(
-        "http://localhost:4000/api/auth/signup",
+        `${process.env.REACT_APP_API_URL}/api/auth/signup`,
         {
             email,
             password,

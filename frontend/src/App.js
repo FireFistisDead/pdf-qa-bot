@@ -88,13 +88,14 @@ function App() {
   if (path === "/new" || path === "/new/") {
     return <LandingPage />;
   }
-  if (path === "/signup") {
+  if (path === "/signup" || path === "/signup/") {
     return <Signup />;
   }
-  if (path === "/login") {
+
+  if (path === "/login" || path === "/login/") {
     return <Login />;
   }
-  
+
   const handleUpload = async (file) => {
     // Validate file type
     if (

@@ -1,4 +1,4 @@
-// feat: file type and size validation added for /upload endpoint (closes #179)
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");

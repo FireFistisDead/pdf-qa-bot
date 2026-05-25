@@ -1,5 +1,8 @@
 export const checkPasswordStrength = (password) => {
   if (!password) return "";
+  if (password.length < 8) {
+    return "Weak";
+  }
 
   let score = 0;
 
