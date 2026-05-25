@@ -93,12 +93,10 @@
   font-size: 14px;
   color: #888;
   line-height: 1.6;
+  transition: color 0.3s ease, text-shadow 0.3s ease;
 }
 
 /* Global Text Hover Effects */
-.brand-desc {
-  transition: color 0.3s ease, text-shadow 0.3s ease;
-}
 .brand-desc:hover {
   color: #fff;
   text-shadow: 0 0 10px rgba(255, 255, 255, 0.5);
