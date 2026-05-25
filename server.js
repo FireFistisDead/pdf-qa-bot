@@ -512,9 +512,7 @@ if (signatureBuffer.toString() !== "%PDF") {
         "session_id and session_secret must be provided together to extend an existing session.",
       );
     }
-    if (sessionSecret) {
-      formData.session_secret = sessionSecret;
-    }
+
 
     const response = await axios.postForm(
       `${RAG_SERVICE_URL}/process-pdf`,
