@@ -299,6 +299,41 @@ if (!fs.existsSync(UPLOADS_DIR)) {
 // Serve the uploads directory statically so frontend can view historical PDFs
 app.use("/uploads", express.static(UPLOADS_DIR));
 
+// ─── Background File Cleanup ─────────────────────────────────────────────────
+// Retain uploaded files for 24 hours. Files older than this will be deleted.
+const FILE_RETENTION_MS = parseInt(process.env.FILE_RETENTION_MS || "86400000", 10);
+const CLEANUP_INTERVAL_MS = parseInt(process.env.CLEANUP_INTERVAL_MS || "3600000", 10); // Run every hour
+
+const startUploadsCleanup = () => {
+  setInterval(async () => {
+    try {
+      const files = await fsPromises.readdir(UPLOADS_DIR);
+      const now = Date.now();
+      for (const file of files) {
+        if (file === '.gitkeep') continue; // Ignore .gitkeep
+        const filePath = path.join(UPLOADS_DIR, file);
+        try {
+          const stats = await fsPromises.stat(filePath);
+          if (now - stats.birthtimeMs > FILE_RETENTION_MS) {
+            await fsPromises.unlink(filePath);
+            console.log(`[Cleanup] Deleted old file: ${filePath}`);
+          }
+        } catch (err) {
+          console.error(`[Cleanup] Failed to stat/delete file ${filePath}:`, err.message);
+        }
+      }
+    } catch (err) {
+      console.error(`[Cleanup] Failed to read uploads directory:`, err.message);
+    }
+  }, CLEANUP_INTERVAL_MS);
+  
+  // Unref the interval so it doesn't prevent the server process from exiting gracefully
+  // (Optional but good practice)
+};
+
+// Start the cleanup routine
+startUploadsCleanup();
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, UPLOADS_DIR);
