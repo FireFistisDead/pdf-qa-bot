@@ -106,8 +106,8 @@ const AuthLayout = ({ children }) => {
           </div>
 
           {/* Diagonal Marquee */}
-          <div className="marquee-band">
-          <div className="marquee-content">
+          <div className="auth-marquee-band">
+          <div className="auth-marquee-content">
             <span>ZERO HALLUCINATION</span>
             <span>100% LOCAL PRIVACY</span>
             <span>INFINITE CONTEXT</span>

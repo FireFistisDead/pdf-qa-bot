@@ -329,7 +329,7 @@
   color: #888;
 }
 
-.marquee-band {
+.auth-marquee-band {
   position: relative;
   width: 100%;
   height: 48px;
@@ -343,7 +343,7 @@
   box-shadow: 0 -10px 20px rgba(0,0,0,0.3);
 }
 
-.marquee-content {
+.auth-marquee-content {
   display: flex;
   white-space: nowrap;
   animation: scroll-left 15s linear infinite;
@@ -353,7 +353,7 @@
   color: #000;
 }
 
-.marquee-content span {
+.auth-marquee-content span {
   padding: 0 20px;
 }
 
