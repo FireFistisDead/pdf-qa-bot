@@ -596,7 +596,45 @@ def _recover_session_unlocked(session_id: str):
     logger.info("Recovered persisted session session_id=%s", session_id)
     return meta
 
+def cleanup_failed_session(session_id: str):
+    """
+    Best-effort rollback cleanup for partially created sessions.
 
+    Used when PDF ingestion fails after placeholder session creation
+    but before the session becomes fully usable.
+    """
+    try:
+        with sessions_lock:
+            session = sessions.pop(session_id, None)
+
+            if session_id in processing_progress:
+                processing_progress.pop(session_id, None)
+
+        try:
+            remove_persisted_session(session_id)
+        except Exception:
+            logger.exception(
+                "Failed to remove persisted session registry entry session_id=%s",
+                session_id,
+            )
+
+        if session:
+            session_dir = session.get("session_dir")
+            if session_dir and os.path.exists(session_dir):
+                try:
+                    shutil.rmtree(session_dir, ignore_errors=True)
+                except Exception:
+                    logger.exception(
+                        "Failed to remove session directory session_id=%s path=%s",
+                        session_id,
+                        session_dir,
+                    )
+
+    except Exception:
+        logger.exception(
+            "Unexpected cleanup failure for partially created session session_id=%s",
+            session_id,
+        )
 def cleanup_expired_sessions():
     """
     Remove expired sessions and enforce max session cap.
@@ -2084,6 +2122,10 @@ def process_pdf(
         embeddings = get_embedding_model()
     except Exception:
         logger.exception("Failed to load embedding model filename=%s", filename)
+
+        if created_placeholder_session and processing_session_id:
+            cleanup_failed_session(processing_session_id)
+
         raise HTTPException(
             status_code=503,
             detail=(
@@ -2095,9 +2137,16 @@ def process_pdf(
 
     try:
         new_vectorstore = FAISS.from_documents(chunks, embeddings)
-    except Exception as exc:
+    except Exception:
         logger.exception("Failed to create vectorstore filename=%s", filename)
-        raise HTTPException(status_code=500, detail="Failed to index the uploaded PDF.")
+
+        if created_placeholder_session and processing_session_id:
+            cleanup_failed_session(processing_session_id)
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to index the uploaded PDF.",
+        )
 
     if requested_session_id:
         with session_store_lock(requested_session_id):
@@ -2140,35 +2189,46 @@ def process_pdf(
                     len(chunks),
                 )
     else:
-        with session_store_lock(session_id := str(uuid.uuid4())):
-            session_secret = generate_session_secret()
-            session_dir = persist_vectorstore(session_id, new_vectorstore)
-            
+        session_id = processing_session_id
+
+        with session_store_lock(session_id):
             with sessions_lock:
-                _cleanup_expired_sessions_unlocked()
-                _enforce_max_sessions_unlocked()
-                if processing_session_id in processing_progress:
-                    processing_progress[session_id] = processing_progress.pop(processing_session_id)
-                processing_session_id = session_id
-                session_lock = threading.Lock()
+                existing_session = sessions.get(session_id)
+                if not existing_session:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Session initialization failed."
+                    )
+
+                session_secret = existing_session.get("session_secret")
+                created_at = existing_session.get("created_at", now)
+
+            session_dir = persist_vectorstore(session_id, new_vectorstore)
+
+            with sessions_lock:
                 sessions[session_id] = {
                     "vectorstore": new_vectorstore,
-                    "lock": session_lock,
+                    "lock": threading.Lock(),
                     "documents": [uploaded_document],
                     "session_secret": session_secret,
                     "session_dir": session_dir,
-                    "created_at": now,
+                    "created_at": created_at,
                     "last_accessed": now,
                     "retrieval_cache": {},
                     "chat": [],
                 }
-                persist_session_registry_entry(session_id, sessions[session_id])
-            logger.info(
-                "Created session session_id=%s filename=%s chunks=%s",
-                session_id,
-                filename,
-                len(chunks),
-            )
+
+                persist_session_registry_entry(
+                    session_id,
+                    sessions[session_id]
+                )
+
+        logger.info(
+            "Created session session_id=%s filename=%s chunks=%s",
+            session_id,
+            filename,
+            len(chunks),
+        )
 
 
     with sessions_lock:
