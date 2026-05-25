@@ -39,25 +39,25 @@ const Footer = () => {
               <li><a href="#how-it-works">How it Works</a></li>
               <li><a href="#pricing">Pricing</a></li>
               <li><a href="#faq">FAQ</a></li>
-              <li><a href="#">Cloud API</a></li>
+              <li><a href="#/">Cloud API</a></li>
             </ul>
           </div>
           <div className="link-column">
             <h4>Resources</h4>
             <ul>
-              <li><a href="#">Documentation</a></li>
-              <li><a href="#">GitHub Repo</a></li>
-              <li><a href="#">API Reference</a></li>
-              <li><a href="#">Blog</a></li>
+              <li><a href="#/">Documentation</a></li>
+              <li><a href="#/">GitHub Repo</a></li>
+              <li><a href="#/">API Reference</a></li>
+              <li><a href="#/">Blog</a></li>
             </ul>
           </div>
           <div className="link-column">
             <h4>Company</h4>
             <ul>
-              <li><a href="#">About Us</a></li>
-              <li><a href="#">Careers</a></li>
-              <li><a href="#">Privacy Policy</a></li>
-              <li><a href="#">Terms of Service</a></li>
+              <li><a href="#/">About Us</a></li>
+              <li><a href="#/">Careers</a></li>
+              <li><a href="#/">Privacy Policy</a></li>
+              <li><a href="#/">Terms of Service</a></li>
             </ul>
           </div>
         </div>
@@ -66,9 +66,9 @@ const Footer = () => {
       <div className="footer-bottom">
         <p>© 2026 DocuMind. All rights reserved.</p>
         <div className="footer-socials">
-          <a href="#" className="social-icon"><GithubIcon /></a>
-          <a href="#" className="social-icon"><TwitterIcon /></a>
-          <a href="#" className="social-icon"><DiscordIcon /></a>
+          <a href="#/" className="social-icon"><GithubIcon /></a>
+          <a href="#/" className="social-icon"><TwitterIcon /></a>
+          <a href="#/" className="social-icon"><DiscordIcon /></a>
         </div>
       </div>
     </footer>
