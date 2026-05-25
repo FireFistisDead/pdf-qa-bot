@@ -14,12 +14,18 @@ export const extractApiErrorMessage = (error, fallbackMessage) => {
 
 /**
  * Fetches all past sessions (chat history).
+ * @param {Array<{session_id: string, session_secret: string}>} sessions
  * @returns {Promise<Array>} Array of session objects
  */
-export const getSessionsApi = async () => {
-  const res = await axios.get(`${API_BASE}/sessions`, {
-    timeout: 20000, // Increased to 20 seconds for cloud deployments
-  });
+export const getSessionsApi = async (sessions = []) => {
+  if (!Array.isArray(sessions) || sessions.length === 0) return [];
+
+  const res = await axios.post(
+    `${API_BASE}/sessions/lookup`,
+    { sessions },
+    { timeout: 20000 }, // Increased to 20 seconds for cloud deployments
+  );
+
   return res.data;
 };
 
@@ -50,40 +56,45 @@ export const uploadPdfApi = async (file, sessionId = null, sessionSecret = null)
  * Asks a question to the AI assistant about the uploaded PDF.
  * @param {string} question 
  * @param {string} sessionId 
+ * @param {string} sessionSecret
  * @returns {Promise<Object>} Contains the bot's answer
  */
-export const askQuestionApi = async (question, sessionId) => {
+export const askQuestionApi = async (question, sessionId, sessionSecret, mode = "default") => {
   const res = await axios.post(
     `${API_BASE}/ask`,
-    { question, session_id: sessionId },
+    { question, session_id: sessionId, session_secret: sessionSecret, mode },
     {
       timeout: 60000, // 60 second timeout for AI responses
     }
   );
-  return res.data;
+  return {
+    ...res.data,
+    sources: Array.isArray(res.data?.sources) ? res.data.sources : [],
+  };
 };
 
 /**
  * Summarizes the uploaded PDF document.
  * @param {string} pdfName 
  * @param {string} sessionId 
+ * @param {string} sessionSecret
  * @returns {Promise<Object>} Contains the bot's summary
  */
-export const summarizePdfApi = async (pdfName, sessionId) => {
+export const summarizePdfApi = async (pdfName, sessionId, sessionSecret) => {
   const res = await axios.post(
     `${API_BASE}/summarize`,
-    { pdf: pdfName, session_id: sessionId },
+    { pdf: pdfName, session_id: sessionId, session_secret: sessionSecret },
     {
       timeout: 60000, // 60 second timeout for summarization
     }
   );
   return res.data;
 };
-export const askQuestionStreamApi = async (question, sessionId, onChunk, signal) => {
+export const askQuestionStreamApi = async (question, sessionId, sessionSecret, mode = "default", onChunk, signal) => {
   const response = await fetch(`${API_BASE}/ask/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, session_id: sessionId }),
+    body: JSON.stringify({ question, session_id: sessionId, session_secret: sessionSecret, mode }),
     signal,
   });
 

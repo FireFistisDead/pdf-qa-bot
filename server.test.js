@@ -4,21 +4,31 @@ const http = require("node:http");
 const axios = require("axios");
 const { Blob } = require("node:buffer");
 
+process.env.INTERNAL_RAG_TOKEN = process.env.INTERNAL_RAG_TOKEN || "test-internal-rag-token";
+process.env.JWT_SECRET = process.env.JWT_SECRET || "test-jwt-secret";
+
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
-let app, askSchema, summarizeSchema;
+let app, askSchema, summarizeSchema, extractServiceDetails, ragAuthHeaders;
 let clientIpFromRequest, normalizeIp;
 test("module loads without error", () => {
   const mod = require("./server.js");
   app = mod.app;
   askSchema = mod.askSchema;
   summarizeSchema = mod.summarizeSchema;
+  extractServiceDetails = mod.extractServiceDetails;
+  ragAuthHeaders = mod.ragAuthHeaders;
 
   ({ clientIpFromRequest, normalizeIp } = require("./security/ip"));
 
   assert.ok(typeof app === "function", "app should be an Express app");
   assert.ok(typeof askSchema.safeParse === "function", "askSchema should be a Zod schema");
   assert.ok(typeof summarizeSchema.safeParse === "function", "summarizeSchema should be a Zod schema");
+  assert.ok(typeof extractServiceDetails === "function", "extractServiceDetails should be exported for tests");
+});
+
+test("ragAuthHeaders requires and forwards the internal token", () => {
+  assert.deepEqual(ragAuthHeaders(), { "X-Internal-Token": process.env.INTERNAL_RAG_TOKEN });
 });
 
 const createPdfUploadBody = ({ sessionId = null, sessionSecret = null } = {}) => {
@@ -66,11 +76,32 @@ describe("IP normalization", () => {
   });
 });
 
+describe("service error extraction", () => {
+  test("falls back when upstream details are empty", () => {
+    const details = extractServiceDetails(
+      { response: { data: { detail: "" } }, message: "" },
+      "PDF processing failed",
+    );
+
+    assert.equal(details, "PDF processing failed");
+  });
+
+  test("extracts nested upstream detail", () => {
+    const details = extractServiceDetails({
+      response: { data: { detail: { error: "Unable to read this PDF." } } },
+      message: "Request failed",
+    });
+
+    assert.equal(details, "Unable to read this PDF.");
+  });
+});
+
 describe("askSchema validation", () => {
   test("accepts valid input", () => {
     const result = askSchema.safeParse({
       question: "What is this PDF about?",
       session_id: "550e8400-e29b-41d4-a716-446655440000",
+      session_secret: "session-secret-123",
     });
     assert.equal(result.success, true);
   });
@@ -103,6 +134,7 @@ describe("summarizeSchema validation", () => {
   test("accepts valid input", () => {
     const result = summarizeSchema.safeParse({
       session_id: "550e8400-e29b-41d4-a716-446655440000",
+      session_secret: "session-secret-123",
     });
     assert.equal(result.success, true);
   });
@@ -283,5 +315,12 @@ describe("route error responses", () => {
       method: "GET",
     });
     assert.equal(res.status, 404);
+  });
+
+  test("GET /health returns 200 and status ok", async () => {
+    const res = await fetch(`${baseUrl}/health`);
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.deepEqual(data, { status: "ok" });
   });
 });
