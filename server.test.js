@@ -308,4 +308,11 @@ describe("route error responses", () => {
     });
     assert.equal(res.status, 404);
   });
+
+  test("GET /health returns 200 and status ok", async () => {
+    const res = await fetch(`${baseUrl}/health`);
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.deepEqual(data, { status: "ok" });
+  });
 });

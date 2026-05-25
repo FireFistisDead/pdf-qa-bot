@@ -243,6 +243,11 @@ async def internal_auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     errors = [

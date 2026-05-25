@@ -109,6 +109,13 @@ def test_internal_auth_middleware_protects_validate_session_write():
         main_module.INTERNAL_RAG_TOKEN = original_token
 
 
+def test_health_check_endpoint():
+    client = TestClient(app)
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
 def test_normalize_session_id_rejects_invalid_values():
     with pytest.raises(ValueError, match="Missing session id"):
         normalize_session_id("")
