@@ -8,6 +8,8 @@ import PdfViewer from "./components/PdfViewer/PdfViewer";
 import ChatPanel from "./components/ChatPanel/ChatPanel";
 import toast, { Toaster } from "react-hot-toast";
 import LandingPage from "./components/Landing/LandingPage";
+import Signup from "./pages/Signup";
+import Login from "./pages/Login";
 
 import { extractApiErrorMessage, uploadPdfApi, getSessionsApi } from "./services/api";
 
@@ -83,10 +85,16 @@ function App() {
 
   // Router logic to serve new UI on /new
   const path = window.location.pathname;
-  if (path === '/new' || path === '/new/') {
+  if (path === "/new" || path === "/new/") {
     return <LandingPage />;
   }
-
+  if (path === "/signup") {
+    return <Signup />;
+  }
+  if (path === "/login") {
+    return <Login />;
+  }
+  
   const handleUpload = async (file) => {
     // Validate file type
     if (
