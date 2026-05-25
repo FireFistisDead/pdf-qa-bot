@@ -396,11 +396,13 @@ def cleanup_retrieval_cache(retrieval_cache):
     for key, value in retrieval_cache.items():
 
         if not isinstance(value, dict):
+            expired_keys.append(key)
             continue
 
         cached_at = value.get("cached_at")
 
         if not cached_at:
+            expired_keys.append(key)
             continue
 
         age = current_time - cached_at
@@ -2361,24 +2363,23 @@ def ask_question(data: Question):
         cleanup_retrieval_cache(retrieval_cache)
         # Cache hit
         cache_key = f"{mode}:{normalized_query}"
-        if cache_key in retrieval_cache:
-
+        cached_value = retrieval_cache.get(cache_key)
+        if isinstance(cached_value, dict) and "scored_candidates" in cached_value:
             logger.info(
                 "Retrieval cache hit session_id=%s cache_key=%s",
                 session_id,
                 cache_key,
             )
-
-            cached_value = retrieval_cache[
-                cache_key
-            ]
-            scored_candidates = (
-                cached_value.get("scored_candidates", [])
-                if isinstance(cached_value, dict)
-                else cached_value
-            )
-
+            scored_candidates = cached_value["scored_candidates"]
             cache_hit = True
+        elif cached_value is not None:
+            logger.info(
+                "Retrieval cache invalidated session_id=%s cache_key=%s",
+                session_id,
+                cache_key,
+            )
+            retrieval_cache.pop(cache_key, None)
+            cache_hit = False
 
         else:
             cache_hit = False
@@ -2738,19 +2739,23 @@ def ask_question_stream(data: Question):
         retrieval_cache = session.setdefault("retrieval_cache", OrderedDict())
         cleanup_retrieval_cache(retrieval_cache)
         cache_key = f"{mode}:{normalized_query}"
-        if cache_key in retrieval_cache:
+        cached_value = retrieval_cache.get(cache_key)
+        if isinstance(cached_value, dict) and "scored_candidates" in cached_value:
             logger.info(
                 "Stream retrieval cache hit session_id=%s cache_key=%s",
                 session_id,
                 cache_key,
             )
-            cached_value = retrieval_cache[cache_key]
-            scored_candidates = (
-                cached_value.get("scored_candidates", [])
-                if isinstance(cached_value, dict)
-                else cached_value
-            )
+            scored_candidates = cached_value["scored_candidates"]
             cache_hit = True
+        elif cached_value is not None:
+            logger.info(
+                "Stream retrieval cache invalidated session_id=%s cache_key=%s",
+                session_id,
+                cache_key,
+            )
+            retrieval_cache.pop(cache_key, None)
+            cache_hit = False
         else:
             cache_hit = False
 
