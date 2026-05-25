@@ -18,4 +18,5 @@ Add screenshots or recordings if the UI changed.
 
 ## Notes
 
-Mention any deployment, environment, or follow-up details.
+Mention any deployment, environment, or follow-up details.## Security
+- [ ] No sensitive data included
