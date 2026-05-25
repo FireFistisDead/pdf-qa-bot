@@ -197,7 +197,7 @@ function App() {
   setPdfJumpTarget(null);
 };
 
-const handleOpenSource = (source, page) => {
+const handleOpenSource = (source) => {
     const matchingPdf = pdfs.find(
       (pdf) =>
         source.document &&
@@ -215,7 +215,7 @@ const handleOpenSource = (source, page) => {
     setPdfJumpTarget({
       document: matchingPdf.name,
       document_id: matchingPdf.document_id,
-      page,
+      page: source.page,
       requestedAt: Date.now(),
     });
   };
@@ -252,6 +252,40 @@ const handleOpenSource = (source, page) => {
   const currentPdfSessionId = currentPdf?.session_id || null;
   const currentPdfSessionSecret = currentPdf?.session_secret || null;
   const currentPdfName = currentPdf?.name || null;
+
+  // Compute Heatmap Data for the current document
+  const heatmapCounts = {};
+  if (currentChat && currentChat.length > 0) {
+    currentChat.forEach((msg) => {
+      if (msg.role === "bot" && !msg.streaming && Array.isArray(msg.sources)) {
+        // deduplicate sources per message by page
+        const uniquePages = new Set();
+        msg.sources.forEach((source) => {
+           if (source.page && source.document && currentPdfName && source.document.localeCompare(currentPdfName, undefined, { sensitivity: "accent" }) === 0) {
+             uniquePages.add(source.page);
+           }
+        });
+        uniquePages.forEach((page) => {
+           heatmapCounts[page] = (heatmapCounts[page] || 0) + 1;
+        });
+      }
+    });
+  }
+  
+  const heatmapData = {};
+  let maxCount = 0;
+  for (const page in heatmapCounts) {
+    if (heatmapCounts[page] > maxCount) {
+      maxCount = heatmapCounts[page];
+    }
+  }
+  for (const page in heatmapCounts) {
+    if (heatmapCounts[page] >= 2) {
+      heatmapData[page] = heatmapCounts[page] / maxCount;
+    } else {
+      heatmapData[page] = 0;
+    }
+  }
 
   return (
     <>
@@ -330,6 +364,7 @@ const handleOpenSource = (source, page) => {
                     darkMode={darkMode}
                     currentPdfUrl={currentPdfUrl}
                     jumpTarget={pdfJumpTarget}
+                    heatmapData={heatmapData}
                   />
                 </Col>
                 {/* RIGHT PANEL — CHAT */}
