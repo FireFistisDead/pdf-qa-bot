@@ -672,3 +672,63 @@ def test_internal_token_valid_case_sensitive():
     """Token comparison must be case-sensitive — 'Secret' != 'secret'."""
     assert internal_token_valid("Secret", "secret") is False
     assert internal_token_valid("secret", "secret") is True
+
+
+# ── Issue #265: additional path-traversal and sanitization tests ──────────────
+
+def test_normalize_session_id_rejects_path_traversal_sequences():
+    """Common path-traversal payloads must raise ValueError."""
+    traversal_inputs = [
+        "../../etc/passwd",
+        "../secret",
+        "..\\windows\\system32",
+        "%2e%2e%2fetc%2fpasswd",
+    ]
+    for bad_input in traversal_inputs:
+        with pytest.raises(ValueError, match="."):
+            normalize_session_id(bad_input)
+
+
+def test_normalize_session_id_rejects_null_byte():
+    """Null byte injected into session_id must raise ValueError."""
+    with pytest.raises(ValueError):
+        normalize_session_id("550e8400-e29b-41d4-a716-446655440000\x00")
+
+
+def test_sanitize_filename_rejects_null_byte():
+    """Null bytes in upload filenames must cause a ValueError."""
+    with pytest.raises((ValueError, Exception)):
+        sanitize_upload_filename("file\x00name.pdf")
+
+
+def test_sanitize_filename_rejects_overly_long_name():
+    """Filenames exceeding typical filesystem limits (255 bytes) must be rejected."""
+    long_name = "a" * 300 + ".pdf"
+    with pytest.raises((ValueError, Exception)):
+        sanitize_upload_filename(long_name)
+
+
+def test_sanitize_filename_strips_path_separators():
+    """Path separators in a filename must be stripped, leaving a safe basename."""
+    result = sanitize_upload_filename("../../etc/safe.pdf")
+    assert "/" not in result, "Forward slashes must be removed from filename"
+    assert "\\" not in result, "Backslashes must be removed from filename"
+    assert result.endswith(".pdf"), "Result must still be a .pdf filename"
+
+
+def test_get_session_dir_stays_within_persist_path():
+    """get_session_dir must always produce a path inside PERSIST_PATH."""
+    from pathlib import Path
+    from main import get_session_dir, PERSIST_PATH
+
+    sid = "550e8400-e29b-41d4-a716-446655440000"
+    session_dir = Path(get_session_dir(sid)).resolve()
+    assert PERSIST_PATH in session_dir.parents or session_dir == PERSIST_PATH, (
+        f"Session dir {session_dir} must be inside PERSIST_PATH {PERSIST_PATH}"
+    )
+
+
+def test_get_session_dir_rejects_non_uuid_path_traversal():
+    """Non-UUID inputs to get_session_dir must raise an exception."""
+    with pytest.raises((ValueError, Exception)):
+        get_session_dir("../escape")

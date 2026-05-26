@@ -813,4 +813,14 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, askSchema, summarizeSchema, extractServiceDetails };
+module.exports = {
+  app,
+  askSchema,
+  summarizeSchema,
+  extractServiceDetails,
+  // Exported for testing: allow tests to inspect and manipulate ban state
+  // without touching a live Redis instance.
+  bannedIPs,
+  recordOffence,
+  BAN_DURATIONS_MS,
+};

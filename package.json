@@ -8,6 +8,7 @@
   "main": "index.js",
   "scripts": {
     "test": "node --test server.test.js",
+    "test:security": "node --test --test-name-pattern='(question length|IP ban|askSchema question length)' server.test.js",
     "build": "npm --prefix frontend run build"
   },
   "keywords": [],

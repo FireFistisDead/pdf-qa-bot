@@ -35,9 +35,20 @@ const uuidSchema = z.preprocess(
 // Converts non-string values → "" so missing/invalid question input produces
 // "Question is required." rather than Zod's generic invalid-type message.
 // Trim surrounding whitespace so whitespace-only questions are treated as empty.
+// Hard cap at 2000 characters to prevent prompt-injection via oversized questions
+// and to bound LLM context consumption per request.
+const MAX_QUESTION_LENGTH = 2000;
+
 const questionSchema = z.preprocess(
   (val) => (typeof val === "string" ? val : ""),
-  z.string().trim().min(1, "Question is required."),
+  z
+    .string()
+    .trim()
+    .min(1, "Question is required.")
+    .max(
+      MAX_QUESTION_LENGTH,
+      `Question must not exceed ${MAX_QUESTION_LENGTH} characters.`,
+    ),
 );
 
 const modeSchema = z.preprocess(
@@ -77,4 +88,5 @@ module.exports = {
   askSchema,
   summarizeSchema,
   sessionsLookupSchema,
+  MAX_QUESTION_LENGTH,
 };

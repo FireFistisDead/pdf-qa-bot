@@ -9,6 +9,7 @@ process.env.JWT_SECRET = "test-secret-for-ci";
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
 let app, askSchema, summarizeSchema, extractServiceDetails;
+let bannedIPs, recordOffence, BAN_DURATIONS_MS;
 let clientIpFromRequest, normalizeIp;
 test("module loads without error", () => {
   process.env.JWT_SECRET = "test-secret-for-ci";
@@ -17,6 +18,9 @@ test("module loads without error", () => {
   askSchema = mod.askSchema;
   summarizeSchema = mod.summarizeSchema;
   extractServiceDetails = mod.extractServiceDetails;
+  bannedIPs = mod.bannedIPs;
+  recordOffence = mod.recordOffence;
+  BAN_DURATIONS_MS = mod.BAN_DURATIONS_MS;
 
   ({ clientIpFromRequest, normalizeIp } = require("./security/ip"));
 
@@ -24,6 +28,9 @@ test("module loads without error", () => {
   assert.ok(typeof askSchema.safeParse === "function", "askSchema should be a Zod schema");
   assert.ok(typeof summarizeSchema.safeParse === "function", "summarizeSchema should be a Zod schema");
   assert.ok(typeof extractServiceDetails === "function", "extractServiceDetails should be exported for tests");
+  assert.ok(bannedIPs instanceof Map, "bannedIPs should be a Map");
+  assert.ok(typeof recordOffence === "function", "recordOffence should be exported");
+  assert.ok(Array.isArray(BAN_DURATIONS_MS), "BAN_DURATIONS_MS should be an array");
 });
 
 const createPdfUploadBody = ({ sessionId = null, sessionSecret = null } = {}) => {
@@ -578,5 +585,209 @@ describe("route error responses", () => {
       data.error.includes("session_id and session_secret must be provided together"),
       `Unexpected error message: ${data.error}`,
     );
+  });
+});
+
+// ── Issue #265: security integration tests ────────────────────────────────────
+
+describe("question length validation", () => {
+  let server;
+  let baseUrl;
+
+  before(() =>
+    new Promise((resolve) => {
+      server = http.createServer(app);
+      server.listen(0, () => {
+        baseUrl = `http://127.0.0.1:${server.address().port}`;
+        resolve();
+      });
+    }),
+  );
+
+  after(() => { if (server) server.close(); });
+
+  test("POST /ask rejects question exceeding MAX_QUESTION_LENGTH with 400", async () => {
+    const { MAX_QUESTION_LENGTH } = require("./validators/schemas");
+    const oversized = "a".repeat(MAX_QUESTION_LENGTH + 1);
+    const res = await fetch(`${baseUrl}/ask`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question: oversized,
+        session_id: "550e8400-e29b-41d4-a716-446655440000",
+        session_secret: "test-secret",
+      }),
+    });
+    assert.equal(res.status, 400, "Oversized question must be rejected with 400");
+    const data = await res.json();
+    assert.equal(data.error, "Validation failed");
+    assert.ok(
+      data.details.fieldErrors.question[0].includes("2000"),
+      `Error message should mention the limit; got: ${data.details.fieldErrors.question[0]}`,
+    );
+  });
+
+  test("POST /ask accepts question exactly at MAX_QUESTION_LENGTH", async () => {
+    const { MAX_QUESTION_LENGTH } = require("./validators/schemas");
+    const atLimit = "a".repeat(MAX_QUESTION_LENGTH);
+
+    const originalPostForm = axios.postForm;
+    const originalPost = axios.post;
+
+    // Prevent the request reaching the real RAG service — we only want to
+    // confirm schema validation passes (i.e. we get a non-400 status).
+    axios.post = async () => ({
+      data: { answer: "ok", sources: [] },
+    });
+
+    try {
+      const res = await fetch(`${baseUrl}/ask`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: atLimit,
+          session_id: "550e8400-e29b-41d4-a716-446655440000",
+          session_secret: "test-secret",
+        }),
+      });
+      // If the RAG mock doesn't fire (e.g. axios.post is overridden but the
+      // handler uses axios.post differently) we might get a 502 — that still
+      // proves schema validation passed (not 400).
+      assert.notEqual(
+        res.status,
+        400,
+        "Question at exactly MAX_QUESTION_LENGTH must pass schema validation",
+      );
+    } finally {
+      axios.postForm = originalPostForm;
+      axios.post = originalPost;
+    }
+  });
+});
+
+describe("IP ban system", () => {
+  test("recordOffence first offence sets 5-minute ban", () => {
+    const testIp = "192.0.2.1";
+    bannedIPs.delete(testIp);
+    const before = Date.now();
+    recordOffence(testIp);
+    const after = Date.now();
+    const ban = bannedIPs.get(testIp);
+    assert.ok(ban, "Ban entry must exist after first offence");
+    assert.equal(ban.offences, 1, "offences counter must be 1");
+    const expectedMin = before + BAN_DURATIONS_MS[0] - 50;
+    const expectedMax = after + BAN_DURATIONS_MS[0] + 50;
+    assert.ok(
+      ban.until >= expectedMin && ban.until <= expectedMax,
+      `Ban expiry must be ~${BAN_DURATIONS_MS[0] / 60000} minutes from now`,
+    );
+    bannedIPs.delete(testIp);
+  });
+
+  test("recordOffence second offence escalates to 15-minute ban", () => {
+    const testIp = "192.0.2.2";
+    bannedIPs.delete(testIp);
+    recordOffence(testIp);
+    recordOffence(testIp);
+    const ban = bannedIPs.get(testIp);
+    assert.equal(ban.offences, 2);
+    const elapsed = ban.until - Date.now();
+    assert.ok(
+      elapsed > BAN_DURATIONS_MS[0],
+      "Second offence ban must be longer than first offence ban",
+    );
+    bannedIPs.delete(testIp);
+  });
+
+  test("recordOffence third and subsequent offences cap at 1-hour ban", () => {
+    const testIp = "192.0.2.3";
+    bannedIPs.delete(testIp);
+    recordOffence(testIp);
+    recordOffence(testIp);
+    recordOffence(testIp);
+    recordOffence(testIp); // 4th offence — must not exceed 1-hour cap
+    const ban = bannedIPs.get(testIp);
+    assert.equal(ban.offences, 4);
+    const maxDuration = BAN_DURATIONS_MS[BAN_DURATIONS_MS.length - 1];
+    const elapsed = ban.until - Date.now();
+    assert.ok(
+      elapsed <= maxDuration + 50,
+      "Ban duration must be capped at the maximum BAN_DURATIONS_MS value",
+    );
+    bannedIPs.delete(testIp);
+  });
+
+  test("banned IP receives 429 with Retry-After header", async () => {
+    const server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+
+    const testIp = "192.0.2.10";
+    bannedIPs.delete(testIp);
+    // Plant a ban that expires far in the future.
+    bannedIPs.set(testIp, { until: Date.now() + 5 * 60 * 1000, offences: 1 });
+
+    try {
+      // The test server receives requests from 127.0.0.1 (loopback). Directly
+      // manipulate bannedIPs and use X-Forwarded-For to simulate a banned IP.
+      // Since trust proxy is not configured in tests, we hit the loopback path.
+      // Instead, directly assert that banGuard blocks an IP that IS in bannedIPs
+      // by temporarily inserting the loopback address.
+      bannedIPs.set("127.0.0.1", { until: Date.now() + 5 * 60 * 1000, offences: 1 });
+      const res = await fetch(`${base}/health`);
+      assert.equal(res.status, 429, "Banned IP must receive 429");
+      assert.ok(
+        res.headers.get("retry-after"),
+        "429 response must include Retry-After header",
+      );
+      const data = await res.json();
+      assert.ok(
+        data.error.includes("banned"),
+        "Error message must mention ban",
+      );
+    } finally {
+      bannedIPs.delete("127.0.0.1");
+      bannedIPs.delete(testIp);
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  test("BAN_DURATIONS_MS has three tiers in ascending order", () => {
+    assert.equal(BAN_DURATIONS_MS.length, 3, "Must have exactly 3 ban tiers");
+    assert.ok(
+      BAN_DURATIONS_MS[0] < BAN_DURATIONS_MS[1],
+      "Tier 1 must be shorter than tier 2",
+    );
+    assert.ok(
+      BAN_DURATIONS_MS[1] < BAN_DURATIONS_MS[2],
+      "Tier 2 must be shorter than tier 3",
+    );
+  });
+});
+
+describe("askSchema question length boundary", () => {
+  test("askSchema rejects question longer than MAX_QUESTION_LENGTH", () => {
+    const { MAX_QUESTION_LENGTH } = require("./validators/schemas");
+    const result = askSchema.safeParse({
+      question: "x".repeat(MAX_QUESTION_LENGTH + 1),
+      session_id: "550e8400-e29b-41d4-a716-446655440000",
+      session_secret: "secret",
+    });
+    assert.equal(result.success, false);
+    const msgs = result.error.issues.map((i) => i.message);
+    assert.ok(
+      msgs.some((m) => m.includes("2000")),
+      `Expected a message mentioning 2000 chars, got: ${JSON.stringify(msgs)}`,
+    );
+  });
+
+  test("askSchema accepts question exactly at MAX_QUESTION_LENGTH", () => {
+    const { MAX_QUESTION_LENGTH } = require("./validators/schemas");
+    const result = askSchema.safeParse({
+      question: "y".repeat(MAX_QUESTION_LENGTH),
+      session_id: "550e8400-e29b-41d4-a716-446655440000",
+      session_secret: "secret",
+    });
+    assert.equal(result.success, true);
   });
 });
