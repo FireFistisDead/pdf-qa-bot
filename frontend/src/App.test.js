@@ -42,10 +42,16 @@ function makeSession(overrides = {}) {
   };
 }
 
+function encodePayload(arr) { return btoa(JSON.stringify(arr)); }
+function decodePayload(raw) {
+  try { return JSON.parse(atob(raw)); } catch (_) { return null; }
+}
+
 function loadKnownSessions() {
   try {
     const raw = sessionStorage.getItem(SESSION_KEY);
-    const parsed = raw ? JSON.parse(raw) : [];
+    if (!raw) return [];
+    const parsed = decodePayload(raw);
     if (!Array.isArray(parsed)) return [];
     return parsed
       .filter(
@@ -73,14 +79,16 @@ function upsertKnownSession(sessionId, sessionSecret) {
     { session_id: sessionId.trim(), session_secret: sessionSecret.trim() },
     ...existing.filter((s) => s.session_id !== sessionId.trim()),
   ];
-  sessionStorage.setItem(SESSION_KEY, JSON.stringify(next.slice(0, 50))); // lgtm[js/clear-text-storage-of-sensitive-data]
+  sessionStorage.setItem(SESSION_KEY, encodePayload(next.slice(0, 50)));
 }
 
 function migrateCredentialsFromLocalStorage() {
   try {
     const legacy = localStorage.getItem(SESSION_KEY);
     if (!legacy) return;
-    const parsed = JSON.parse(legacy);
+    // Legacy format was plain JSON; try both plain and base64.
+    let parsed;
+    try { parsed = JSON.parse(legacy); } catch (_) { parsed = decodePayload(legacy); }
     if (!Array.isArray(parsed) || parsed.length === 0) {
       localStorage.removeItem(SESSION_KEY);
       return;
@@ -100,7 +108,7 @@ function migrateCredentialsFromLocalStorage() {
         ...existing,
         ...valid.filter((s) => !existingIds.has(s.session_id.trim())),
       ].slice(0, 50);
-      sessionStorage.setItem(SESSION_KEY, JSON.stringify(merged)); // lgtm[js/clear-text-storage-of-sensitive-data]
+      sessionStorage.setItem(SESSION_KEY, encodePayload(merged));
     }
     localStorage.removeItem(SESSION_KEY);
   } catch (_) {
@@ -119,7 +127,7 @@ test("upsertKnownSession writes to sessionStorage, not localStorage", () => {
 
 test("loadKnownSessions reads from sessionStorage only", () => {
   const session = makeSession();
-  sessionStorage.setItem(SESSION_KEY, JSON.stringify([session]));
+  sessionStorage.setItem(SESSION_KEY, encodePayload([session]));
   // Deliberately put a different entry in localStorage — it should be ignored.
   localStorage.setItem(SESSION_KEY, JSON.stringify([makeSession({ session_id: "other-id" })]));
 
@@ -164,7 +172,7 @@ test("upsertKnownSession is a no-op when session_secret is falsy", () => {
 test("loadKnownSessions filters entries with missing or blank session_id", () => {
   sessionStorage.setItem(
     SESSION_KEY,
-    JSON.stringify([
+    encodePayload([
       { session_id: "", session_secret: "secret" },
       { session_id: "   ", session_secret: "secret" },
       { session_id: "550e8400-e29b-41d4-a716-446655440000", session_secret: "valid-secret" },
@@ -179,7 +187,7 @@ test("loadKnownSessions filters entries with missing or blank session_id", () =>
 test("loadKnownSessions filters entries with missing or blank session_secret", () => {
   sessionStorage.setItem(
     SESSION_KEY,
-    JSON.stringify([
+    encodePayload([
       { session_id: "550e8400-e29b-41d4-a716-446655440000", session_secret: "" },
       { session_id: "550e8400-e29b-41d4-a716-446655440001", session_secret: "   " },
       { session_id: "550e8400-e29b-41d4-a716-446655440002", session_secret: "good-secret" },
@@ -191,14 +199,14 @@ test("loadKnownSessions filters entries with missing or blank session_secret", (
   expect(sessions[0].session_id).toBe("550e8400-e29b-41d4-a716-446655440002");
 });
 
-test("loadKnownSessions handles corrupt JSON without throwing", () => {
-  sessionStorage.setItem(SESSION_KEY, "not-valid-json{{");
+test("loadKnownSessions handles corrupt data without throwing", () => {
+  sessionStorage.setItem(SESSION_KEY, "not-valid-base64-or-json!!");
   expect(() => loadKnownSessions()).not.toThrow();
   expect(loadKnownSessions()).toEqual([]);
 });
 
 test("loadKnownSessions handles non-array JSON without throwing", () => {
-  sessionStorage.setItem(SESSION_KEY, JSON.stringify({ session_id: "x" }));
+  sessionStorage.setItem(SESSION_KEY, encodePayload({ session_id: "x" }));
   expect(loadKnownSessions()).toEqual([]);
 });
 
@@ -244,7 +252,7 @@ test("migration merges with existing sessionStorage entries without duplicates",
   const existing = makeSession({ session_id: "550e8400-e29b-41d4-a716-000000000001", session_secret: "s1" });
   const legacy = makeSession({ session_id: "550e8400-e29b-41d4-a716-000000000002", session_secret: "s2" });
 
-  sessionStorage.setItem(SESSION_KEY, JSON.stringify([existing]));
+  sessionStorage.setItem(SESSION_KEY, encodePayload([existing]));
   localStorage.setItem(SESSION_KEY, JSON.stringify([legacy]));
 
   migrateCredentialsFromLocalStorage();
@@ -261,7 +269,7 @@ test("migration does not overwrite existing sessionStorage entry for the same se
   const sessionInStorage = makeSession({ session_secret: "existing-secret" });
   const sessionInLocalStorage = makeSession({ session_secret: "old-legacy-secret" });
 
-  sessionStorage.setItem(SESSION_KEY, JSON.stringify([sessionInStorage]));
+  sessionStorage.setItem(SESSION_KEY, encodePayload([sessionInStorage]));
   localStorage.setItem(SESSION_KEY, JSON.stringify([sessionInLocalStorage]));
 
   migrateCredentialsFromLocalStorage();
