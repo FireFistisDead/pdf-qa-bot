@@ -5,6 +5,7 @@ const axios = require("axios");
 const { Blob } = require("node:buffer");
 
 process.env.JWT_SECRET = "test-secret-for-ci";
+process.env.INTERNAL_RAG_TOKEN = "test-internal-token-for-ci";
 
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
@@ -293,6 +294,35 @@ describe("route error responses", () => {
     const data = await res.json();
     assert.equal(data.error, "Validation failed");
     assert.deepEqual(data.details.fieldErrors.session_id, ["Invalid session ID format."]);
+  });
+
+  test("POST /ask/stream forwards internal auth header", async () => {
+    const originalPost = axios.post;
+    let forwardedHeaders = null;
+
+    axios.post = async (url, body, options) => {
+      forwardedHeaders = options?.headers;
+      const { PassThrough } = require("node:stream");
+      const fakeStream = new PassThrough();
+      fakeStream.end("mock streamed answer");
+      return { data: fakeStream };
+    };
+
+    try {
+      const res = await fetch(`${baseUrl}/ask/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: "hi",
+          session_id: "550e8400-e29b-41d4-a716-446655440000",
+          session_secret: "secret-abc",
+        }),
+      });
+      assert.equal(res.status, 200);
+      assert.equal(forwardedHeaders["X-Internal-Token"], "test-internal-token-for-ci");
+    } finally {
+      axios.post = originalPost;
+    }
   });
 
   test("POST /summarize with empty body returns 400", async () => {
