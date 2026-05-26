@@ -20,6 +20,9 @@ import multiprocessing
 import os
 import secrets
 import shutil
+import urllib.request
+import urllib.error
+from typing import Optional
 from transformers import (
     AutoConfig,
     AutoTokenizer,
@@ -395,6 +398,14 @@ SEMANTIC_CHUNK_MERGE_WARN_SECS = float(
 SEMANTIC_CHUNK_HIERARCHICAL = os.getenv(
     "SEMANTIC_CHUNK_HIERARCHICAL", "true"
 ).strip().lower() in {"1", "true", "yes", "on"}
+
+# ── Ollama LLM Synthesis ─────────────────────────────────────────────────────
+# When Ollama is running locally the /ask endpoint will use it as the primary
+# generative synthesiser. If Ollama is unreachable the pipeline falls back to
+# the built-in HuggingFace model (generate_response) transparently.
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
+OLLAMA_TIMEOUT_SECS = int(os.getenv("OLLAMA_TIMEOUT_SECS", "30"))
 QUERY_STOPWORDS = {
     "about", "according", "also", "and", "are", "between", "compare",
     "describe", "does", "document", "documents", "explain", "from", "give",
@@ -1248,6 +1259,53 @@ def build_factual_answer(documents, question, source_id_by_key=None):
     if additional_sentences:
         answer += " " + " ".join(additional_sentences)
     return answer
+
+
+def synthesize_with_ollama(prompt: str) -> Optional[str]:
+    """Send a RAG prompt to a locally running Ollama server and return the
+    generated text.  Returns ``None`` on any failure so the caller can fall
+    back to the extractive / HuggingFace path without disruption.
+
+    Failure modes that are handled silently:
+    - Ollama not installed / not running (ConnectionError / timeout)
+    - Requested model not yet pulled (Ollama returns HTTP 404)
+    - Any unexpected HTTP or JSON error
+    """
+    try:
+        payload = json.dumps({
+            "model": OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0,
+                "num_predict": 512,
+                "stop": ["\n\n\n"],
+            },
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT_SECS) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            text = (body.get("response") or "").strip()
+            if text:
+                logger.info(
+                    "Ollama synthesis succeeded model=%s chars=%d",
+                    OLLAMA_MODEL,
+                    len(text),
+                )
+                return text
+            logger.warning("Ollama returned an empty response")
+            return None
+
+    except Exception as exc:  # noqa: BLE001 — intentional catch-all for fallback
+        logger.info("Ollama unavailable, falling back to extractive path: %s", exc)
+        return None
 
 
 def build_answer_from_documents(question, documents, intent, source_id_by_key=None):
@@ -2565,6 +2623,7 @@ def ask_question(data: Question):
             "answer": INSUFFICIENT_CONTEXT_MESSAGE,
             "sources": [],
             "retrieval_type": "refusal",
+            "answer_mode": "refusal",
             "mode": mode,
             "cache_hit": cache_hit,
         }
@@ -2621,6 +2680,7 @@ def ask_question(data: Question):
             "answer": framed,
             "sources": citation_sources,
             "retrieval_type": "socratic",
+            "answer_mode": "socratic",
             "cache_hit": cache_hit,
             "mode": mode,
         }
@@ -2653,6 +2713,7 @@ def ask_question(data: Question):
             "answer": grounded_answer,
             "sources": citation_sources,
             "retrieval_type": "citation-aware",
+            "answer_mode": "refusal",
             "cache_hit": cache_hit,
             "mode": mode,
         }
@@ -2712,10 +2773,11 @@ def ask_question(data: Question):
             "answer": framed,
             "sources": citation_sources,
             "retrieval_type": "citation-aware",
+            "answer_mode": "extractive",
             "cache_hit": cache_hit,
             "mode": mode,
         }
-        
+
         with sessions_lock:
             _append_chat_and_mark_dirty(session_id, {
                 "question": question,
@@ -2751,11 +2813,50 @@ def ask_question(data: Question):
         retrieved_sources,
     )
 
+    # ── Step 1: Try Ollama (local generative LLM) ────────────────────────────
+    # synthesize_with_ollama() returns None on any failure so the pipeline
+    # falls through to the HuggingFace model transparently.
+    ollama_answer = synthesize_with_ollama(prompt)
+
+    if ollama_answer:
+        framed = apply_mode_framing(ollama_answer, question, mode, docs, context)
+        # Mode-framing can strip citations for non-standard modes; keep the
+        # raw Ollama answer as-is — it already cited sources in the prompt.
+        if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
+            logger.info(
+                "Mode framing stripped citations from Ollama answer; reverting session_id=%s mode=%s",
+                session_id,
+                mode,
+            )
+            framed = ollama_answer
+
+        response_payload = {
+            "answer": framed,
+            "sources": citation_sources,
+            "retrieval_type": "citation-aware",
+            "answer_mode": "generative",
+            "cache_hit": cache_hit,
+            "mode": mode,
+        }
+        with sessions_lock:
+            session = sessions.get(session_id)
+            if session:
+                session.setdefault("retrieval_cache", {})
+            _append_chat_and_mark_dirty(session_id, {
+                "question": question,
+                "answer": framed,
+                "sources": citation_sources,
+                "mode": mode,
+            })
+        return response_payload
+
+    # ── Step 2: Fall back to HuggingFace model ───────────────────────────────
+    logger.info("Falling back to HuggingFace generate_response session_id=%s", session_id)
     answer = generate_response(
         prompt,
         max_new_tokens=256
     )
-    
+
     framed = apply_mode_framing(answer, question, mode, docs, context)
 
     # If citations were required and mode-framing stripped them, revert to original.
@@ -2771,6 +2872,7 @@ def ask_question(data: Question):
         "answer": framed,
         "sources": citation_sources,
         "retrieval_type": "citation-aware",
+        "answer_mode": "hf-generative",
         "cache_hit": cache_hit,
         "mode": mode,
     }
