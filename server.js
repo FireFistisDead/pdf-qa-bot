@@ -498,19 +498,17 @@ const multerErrorHandler = (err, req, res, next) => {
       );
       return res.status(413).json({
         error: "File too large",
-        message: `Upload failed: PDF file exceeds maximum allowed size of ${MAX_UPLOAD_SIZE_MB}MB. Please choose a smaller PDF and try again.`,
-        details: `Maximum allowed file size: ${MAX_UPLOAD_SIZE_MB}MB. Consider splitting your PDF or compressing it before upload.`,
-        maxSizeMB: MAX_UPLOAD_SIZE_MB,
+        message: "Upload failed: File too large",
       });
     } else if (err.code === "LIMIT_FILE_COUNT") {
       console.warn(`[upload] Multiple files rejected. Multer code: ${err.code}`);
-      return res.status(400).json({
+      return res.status(409).json({
         error: "Too many files",
         message: "Only one PDF file is allowed per upload request.",
       });
     } else if (err.code === "LIMIT_PART_COUNT") {
       console.warn(`[upload] Too many form parts. Multer code: ${err.code}`);
-      return res.status(400).json({
+      return res.status(409).json({
         error: "Too many parts",
         message: "The form request contains too many fields. Please try again.",
       });
