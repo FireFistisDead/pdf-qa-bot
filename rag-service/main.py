@@ -2646,16 +2646,16 @@ def ask_question(data: Question):
                     [],
                     mode,
                 )
-
-            _append_chat_and_mark_dirty(
-                session_id,
-                {
-                    "question": question,
-                    "answer": INSUFFICIENT_CONTEXT_MESSAGE,
-                    "sources": [],
-                    "mode": mode,
-                },
-            )
+            else:
+                _append_chat_and_mark_dirty(
+                    session_id,
+                    {
+                        "question": question,
+                        "answer": INSUFFICIENT_CONTEXT_MESSAGE,
+                        "sources": [],
+                        "mode": mode,
+                    },
+                )
         return response_payload
 
     pages = sorted(set(
