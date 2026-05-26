@@ -305,7 +305,7 @@ const FILE_RETENTION_MS = parseInt(process.env.FILE_RETENTION_MS || "86400000", 
 const CLEANUP_INTERVAL_MS = parseInt(process.env.CLEANUP_INTERVAL_MS || "3600000", 10); // Run every hour
 
 const startUploadsCleanup = () => {
-  setInterval(async () => {
+  const intervalId = setInterval(async () => {
     try {
       const files = await fsPromises.readdir(UPLOADS_DIR);
       const now = Date.now();
@@ -329,6 +329,9 @@ const startUploadsCleanup = () => {
   
   // Unref the interval so it doesn't prevent the server process from exiting gracefully
   // (Optional but good practice)
+  if (intervalId && typeof intervalId.unref === 'function') {
+    intervalId.unref();
+  }
 };
 
 // Start the cleanup routine
