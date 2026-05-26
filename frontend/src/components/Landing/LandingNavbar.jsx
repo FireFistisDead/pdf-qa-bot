@@ -1,9 +1,12 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../../contexts/AuthContext';
+import { supabase } from '../../services/supabaseClient';
 import './Navbar.css';
 
 const LandingNavbar = () => {
   const navigate = useNavigate();
+  const { user } = useAuth();
 
   return (
     <nav className="navbar" id="landing-navbar">
@@ -27,12 +30,45 @@ const LandingNavbar = () => {
 
       {/* Actions */}
       <div className="navbar-actions" id="navbar-actions">
-        <button className="navbar-btn-login" id="btn-login" onClick={() => navigate('/signin')}>
-          Login
-        </button>
-        <button className="navbar-btn-cta" id="btn-get-started" onClick={() => navigate('/signup')}>
-          Get Started <span>→</span>
-        </button>
+        {user ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+            <button className="navbar-btn-login" onClick={() => navigate('/dashboard')}>
+              Dashboard
+            </button>
+            <div style={{ position: 'relative' }}>
+              <button 
+                onClick={() => supabase.auth.signOut()}
+                style={{
+                  background: 'var(--accent, #c8ff00)',
+                  color: '#000',
+                  border: '2px solid #000',
+                  borderRadius: '50%',
+                  width: '40px',
+                  height: '40px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontWeight: 'bold',
+                  fontFamily: 'var(--font-mono, monospace)',
+                  cursor: 'pointer',
+                  boxShadow: '2px 2px 0px rgba(255,255,255,0.2)'
+                }}
+                title="Sign Out"
+              >
+                {user.email ? user.email.charAt(0).toUpperCase() : 'U'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <button className="navbar-btn-login" id="btn-login" onClick={() => navigate('/signin')}>
+              Login
+            </button>
+            <button className="navbar-btn-cta" id="btn-get-started" onClick={() => navigate('/signup')}>
+              Get Started <span>→</span>
+            </button>
+          </>
+        )}
       </div>
     </nav>
   );
