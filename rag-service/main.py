@@ -31,6 +31,9 @@ import threading
 import time
 import logging
 import re
+
+import atexit
+
 from collections import OrderedDict
 try:  # pragma: no cover
     import fcntl  # type: ignore
@@ -102,6 +105,7 @@ def normalize_chat_history(chat):
 
 
 def load_sessions():
+    base: dict = {}
     if SESSIONS_FILE.exists():
         try:
             with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
@@ -110,10 +114,30 @@ def load_sessions():
                     meta["lock"] = threading.Lock()
                     meta["vectorstore"] = None
                     meta["chat"] = normalize_chat_history(meta.get("chat", []))
-                return data
+                
+                    base[sid] = meta
+                    
         except Exception as e:
-            logger.error(f"Failed to load sessions: {e}")
-    return {}
+            logger.error(f"Failed to load sessions from sessions.json: {e}")
+
+    # Overlay per-session metadata files (chat history written by the
+    # background flush thread). These are authoritative: if a session_meta.json
+    # exists for a session it will have a more recent chat list than sessions.json
+    # because sessions.json is only updated during cleanup, not on every Q&A.
+    for sid, meta in base.items():
+        try:
+            meta_path = str(DATA_DIR / sid / "session_meta.json")
+            if os.path.isfile(meta_path):
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    per = json.load(f)
+                if isinstance(per.get("chat"), list):
+                    meta["chat"] = per["chat"]
+                if per.get("last_accessed") and float(per["last_accessed"] or 0) > float(meta.get("last_accessed") or 0):
+                    meta["last_accessed"] = float(per["last_accessed"])
+        except Exception as e:
+            logger.warning("Failed to overlay per-session metadata for %s: %s", sid, e)
+
+    return base
 
 def save_sessions_unlocked():
     try:
@@ -127,11 +151,20 @@ def save_sessions_unlocked():
                 if isinstance(value, dict):
                     safe_cache[key] = value
 
-            data[sid] = {
+            # Strip static_url from persisted document entries. The field pointed to
+        # a server-side file path that is deleted immediately after indexing.
+        # Keeping it on disk would cause the frontend to construct a URL that
+        # 404s and, if the /uploads static route were ever re-enabled, could
+        # expose the raw PDF to unauthenticated callers.
+        clean_docs = [
+            {k: v for k, v in doc.items() if k != "static_url"}
+            for doc in meta.get("documents", [])
+        ]
+        data[sid] = {
                 "created_at": meta.get("created_at"),
                 "last_accessed": meta.get("last_accessed"),
-                "documents": meta.get("documents", []),
-                "retrieval_cache": safe_cache,
+                "documents": clean_docs,
+                "retrieval_cache": {},  # Do not persist retrieval cache (contains Document objects)
                 "chat": meta.get("chat", []),
                 "session_secret": meta.get("session_secret"),
             }
@@ -144,6 +177,12 @@ def save_sessions_unlocked():
 
 # Global session store
 sessions = load_sessions()
+
+# Set of session IDs with in-memory changes not yet written to their
+# per-session session_meta.json file. Protected by sessions_lock.
+# The background flush thread drains this set on each wake cycle.
+_dirty_sessions: set = set()
+
 processing_progress = {}
 def update_processing_progress(session_id, stage, progress):
     payload = {
@@ -161,6 +200,11 @@ def update_processing_progress(session_id, stage, progress):
 
 INTERNAL_RAG_TOKEN = os.getenv("INTERNAL_RAG_TOKEN", "").strip()
 
+# How often the background flush thread wakes and writes dirty session metadata
+# files to disk. Lower values reduce the data-loss window on unclean shutdown
+# at the cost of more frequent I/O; higher values batch more writes.
+SESSION_FLUSH_INTERVAL_SECONDS = int(os.getenv("SESSION_FLUSH_INTERVAL_SECONDS", "10"))
+
 PDF_PARSE_TIMEOUT_SECONDS = int(os.getenv("PDF_PARSE_TIMEOUT_SECONDS", "20"))
 MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "200"))
 MAX_PDF_EXTRACT_CHARS = int(os.getenv("MAX_PDF_EXTRACT_CHARS", "400000"))
@@ -169,16 +213,6 @@ try:
     from langchain_core.documents import Document  # type: ignore
 except Exception:  # pragma: no cover
     from langchain.schema import Document  # type: ignore
-
-def internal_token_valid(provided: str | None, expected: str) -> bool:
-    candidate = (provided or "").strip()
-    return bool(expected) and bool(candidate) and secrets.compare_digest(candidate, expected)
-
-
-def require_internal_rag_token_configured():
-    if not INTERNAL_RAG_TOKEN:
-        raise RuntimeError("INTERNAL_RAG_TOKEN must be configured for protected endpoints.")
-
 
 @app.on_event("startup")
 def validate_internal_rag_token_on_startup():
@@ -847,6 +881,81 @@ def _enforce_max_sessions_unlocked():
         del sessions[oldest]
         remove_persisted_session(oldest, session_dir)
         logger.info("Evicted oldest session session_id=%s", oldest)
+
+
+def _snapshot_session_for_persistence(meta: dict) -> dict:
+    """Return a JSON-serialisable snapshot of the fields that belong in session_meta.json."""
+    return {
+        "created_at": meta.get("created_at"),
+        "last_accessed": meta.get("last_accessed"),
+        "documents": list(meta.get("documents", [])),
+        "chat": list(meta.get("chat", [])),
+        "session_secret": meta.get("session_secret"),
+    }
+
+
+def _write_session_meta_file(session_id: str, data: dict) -> None:
+    """Atomically write *data* to <session_dir>/session_meta.json."""
+    session_dir = get_session_dir(session_id)
+    os.makedirs(session_dir, exist_ok=True)
+    meta_path = os.path.join(session_dir, "session_meta.json")
+    temp_path = meta_path + ".tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, separators=(",", ":"))
+        os.replace(temp_path, meta_path)
+    except Exception:
+        logger.exception("Failed to write session metadata session_id=%s", session_id)
+
+
+def _append_chat_and_mark_dirty(session_id: str, entry: dict) -> None:
+    """Append *entry* to the in-memory chat list and mark the session dirty.
+
+    Must be called while sessions_lock is held.
+    """
+    meta = sessions.get(session_id)
+    if not meta:
+        return
+    meta.setdefault("chat", []).append(entry)
+    _dirty_sessions.add(session_id)
+
+
+def _flush_dirty_sessions() -> None:
+    """Write per-session metadata files for every session in _dirty_sessions.
+
+    Drains the dirty set atomically under sessions_lock before doing any I/O
+    so that new dirty marks made during the flush are picked up next cycle.
+    """
+    with sessions_lock:
+        if not _dirty_sessions:
+            return
+        dirty = set(_dirty_sessions)
+        _dirty_sessions.clear()
+    for session_id in dirty:
+        with sessions_lock:
+            meta = sessions.get(session_id)
+            if not meta:
+                continue
+            data = _snapshot_session_for_persistence(meta)
+        _write_session_meta_file(session_id, data)
+    if dirty:
+        logger.debug("Flushed metadata for %d dirty session(s)", len(dirty))
+
+
+def _background_flush_loop() -> None:
+    """Daemon thread: periodically flush dirty session metadata to disk."""
+    while True:
+        time.sleep(SESSION_FLUSH_INTERVAL_SECONDS)
+        try:
+            _flush_dirty_sessions()
+        except Exception:
+            logger.exception("Background session flush failed")
+
+
+_flush_thread = threading.Thread(target=_background_flush_loop, daemon=True, name="session-flush")
+_flush_thread.start()
+
+atexit.register(_flush_dirty_sessions)
 
 
 def validate_existing_session(session_id: str):
@@ -2025,12 +2134,21 @@ def lookup_sessions(data: SessionsLookupRequest):
 
             _require_session_secret(session, item.session_secret)
 
+            # Strip static_url before returning to the client. The field is a
+            # server-side file path that no longer exists (file deleted after
+            # indexing). Returning it would cause the frontend to construct an
+            # unauthenticated URL that either 404s or, if the static route were
+            # re-enabled, would serve the raw PDF without any auth check.
+            clean_docs = [
+                {k: v for k, v in doc.items() if k != "static_url"}
+                for doc in session.get("documents", [])
+            ]
             sessions_out.append(
                 {
                     "session_id": sid,
                     "created_at": session.get("created_at"),
                     "last_accessed": session.get("last_accessed"),
-                    "documents": session.get("documents", []),
+                    "documents": clean_docs,
                     "chat": session.get("chat", []),
                 }
             )
@@ -2194,10 +2312,14 @@ def process_pdf(
         15
     )
     now = now_ts()
+    # static_url is intentionally omitted. The upload temp file is deleted by
+    # the Express gateway immediately after this endpoint returns. Storing the
+    # path would be misleading and could lead to unauthenticated file access if
+    # a static route were re-introduced. The frontend uses URL.createObjectURL
+    # for the in-browser viewer — no server-side URL is needed.
     uploaded_document = {
         "document_id": document_id,
         "filename": filename,
-        "static_url": f"/uploads/{os.path.basename(file.filename)}" if file.filename else None,
         "uploaded_at": now,
         "chunk_count": len(chunks),
     }
@@ -2295,6 +2417,12 @@ def process_pdf(
             session_dir = persist_vectorstore(session_id, new_vectorstore)
 
             with sessions_lock:
+                _cleanup_expired_sessions_unlocked()
+                _enforce_max_sessions_unlocked()
+                old_session = sessions.pop(processing_session_id, None)
+                progress = old_session.get("processing_progress") if old_session else None
+                processing_session_id = session_id
+                session_lock = threading.Lock()
                 sessions[session_id] = {
                     "vectorstore": new_vectorstore,
                     "lock": threading.Lock(),
@@ -2306,18 +2434,15 @@ def process_pdf(
                     "retrieval_cache": {},
                     "chat": [],
                 }
-
-                persist_session_registry_entry(
-                    session_id,
-                    sessions[session_id]
-                )
-
-        logger.info(
-            "Created session session_id=%s filename=%s chunks=%s",
-            session_id,
-            filename,
-            len(chunks),
-        )
+                if progress:
+                    sessions[session_id]["processing_progress"] = progress
+                persist_session_registry_entry(session_id, sessions[session_id])
+            logger.info(
+                "Created session session_id=%s filename=%s chunks=%s",
+                session_id,
+                filename,
+                len(chunks),
+            )
 
 
     with sessions_lock:
@@ -2505,8 +2630,23 @@ def ask_question(data: Question):
         with sessions_lock:
             session = sessions.get(session_id)
             if session:
-                append_chat_exchange(session, question, INSUFFICIENT_CONTEXT_MESSAGE, [], mode)
-                save_sessions_unlocked()
+                append_chat_exchange(
+                    session,
+                    question,
+                    INSUFFICIENT_CONTEXT_MESSAGE,
+                    [],
+                    mode,
+                )
+
+            _append_chat_and_mark_dirty(
+                session_id,
+                {
+                    "question": question,
+                    "answer": INSUFFICIENT_CONTEXT_MESSAGE,
+                    "sources": [],
+                    "mode": mode,
+                },
+            )
         return response_payload
 
     pages = sorted(set(
@@ -2559,8 +2699,23 @@ def ask_question(data: Question):
         with sessions_lock:
             session = sessions.get(session_id)
             if session:
-                append_chat_exchange(session, question, framed, citation_sources, mode)
-                save_sessions_unlocked()
+                append_chat_exchange(
+                    session,
+                    question,
+                    framed,
+                    citation_sources,
+                    mode,
+                )
+
+            _append_chat_and_mark_dirty(
+                session_id,
+                {
+                    "question": question,
+                    "answer": framed,
+                    "sources": citation_sources,
+                    "mode": mode,
+                },
+            )
         return response_payload
 
     grounded_answer = build_answer_from_documents(
@@ -2589,8 +2744,23 @@ def ask_question(data: Question):
         with sessions_lock:
             session = sessions.get(session_id)
             if session:
-                append_chat_exchange(session, question, grounded_answer, citation_sources, mode)
-                save_sessions_unlocked()
+                append_chat_exchange(
+                    session,
+                    question,
+                    grounded_answer,
+                    citation_sources,
+                    mode,
+                )
+
+            _append_chat_and_mark_dirty(
+                session_id,
+                {
+                    "question": question,
+                    "answer": grounded_answer,
+                    "sources": citation_sources,
+                    "mode": mode,
+                },
+            )
         return response_payload
     if grounded_answer:
         if ASK_REQUIRE_CITATIONS and not answer_contains_citation(grounded_answer, len(docs)):
@@ -2612,8 +2782,23 @@ def ask_question(data: Question):
             with sessions_lock:
                 session = sessions.get(session_id)
                 if session:
-                    append_chat_exchange(session, question, INSUFFICIENT_CONTEXT_MESSAGE, citation_sources, mode)
-                    save_sessions_unlocked()
+                    append_chat_exchange(
+                        session,
+                        question,
+                        INSUFFICIENT_CONTEXT_MESSAGE,
+                        citation_sources,
+                        mode,
+                    )
+
+                _append_chat_and_mark_dirty(
+                    session_id,
+                    {
+                        "question": question,
+                        "answer": INSUFFICIENT_CONTEXT_MESSAGE,
+                        "sources": citation_sources,
+                        "mode": mode,
+                    },
+                )
             return response_payload
         logger.info(
             "Returning grounded answer session_id=%s intent=%s retrieved_chunks=%s sources=%s",
@@ -2645,8 +2830,23 @@ def ask_question(data: Question):
         with sessions_lock:
             session = sessions.get(session_id)
             if session:
-                append_chat_exchange(session, question, framed, citation_sources, mode)
-                save_sessions_unlocked()
+                append_chat_exchange(
+                    session,
+                    question,
+                    framed,
+                    citation_sources,
+                    mode,
+                )
+
+            _append_chat_and_mark_dirty(
+                session_id,
+                {
+                    "question": question,
+                    "answer": framed,
+                    "sources": citation_sources,
+                    "mode": mode,
+                },
+            )
         return result
 
     prompt = (
@@ -2700,18 +2900,30 @@ def ask_question(data: Question):
     }
 
     with sessions_lock:
-
         session = sessions.get(session_id)
-
         if session:
-
             retrieval_cache = session.setdefault(
                 "retrieval_cache",
                 {}
             )
 
-            append_chat_exchange(session, question, framed, citation_sources, mode)
-            save_sessions_unlocked()
+            append_chat_exchange(
+                session,
+                question,
+                framed,
+                citation_sources,
+                mode,
+            )
+
+        _append_chat_and_mark_dirty(
+            session_id,
+            {
+                "question": question,
+                "answer": framed,
+                "sources": citation_sources,
+                "mode": mode,
+            },
+        )
 
     return response_payload
 
@@ -2766,18 +2978,29 @@ def ask_question_stream(data: Question):
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
 
-        retrieval_cache = session.setdefault("retrieval_cache", {})
-        cache_key = f"{mode}:{normalized_query}"
-        if cache_key in retrieval_cache:
-            logger.info(
-                "Stream retrieval cache hit session_id=%s cache_key=%s",
-                session_id,
-                cache_key,
-            )
-            scored_candidates = retrieval_cache[cache_key]
-            cache_hit = True
-        else:
-            cache_hit = False
+        retrieval_cache = session.setdefault("retrieval_cache", OrderedDict())
+        with session_lock:
+            cleanup_retrieval_cache(retrieval_cache)
+            cache_key = f"{mode}:{normalized_query}"
+            cached_value = retrieval_cache.get(cache_key)
+            if isinstance(cached_value, dict) and "scored_candidates" in cached_value:
+                logger.info(
+                    "Stream retrieval cache hit session_id=%s cache_key=%s",
+                    session_id,
+                    cache_key,
+                )
+                scored_candidates = cached_value["scored_candidates"]
+                cache_hit = True
+            elif cached_value is not None:
+                logger.info(
+                    "Stream retrieval cache invalidated session_id=%s cache_key=%s",
+                    session_id,
+                    cache_key,
+                )
+                retrieval_cache.pop(cache_key, None)
+                cache_hit = False
+            else:
+                cache_hit = False
 
     try:
         with session_lock:
@@ -2796,11 +3019,14 @@ def ask_question_stream(data: Question):
                 with sessions_lock:
                     current_session = sessions.get(session_id)
                     if current_session:
-                        rc = current_session.setdefault("retrieval_cache", {})
+                        rc = current_session.setdefault("retrieval_cache", OrderedDict())
                         if len(rc) >= RETRIEVAL_CACHE_LIMIT:
                             oldest = next(iter(rc))
                             del rc[oldest]
-                        rc[cache_key] = scored_candidates
+                        rc[cache_key] = {
+                            "cached_at": now_ts(),
+                            "scored_candidates": scored_candidates,
+                        }
     except Exception:
         logger.exception("Stream similarity search failed session_id=%s", session_id)
         raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
@@ -2822,8 +3048,22 @@ def ask_question_stream(data: Question):
         with sessions_lock:
             current_session = sessions.get(session_id)
             if current_session:
-                append_chat_exchange(current_session, question, INSUFFICIENT_CONTEXT_MESSAGE, [], mode)
-                save_sessions_unlocked()
+                append_chat_exchange(
+                    current_session,
+                    question,
+                    INSUFFICIENT_CONTEXT_MESSAGE,
+                    [],
+                    mode,
+                )
+            _append_chat_and_mark_dirty(
+                session_id,
+                {
+                    "question": question,
+                    "answer": INSUFFICIENT_CONTEXT_MESSAGE,
+                    "sources": [],
+                    "mode": mode,
+                },
+            )
 
         def _refuse_stream():
             yield INSUFFICIENT_CONTEXT_MESSAGE
@@ -2850,8 +3090,22 @@ def ask_question_stream(data: Question):
         with sessions_lock:
             current_session = sessions.get(session_id)
             if current_session:
-                append_chat_exchange(current_session, question, framed, citation_sources, mode)
-                save_sessions_unlocked()
+                append_chat_exchange(
+                    current_session,
+                    question,
+                    framed,
+                    citation_sources,
+                    mode,
+                )
+            _append_chat_and_mark_dirty(
+                session_id,
+                {
+                    "question": question,
+                    "answer": framed,
+                    "sources": citation_sources,
+                    "mode": mode,
+                },
+            )
 
         def _grounded_stream():
             yield framed
@@ -2928,8 +3182,22 @@ def ask_question_stream(data: Question):
             with sessions_lock:
                 current_session = sessions.get(session_id)
                 if current_session:
-                    append_chat_exchange(current_session, question, full_answer, citation_sources, mode)
-                    save_sessions_unlocked()
+                    append_chat_exchange(
+                        current_session,
+                        question,
+                        full_answer,
+                        citation_sources,
+                        mode,
+                    )
+                _append_chat_and_mark_dirty(
+                    session_id,
+                    {
+                        "question": question,
+                        "answer": full_answer,
+                        "sources": citation_sources,
+                        "mode": mode,
+                    },
+                )
         except Exception:
             logger.exception("Stream generation failed session_id=%s", session_id)
             yield "\n[Generation error. Please try again.]"

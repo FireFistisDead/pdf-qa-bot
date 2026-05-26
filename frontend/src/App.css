@@ -152,3 +152,32 @@ body {
 
   min-height: 100vh;
 }
+
+@keyframes pagePulse {
+  0% {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  30% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.02);
+  }
+}
+
+.pulse-overlay {
+  animation: pagePulse 2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+.citation-chip {
+  transition: all 0.2s ease;
+}
+
+.citation-chip:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+  border-color: rgba(139,92,246,0.4) !important;
+}
