@@ -62,7 +62,7 @@ const Dashboard = () => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   React.useEffect(() => {
-    if (!user) navigate('/signin');
+    if (!user) navigate('/');
   }, [user, navigate]);
 
   if (!user) return null;
