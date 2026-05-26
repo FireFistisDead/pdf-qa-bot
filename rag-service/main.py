@@ -3021,13 +3021,13 @@ def ask_question_stream(data: Question):
         with sessions_lock:
             current_session = sessions.get(session_id)
             if current_session:
-                current_session.setdefault("chat", []).append({
+                current_session.setdefault("retrieval_cache", {})
+                _append_chat_and_mark_dirty(session_id, {
                     "question": question,
                     "answer": framed,
                     "sources": citation_sources,
                     "mode": mode,
                 })
-                save_sessions_unlocked()
 
         def _grounded_stream():
             yield framed
@@ -3104,13 +3104,13 @@ def ask_question_stream(data: Question):
             with sessions_lock:
                 current_session = sessions.get(session_id)
                 if current_session:
-                    current_session.setdefault("chat", []).append({
+                    current_session.setdefault("retrieval_cache", {})
+                    _append_chat_and_mark_dirty(session_id, {
                         "question": question,
-                        "answer": full_answer,
+                        "answer": framed,
                         "sources": citation_sources,
                         "mode": mode,
                     })
-                    save_sessions_unlocked()
         except Exception:
             logger.exception("Stream generation failed session_id=%s", session_id)
             yield "\n[Generation error. Please try again.]"
