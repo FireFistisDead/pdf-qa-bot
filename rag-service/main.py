@@ -94,7 +94,7 @@ def save_sessions_unlocked():
                 "created_at": meta.get("created_at"),
                 "last_accessed": meta.get("last_accessed"),
                 "documents": meta.get("documents", []),
-                "retrieval_cache": safe_cache,
+                "retrieval_cache": {},  # Do not persist retrieval cache (contains Document objects)
                 "chat": meta.get("chat", []),
                 "session_secret": meta.get("session_secret"),
             }
@@ -2227,6 +2227,12 @@ def process_pdf(
             session_dir = persist_vectorstore(session_id, new_vectorstore)
 
             with sessions_lock:
+                _cleanup_expired_sessions_unlocked()
+                _enforce_max_sessions_unlocked()
+                old_session = sessions.pop(processing_session_id, None)
+                progress = old_session.get("processing_progress") if old_session else None
+                processing_session_id = session_id
+                session_lock = threading.Lock()
                 sessions[session_id] = {
                     "vectorstore": new_vectorstore,
                     "lock": threading.Lock(),
@@ -2238,18 +2244,15 @@ def process_pdf(
                     "retrieval_cache": {},
                     "chat": [],
                 }
-
-                persist_session_registry_entry(
-                    session_id,
-                    sessions[session_id]
-                )
-
-        logger.info(
-            "Created session session_id=%s filename=%s chunks=%s",
-            session_id,
-            filename,
-            len(chunks),
-        )
+                if progress:
+                    sessions[session_id]["processing_progress"] = progress
+                persist_session_registry_entry(session_id, sessions[session_id])
+            logger.info(
+                "Created session session_id=%s filename=%s chunks=%s",
+                session_id,
+                filename,
+                len(chunks),
+            )
 
 
     with sessions_lock:
