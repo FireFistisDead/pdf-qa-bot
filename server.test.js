@@ -35,6 +35,17 @@ test("ragAuthHeaders requires and forwards the internal token", () => {
   assert.deepEqual(ragAuthHeaders(), { "X-Internal-Token": process.env.INTERNAL_RAG_TOKEN });
 });
 
+test("ragAuthHeaders throws when the internal token is blank", () => {
+  const originalToken = process.env.INTERNAL_RAG_TOKEN;
+
+  try {
+    process.env.INTERNAL_RAG_TOKEN = "   ";
+    assert.throws(() => ragAuthHeaders());
+  } finally {
+    process.env.INTERNAL_RAG_TOKEN = originalToken;
+  }
+});
+
 const createPdfUploadBody = ({ sessionId = null, sessionSecret = null } = {}) => {
   const formData = new FormData();
   formData.append(
