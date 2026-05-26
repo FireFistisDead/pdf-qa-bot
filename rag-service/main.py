@@ -3401,7 +3401,6 @@ def knowledge_gaps(data: KnowledgeGapsRequest):
     total_chars = sum(len(c.page_content) for c in doc_chunks)
     if total_chars < 200:
         return {
-            "session_id": session_id,
             "document": document_filename,
             "document_id": document_id,
             "concept_count": 0,
@@ -3426,7 +3425,6 @@ def knowledge_gaps(data: KnowledgeGapsRequest):
     concepts = detect_knowledge_gaps(doc_chunks)
 
     return {
-        "session_id": session_id,
         "document": document_filename,
         "document_id": document_id,
         "concept_count": len(concepts),
