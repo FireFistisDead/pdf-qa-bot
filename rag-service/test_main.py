@@ -705,7 +705,7 @@ def test_cleanup_not_called_inline_in_ask_handler():
     inference request causes O(N) session scan and sessions_lock contention.
     """
     source = inspect.getsource(_main_module.ask_question)
-    assert "cleanup_expired_sessions" not in source, (
+    assert "cleanup_expired_sessions()" not in source, (
         "/ask handler must not call cleanup_expired_sessions() inline. "
         "Cleanup should only run via the background asyncio task."
     )
@@ -714,7 +714,7 @@ def test_cleanup_not_called_inline_in_ask_handler():
 def test_cleanup_not_called_inline_in_ask_stream_handler():
     """/ask/stream handler must not call cleanup_expired_sessions() inline."""
     source = inspect.getsource(_main_module.ask_question_stream)
-    assert "cleanup_expired_sessions" not in source, (
+    assert "cleanup_expired_sessions()" not in source, (
         "/ask/stream handler must not call cleanup_expired_sessions() inline."
     )
 
@@ -722,23 +722,32 @@ def test_cleanup_not_called_inline_in_ask_stream_handler():
 def test_cleanup_not_called_inline_in_summarize_handler():
     """/summarize handler must not call cleanup_expired_sessions() inline."""
     source = inspect.getsource(_main_module.summarize_pdf)
-    assert "cleanup_expired_sessions" not in source, (
+    assert "cleanup_expired_sessions()" not in source, (
         "/summarize handler must not call cleanup_expired_sessions() inline."
     )
 
 
 def test_cleanup_not_called_inline_in_process_pdf_handler():
-    """/process-pdf handler must not call cleanup_expired_sessions() inline."""
+    """/process-pdf handler must not call cleanup_expired_sessions() inline.
+
+    Note: _cleanup_expired_sessions_unlocked() is a different, narrower helper
+    called inside sessions_lock during session creation — its presence in this
+    handler is intentional. Only the broad O(N) cleanup_expired_sessions() call
+    must be absent.
+    """
     source = inspect.getsource(_main_module.process_pdf)
-    assert "cleanup_expired_sessions" not in source, (
-        "/process-pdf handler must not call cleanup_expired_sessions() inline."
+    # Use the exact call signature so _cleanup_expired_sessions_unlocked() does
+    # not trigger a false positive (it does not contain this exact substring).
+    assert "cleanup_expired_sessions()" not in source, (
+        "/process-pdf handler must not call cleanup_expired_sessions() inline. "
+        "Cleanup should only run via the background asyncio task."
     )
 
 
 def test_cleanup_not_called_inline_in_lookup_sessions_handler():
     """/sessions/lookup handler must not call cleanup_expired_sessions() inline."""
     source = inspect.getsource(_main_module.lookup_sessions)
-    assert "cleanup_expired_sessions" not in source, (
+    assert "cleanup_expired_sessions()" not in source, (
         "/sessions/lookup handler must not call cleanup_expired_sessions() inline."
     )
 
