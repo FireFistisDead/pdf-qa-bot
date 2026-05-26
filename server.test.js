@@ -462,14 +462,17 @@ describe("route error responses", () => {
     const originalPost = axios.post;
 
     axios.post = async () => ({ data: { allowed: true } });
-    axios.postForm = async () => ({
-      data: {
-        session_id: "550e8400-e29b-41d4-a716-446655440000",
-        session_secret: "test-secret-abc",
-        document: { document_id: "doc-123", filename: "sample.pdf" },
-        documents: [],
-      },
-    });
+    axios.postForm = async (url, formData) => {
+      await consumeUploadStream(formData);
+      return {
+        data: {
+          session_id: "550e8400-e29b-41d4-a716-446655440000",
+          session_secret: "test-secret-abc",
+          document: { document_id: "doc-123", filename: "sample.pdf" },
+          documents: [],
+        },
+      };
+    };
 
     try {
       const res = await fetch(`${baseUrl}/upload`, {
