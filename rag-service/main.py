@@ -1,10 +1,12 @@
 from fastapi import FastAPI, Request, HTTPException, File, UploadFile, Form
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.exceptions import RequestValidationError
+from contextlib import asynccontextmanager
 from pydantic import BaseModel, Field, field_validator
 from pathlib import Path
 from uuid import UUID
 from contextlib import contextmanager
+import asyncio
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from dotenv import load_dotenv
@@ -358,6 +360,8 @@ generation_lock = threading.Lock()
 # Configurable session TTL and max cap
 SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "43200"))  # 30 days default for persistence
 MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "1000"))
+# How often the background cleanup task sweeps for expired sessions (minutes).
+SESSION_CLEANUP_INTERVAL_MINUTES = max(1, int(os.getenv("SESSION_CLEANUP_INTERVAL_MINUTES", "5")))
 MAX_DOCUMENTS_PER_SESSION = int(os.getenv("MAX_DOCUMENTS_PER_SESSION", "5"))
 MAX_CHUNKS_PER_SESSION = int(os.getenv("MAX_CHUNKS_PER_SESSION", "2000"))
 ASK_RETRIEVAL_CANDIDATES = int(os.getenv("ASK_RETRIEVAL_CANDIDATES", "12"))
@@ -701,30 +705,55 @@ def cleanup_failed_session(session_id: str):
         )
 def cleanup_expired_sessions():
     """
-    Remove expired sessions and enforce max session cap.
+    Remove expired sessions and enforce the max session cap.
+
+    Lock discipline: acquire sessions_lock only for dict mutation and
+    save_sessions_unlocked. All shutil.rmtree calls happen after the lock
+    is released so that disk I/O never extends the lock hold time.
+    This function is safe to call from a background thread or via
+    asyncio.get_event_loop().run_in_executor.
     """
     expired = []
-    expired_dirs = {}
+    dirs_to_remove: list[str] = []
     evicted_count = 0
     active_sessions = 0
+
     with sessions_lock:
         ttl_seconds = SESSION_TTL_MINUTES * 60
         for sid, meta in list(sessions.items()):
             if now_ts() - meta["last_accessed"] > ttl_seconds:
                 expired.append(sid)
-                expired_dirs[sid] = meta.get("session_dir")
+                session_dir = meta.get("session_dir")
+                if session_dir:
+                    dirs_to_remove.append(session_dir)
         for sid in expired:
             del sessions[sid]
         while len(sessions) > MAX_ACTIVE_SESSIONS:
             oldest = min(sessions.items(), key=lambda x: x[1]["created_at"])[0]
-            expired_dirs[oldest] = sessions[oldest].get("session_dir")
+            session_dir = sessions[oldest].get("session_dir")
+            if session_dir:
+                dirs_to_remove.append(session_dir)
             del sessions[oldest]
             expired.append(oldest)
             evicted_count += 1
         active_sessions = len(sessions)
         if expired or evicted_count:
             save_sessions_unlocked()
-            cleanup_expired_persisted_sessions(expired_dirs)
+
+    # Perform disk cleanup outside the lock so concurrent requests are not
+    # blocked while rmtree traverses the filesystem.
+    if dirs_to_remove or expired:
+        cleanup_expired_persisted_sessions({sid: None for sid in expired})
+        for session_dir in dirs_to_remove:
+            try:
+                target_path = Path(session_dir).resolve()
+                if target_path.is_dir() and PERSIST_PATH in target_path.parents:
+                    shutil.rmtree(target_path)
+            except Exception:
+                logger.exception(
+                    "Background cleanup failed to remove session dir path=%s", session_dir
+                )
+
     if expired or evicted_count:
         logger.info(
             "Session cleanup completed expired=%s evicted=%s active=%s",
@@ -732,6 +761,51 @@ def cleanup_expired_sessions():
             evicted_count,
             active_sessions,
         )
+
+
+async def _background_cleanup_loop() -> None:
+    """
+    Asyncio background task: run cleanup_expired_sessions on a configurable
+    interval without blocking the event loop.
+
+    shutil.rmtree is I/O-bound and runs in a thread pool executor so the
+    event loop stays responsive. asyncio.sleep yields control between runs.
+    """
+    loop = asyncio.get_event_loop()
+    interval_seconds = SESSION_CLEANUP_INTERVAL_MINUTES * 60
+    logger.info(
+        "Background session cleanup started interval_minutes=%s",
+        SESSION_CLEANUP_INTERVAL_MINUTES,
+    )
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            await loop.run_in_executor(None, cleanup_expired_sessions)
+        except asyncio.CancelledError:
+            logger.info("Background session cleanup task cancelled")
+            break
+        except Exception:
+            logger.exception("Background session cleanup encountered an error")
+
+
+@asynccontextmanager
+async def lifespan(fastapi_app: FastAPI):
+    """Start background tasks on startup and cancel them cleanly on shutdown."""
+    cleanup_task = asyncio.create_task(_background_cleanup_loop())
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
+
+# Wire the lifespan handler into the already-constructed app instance.
+# FastAPI allows this assignment after construction; the lifespan function
+# must be defined after its dependencies (sessions, sessions_lock, etc.) so
+# it cannot be passed to FastAPI() at the call site near the top of the module.
+app.router.lifespan_context = lifespan
 
 
 def _is_session_expired(meta: dict) -> bool:
@@ -2062,8 +2136,6 @@ def _require_session_secret(session: dict, provided_secret: str | None):
 
 @app.post("/sessions/lookup")
 def lookup_sessions(data: SessionsLookupRequest):
-    cleanup_expired_sessions()
-
     sessions_out = []
 
     with sessions_lock:
@@ -2108,8 +2180,6 @@ def process_pdf(
     original_filename: str | None = Form(None),
     session_secret: str | None = Form(None)
 ):
-    cleanup_expired_sessions()
-
     # If original_filename is provided, use it for display, otherwise fallback to the file's name (which might be a UUID)
     filename = original_filename or file.filename or "uploaded.pdf"
     if not filename.lower().endswith(".pdf"):
@@ -2446,8 +2516,6 @@ def processing_status(session_id: str, session_secret: str | None = None):
 @app.post("/ask")
 
 def ask_question(data: Question):
-    cleanup_expired_sessions()
-
     question = (data.question or "").strip()
 
     if not question:
@@ -2803,8 +2871,6 @@ def ask_question_stream(data: Question):
     so it cannot be reached without a valid X-Internal-Token when
     INTERNAL_RAG_TOKEN is configured.
     """
-    cleanup_expired_sessions()
-
     question = (data.question or "").strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question is required.")
@@ -3030,7 +3096,6 @@ def _run_generation_locked(model, generate_kwargs):
 
 @app.post("/summarize")
 def summarize_pdf(data: SummarizeRequest):
-    cleanup_expired_sessions()
     session_id = str(data.session_id)
     with sessions_lock:
         session = _touch_session_unlocked(session_id)
