@@ -1978,6 +1978,8 @@ def sanitize_upload_filename(client_file_path: str) -> str:
         raise ValueError("Uploaded filename contains unsupported characters.")
     if not safe_name.lower().endswith(".pdf"):
         raise ValueError("Only PDF files are allowed.")
+    if len(safe_name) > 255:
+        raise ValueError("Filename exceeds the maximum length of 255 characters.")
     return safe_name
 
 
@@ -2136,6 +2138,8 @@ def process_pdf(
         # Validate actual file magic bytes — extension alone is trivially bypassable.
         # A valid PDF always begins with the 4-byte signature: %PDF (0x25 0x50 0x44 0x46).
         magic = file.file.read(5)
+        if not magic:
+            raise HTTPException(status_code=400, detail="Uploaded PDF is empty. Please choose a valid PDF file.")
         if magic[:4] != b"%PDF":
             raise HTTPException(
                 status_code=415,
@@ -2474,7 +2478,12 @@ def ask_question(data: Question):
                 detail="Session expired or invalid. Please re-upload your PDFs."
             )
 
-        _require_session_secret(session, data.session_secret)
+        candidate = (data.session_secret or "").strip()
+        if not candidate:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        expected = (session.get("session_secret") or "").strip()
+        if not expected or not secrets.compare_digest(candidate, expected):
+            raise HTTPException(status_code=403, detail="Forbidden")
 
         if "lock" not in session:
             session["lock"] = threading.Lock()
