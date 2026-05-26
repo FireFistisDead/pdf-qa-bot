@@ -9,6 +9,7 @@ const { Blob } = require("node:buffer");
 let app, askSchema, summarizeSchema, extractServiceDetails;
 let clientIpFromRequest, normalizeIp;
 test("module loads without error", () => {
+  process.env.JWT_SECRET = "test-secret-for-ci";
   const mod = require("./server.js");
   app = mod.app;
   askSchema = mod.askSchema;
@@ -307,5 +308,12 @@ describe("route error responses", () => {
       method: "GET",
     });
     assert.equal(res.status, 404);
+  });
+
+  test("GET /health returns 200 and status ok", async () => {
+    const res = await fetch(`${baseUrl}/health`);
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.deepEqual(data, { status: "ok" });
   });
 });

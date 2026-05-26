@@ -1,7 +1,10 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import './Navbar.css';
 
 const LandingNavbar = () => {
+  const navigate = useNavigate();
+
   return (
     <nav className="navbar" id="landing-navbar">
       {/* Logo */}
@@ -19,14 +22,15 @@ const LandingNavbar = () => {
         <a href="#features" className="navbar-link">Features</a>
         <a href="#how-it-works" className="navbar-link">How It Works</a>
         <a href="#pricing" className="navbar-link">Pricing</a>
+        <a href="#faq" className="navbar-link">FAQ</a>
       </div>
 
       {/* Actions */}
       <div className="navbar-actions" id="navbar-actions">
-        <button className="navbar-btn-login" id="btn-login">
+        <button className="navbar-btn-login" id="btn-login" onClick={() => navigate('/signin')}>
           Login
         </button>
-        <button className="navbar-btn-cta" id="btn-get-started" onClick={() => window.location.href = '/'}>
+        <button className="navbar-btn-cta" id="btn-get-started" onClick={() => navigate('/signup')}>
           Get Started <span>→</span>
         </button>
       </div>

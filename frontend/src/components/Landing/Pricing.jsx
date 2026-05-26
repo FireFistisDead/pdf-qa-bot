@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import './Pricing.css';
 
 const CheckIcon = () => (
@@ -11,6 +12,7 @@ const CrossIcon = () => (
 
 const Pricing = () => {
   const [isYearly, setIsYearly] = useState(false);
+  const navigate = useNavigate();
 
   return (
     <section className="pricing-section section-wrap" id="pricing">
@@ -104,7 +106,7 @@ const Pricing = () => {
               <li><CheckIcon /> Priority Email Support</li>
             </ul>
           </div>
-          <button className="pricing-btn btn-primary pulse-hover">Start Free Trial</button>
+          <button className="pricing-btn btn-primary pulse-hover" onClick={() => navigate('/signup')}>Start Free Trial</button>
         </div>
 
         {/* Tier 3 - Enterprise */}
@@ -126,6 +128,22 @@ const Pricing = () => {
             </ul>
           </div>
           <button className="pricing-btn btn-secondary">Contact Sales</button>
+        </div>
+      </div>
+
+      {/* Bottom Marquee Divider */}
+      <div className="pricing-bottom-marquee">
+        <div className="divider-track reverse-track">
+          <span>KNOWLEDGE BASE</span><span className="divider-dot"></span>
+          <span>LOCAL AI SUPPORT</span><span className="divider-dot"></span>
+          <span>FAQS</span><span className="divider-dot"></span>
+          <span>COMMUNITY</span><span className="divider-dot"></span>
+          <span>KNOWLEDGE BASE</span><span className="divider-dot"></span>
+          <span>LOCAL AI SUPPORT</span><span className="divider-dot"></span>
+          <span>FAQS</span><span className="divider-dot"></span>
+          <span>COMMUNITY</span><span className="divider-dot"></span>
+          <span>KNOWLEDGE BASE</span><span className="divider-dot"></span>
+          <span>LOCAL AI SUPPORT</span><span className="divider-dot"></span>
         </div>
       </div>
     </section>

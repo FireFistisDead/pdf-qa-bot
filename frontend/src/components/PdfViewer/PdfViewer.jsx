@@ -1,15 +1,17 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Card, Button } from "react-bootstrap";
+import { Card, Button, Form } from "react-bootstrap";
 import PictureAsPdfIcon from "@mui/icons-material/PictureAsPdf";
 import { Document, Page, pdfjs } from "react-pdf";
 
 // Set PDF.js worker to local file
 pdfjs.GlobalWorkerOptions.workerSrc = `${process.env.PUBLIC_URL}/pdf.worker.min.mjs`;
 
-const PdfViewer = ({ darkMode, currentPdfFile, currentPdfUrl, jumpTarget }) => {
+const PdfViewer = ({ darkMode, currentPdfFile, currentPdfUrl, jumpTarget, heatmapData = {} }) => {
   const [numPages, setNumPages] = useState(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [loadError, setLoadError] = useState("");
+  const [heatmapEnabled, setHeatmapEnabled] = useState(true);
+  const [isPulsing, setIsPulsing] = useState(false);
   const viewerRef = useRef(null);
 
   const pdfSource = currentPdfFile || currentPdfUrl;
@@ -51,6 +53,11 @@ const PdfViewer = ({ darkMode, currentPdfFile, currentPdfUrl, jumpTarget }) => {
       behavior: "smooth",
       block: "start",
     });
+    
+    // Trigger pulse effect
+    setIsPulsing(true);
+    const timer = setTimeout(() => setIsPulsing(false), 2000);
+    return () => clearTimeout(timer);
   }, [jumpTarget, numPages, loadError]);
 
   const handleLoadError = (error) => {
@@ -59,6 +66,20 @@ const PdfViewer = ({ darkMode, currentPdfFile, currentPdfUrl, jumpTarget }) => {
     setLoadError(
       "Preview unavailable for this PDF. The document was uploaded successfully, so chat and summarization can still use it.",
     );
+  };
+
+  const getHeatmapStyle = (intensity) => {
+    if (!intensity || intensity <= 0) return null;
+    const hue = 60 - (intensity * 45); 
+    const alpha = 0.1 + (intensity * 0.25);
+    return {
+      position: "absolute",
+      top: 0, left: 0, right: 0, bottom: 0,
+      backgroundColor: `hsla(${hue}, 100%, 50%, ${alpha})`,
+      pointerEvents: "none",
+      zIndex: 10,
+      transition: "background-color 0.5s ease"
+    };
   };
 
   return (
@@ -153,6 +174,33 @@ const PdfViewer = ({ darkMode, currentPdfFile, currentPdfUrl, jumpTarget }) => {
             </div>
           )}
         </div>
+        
+        {pdfSource && (
+          <div className="d-flex justify-content-end mb-3">
+            <div className="d-flex align-items-center gap-2">
+              <Form.Check 
+                type="switch"
+                id="heatmap-switch"
+                label={
+                  <span style={{ fontSize: "13px", color: darkMode ? "#A1A1AA" : "#666" }}>
+                    Heatmap
+                  </span>
+                }
+                checked={heatmapEnabled}
+                onChange={(e) => setHeatmapEnabled(e.target.checked)}
+              />
+              {heatmapEnabled && (
+                <div className="d-flex align-items-center gap-1" style={{ fontSize: "11px", color: darkMode ? "#A1A1AA" : "#666", marginLeft: "8px" }}>
+                  <span>Low</span>
+                  <div style={{ width: "12px", height: "12px", background: "hsla(60, 100%, 50%, 0.1)" }}></div>
+                  <div style={{ width: "12px", height: "12px", background: "hsla(37, 100%, 50%, 0.22)" }}></div>
+                  <div style={{ width: "12px", height: "12px", background: "hsla(15, 100%, 50%, 0.35)" }}></div>
+                  <span>High</span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {pdfSource ? (
           <div style={{ textAlign: "center" }}>
@@ -175,7 +223,25 @@ const PdfViewer = ({ darkMode, currentPdfFile, currentPdfUrl, jumpTarget }) => {
                 </div>
               }
             >
-              {!loadError && <Page pageNumber={pageNumber} />}
+              {!loadError && (
+                 <div style={{ position: "relative", display: "inline-block" }}>
+                   <Page pageNumber={pageNumber} />
+                   {heatmapEnabled && heatmapData[pageNumber] > 0 && (
+                     <div style={getHeatmapStyle(heatmapData[pageNumber])}></div>
+                   )}
+                   {isPulsing && (
+                     <div className="pulse-overlay" style={{
+                       position: "absolute",
+                       top: 0, left: 0, right: 0, bottom: 0,
+                       pointerEvents: "none",
+                       zIndex: 20,
+                       boxShadow: "inset 0 0 40px rgba(139,92,246,0.6)",
+                       border: "3px solid rgba(139,92,246,0.8)",
+                       backgroundColor: "rgba(139,92,246,0.1)",
+                     }}></div>
+                   )}
+                 </div>
+              )}
             </Document>
 
             {!loadError && numPages && (

@@ -10,7 +10,7 @@ import {
 
 import LightModeIcon from "@mui/icons-material/LightMode";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
-import PictureAsPdfIcon from "@mui/icons-material/PictureAsPdf";
+import logo from "./Nav_logo.png";
 
 const Navbar = ({ darkMode, setDarkMode }) => {
   return (
@@ -31,14 +31,14 @@ const Navbar = ({ darkMode, setDarkMode }) => {
         <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
           
           <Avatar
+            src={logo}
+            alt="Logo"
             sx={{
-              bgcolor: "#7C4DFF",
               width: 48,
               height: 48,
+              bgcolor: "transparent",
             }}
-          >
-            <PictureAsPdfIcon />
-          </Avatar>
+          />
 
           <Box>
             <Typography
@@ -62,18 +62,50 @@ const Navbar = ({ darkMode, setDarkMode }) => {
           </Box>
         </Box>
 
-        <IconButton
-          onClick={() => setDarkMode(!darkMode)}
-          sx={{
-            color: darkMode ? "#fff" : "#111",
-            border: darkMode
-              ? "1px solid rgba(255,255,255,0.1)"
-              : "1px solid rgba(0,0,0,0.1)",
-            borderRadius: "12px",
-          }}
-        >
-          {darkMode ? <LightModeIcon /> : <DarkModeIcon />}
-        </IconButton>
+        <Box sx={{ display: "flex", gap: 2, alignItems: "center" }}>
+
+          <button
+            onClick={() => (window.location.href = "/login")}
+            style={{
+              padding: "8px 16px",
+              borderRadius: "10px",
+              border: "none",
+              cursor: "pointer",
+              fontWeight: 600,
+            }}
+          >
+            Login
+          </button>
+
+          <button
+            onClick={() => (window.location.href = "/signup")}
+            style={{
+              padding: "8px 16px",
+              borderRadius: "10px",
+              border: "none",
+              background: "#7C4DFF",
+              color: "#fff",
+              cursor: "pointer",
+              fontWeight: 600,
+            }}
+          >
+            Signup
+          </button>
+
+          <IconButton
+            onClick={() => setDarkMode(!darkMode)}
+            sx={{
+              color: darkMode ? "#fff" : "#111",
+              border: darkMode
+                ? "1px solid rgba(255,255,255,0.1)"
+                : "1px solid rgba(0,0,0,0.1)",
+              borderRadius: "12px",
+            }}
+          >
+            {darkMode ? <LightModeIcon /> : <DarkModeIcon />}
+          </IconButton>
+
+        </Box>
       </Toolbar>
     </AppBar>
   );
