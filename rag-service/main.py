@@ -3417,10 +3417,7 @@ def knowledge_gaps(data: KnowledgeGapsRequest):
     unique_pages = {c.metadata.get("page") for c in doc_chunks if c.metadata.get("page") is not None}
     is_short = len(unique_pages) < 5
 
-    logger.info(
-        "Running knowledge gap analysis doc=%s chunks=%s pages=%s",
-        document_id, len(doc_chunks), len(unique_pages),
-    )
+
 
     concepts = detect_knowledge_gaps(doc_chunks)
 
