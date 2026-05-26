@@ -3419,7 +3419,7 @@ def knowledge_gaps(data: KnowledgeGapsRequest):
     is_short = len(unique_pages) < 5
 
     logger.info(
-        "Running knowledge gap analysis session_id=%s document_id=%s chunks=%s pages=%s",
+        "Running knowledge gap analysis session=%s doc=%s chunks=%s pages=%s",
         session_id, document_id, len(doc_chunks), len(unique_pages),
     )
 
