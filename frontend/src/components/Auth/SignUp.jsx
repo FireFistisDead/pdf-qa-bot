@@ -45,6 +45,9 @@ const SignUp = () => {
   const handleOAuthLogin = async (provider) => {
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider,
+      options: {
+        redirectTo: `${window.location.origin}/dashboard`
+      }
     });
     if (error) toast.error(error.message);
   };
