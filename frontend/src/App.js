@@ -24,6 +24,9 @@ function MainApp() {
   const [pdfJumpTarget, setPdfJumpTarget] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
+  // Knowledge gap results keyed by document_id; lives in app state so switching
+  // PDF tabs preserves each document's map independently.
+  const [knowledgeGapResults, setKnowledgeGapResults] = useState({});
 
   // ── Credential storage key ────────────────────────────────────────────────
   // Session credentials (session_id + session_secret) are stored in
@@ -339,6 +342,21 @@ const handleOpenSource = (source) => {
   const currentPdfSessionId = currentPdf?.session_id || null;
   const currentPdfSessionSecret = currentPdf?.session_secret || null;
   const currentPdfName = currentPdf?.name || null;
+  const currentDocumentId = currentPdf?.document_id || null;
+
+  // The knowledge gap result for the currently-active document (null if none run yet).
+  const currentKnowledgeGapResult =
+    currentDocumentId && knowledgeGapResults[currentDocumentId]
+      ? knowledgeGapResults[currentDocumentId]
+      : null;
+
+  const handleKnowledgeGapResult = (result) => {
+    if (!currentDocumentId) return;
+    setKnowledgeGapResults((prev) => ({
+      ...prev,
+      [currentDocumentId]: result,
+    }));
+  };
 
   // Compute Heatmap Data for the current document
   const heatmapCounts = {};
@@ -448,6 +466,9 @@ const handleOpenSource = (source) => {
                     currentPdfName={currentPdfName}
                     currentPdfSessionId={currentPdfSessionId}
                     currentPdfSessionSecret={currentPdfSessionSecret}
+                    currentDocumentId={currentDocumentId}
+                    knowledgeGapResult={currentKnowledgeGapResult}
+                    onKnowledgeGapResult={handleKnowledgeGapResult}
                     onAppendMessage={handleAppendMessage}
                     onOpenSource={handleOpenSource}
                     onUpdateLastBotMessage={handleUpdateLastBotMessage}

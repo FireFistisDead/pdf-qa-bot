@@ -10,7 +10,7 @@ const crypto = require("crypto");
 const { rateLimit } = require("express-rate-limit");
 const slowDown = require("express-slow-down");
 const helmet = require("helmet");
-const { askSchema, summarizeSchema, sessionsLookupSchema } = require("./validators/schemas");
+const { askSchema, summarizeSchema, knowledgeGapsSchema, sessionsLookupSchema } = require("./validators/schemas");
 const { clientIpFromRequest } = require("./security/ip");
 const { createRedisClient } = require("./security/redis");
 const authRoutes = require("./src/routes/authRoutes");
@@ -718,6 +718,36 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
 
     return res.status(statusCode).json({
       error: typeof details === "string" ? details : "Error summarizing PDF",
+      details: isDevelopment ? details : "Internal processing error",
+    });
+  }
+});
+
+app.post("/knowledge-gaps", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+  const validation = knowledgeGapsSchema.safeParse(req.body);
+
+  if (!validation.success) {
+    return res.status(400).json({
+      error: "Validation failed",
+      details: validation.error.flatten(),
+    });
+  }
+
+  try {
+    const response = await axios.post(
+      `${RAG_SERVICE_URL}/knowledge-gaps`,
+      validation.data,
+      { headers: ragAuthHeaders() },
+    );
+    // Pass the response through as-is — no gateway-layer transformation.
+    return res.json(response.data);
+  } catch (err) {
+    const statusCode = err.response?.status || 500;
+    const details = extractServiceDetails(err, "Error mapping knowledge gaps");
+    console.error("Knowledge gap mapping failed:", details);
+
+    return res.status(statusCode).json({
+      error: typeof details === "string" ? details : "Error mapping knowledge gaps",
       details: isDevelopment ? details : "Internal processing error",
     });
   }

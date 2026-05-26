@@ -90,6 +90,22 @@ export const summarizePdfApi = async (pdfName, sessionId, sessionSecret) => {
   );
   return res.data;
 };
+/**
+ * Runs the on-demand knowledge gap analysis for the active document.
+ * @param {string} sessionId
+ * @param {string} sessionSecret
+ * @param {string|null} documentId  — the active document_id (null = first doc)
+ * @returns {Promise<Object>} Knowledge gap map response
+ */
+export const mapKnowledgeGapsApi = async (sessionId, sessionSecret, documentId = null) => {
+  const body = { session_id: sessionId, session_secret: sessionSecret };
+  if (documentId) body.document_id = documentId;
+  const res = await axios.post(`${API_BASE}/knowledge-gaps`, body, {
+    timeout: 60000,
+  });
+  return res.data;
+};
+
 export const askQuestionStreamApi = async (question, sessionId, sessionSecret, mode = "default", onChunk, signal) => {
   const response = await fetch(`${API_BASE}/ask/stream`, {
     method: "POST",

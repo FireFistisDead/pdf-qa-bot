@@ -293,6 +293,7 @@ async def internal_auth_middleware(request: Request, call_next):
         "/ask",
         "/ask/stream",
         "/summarize",
+        "/knowledge-gaps",
         "/validate-session-write",
         "/sessions/lookup",
     }
@@ -2092,6 +2093,12 @@ class SummarizeRequest(BaseModel):
     session_secret: str | None = None
 
 
+class KnowledgeGapsRequest(BaseModel):
+    session_id: UUID
+    session_secret: str
+    document_id: str | None = None
+
+
 class SessionLookupItem(BaseModel):
     session_id: UUID
     session_secret: str = Field(..., min_length=1)
@@ -3164,6 +3171,271 @@ def summarize_pdf(data: SummarizeRequest):
     )
 
     return {"summary": build_session_summary(uploaded_documents, indexed_documents)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Knowledge Gap Detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Signals that a term IS defined inside the document (exclude these).
+_DEFINITION_PATTERNS = re.compile(
+    r"\b(?:is a |refers to |is defined as |what is |means |stands for )",
+    re.IGNORECASE,
+)
+
+# Multi-word capitalized phrase: two or more Title-Case words, tolerating
+# possessives (Bayes' Theorem) and hyphens (Cross-Entropy Loss).
+_MULTI_WORD_CAPS = re.compile(
+    r"\b([A-Z][a-z]+(?:'s?|-[A-Z][a-z]+)?(?:\s+[A-Z][a-z]+(?:'s?|-[A-Z][a-z]+)?)+)\b"
+)
+
+# Term immediately followed by its acronym: Convolutional Neural Network (CNN)
+_ACRONYM_INTRO = re.compile(
+    r"\b([A-Z][a-zA-Z\s-]{3,60})\s+\(([A-Z]{2,5})\)"
+)
+
+# Technical-suffix words recurring across pages.
+_TECH_SUFFIX = re.compile(
+    r"\b([A-Za-z]{4,}(?:tion|ity|ism|ology|ics|ance|ence|ment))\b"
+)
+
+# Bare acronyms (2–5 uppercase letters, no adjacent lowercase).
+_BARE_ACRONYM = re.compile(r"(?<![a-z])\b([A-Z]{2,5})\b(?![a-z])")
+
+# Common English words that happen to be all-caps abbreviations but are NOT
+# domain-specific prerequisites.  Extend this list conservatively.
+_ACRONYM_STOPWORDS = frozenset({
+    "I", "A", "AN", "THE", "AND", "OR", "NOT", "IN", "ON", "AT", "TO",
+    "BY", "OF", "IS", "IT", "BE", "DO", "GO", "US", "UK", "EU", "UN",
+    "PDF", "URL", "HTTP", "API", "ID", "OK", "DR", "MR", "MS", "VS",
+    "E.G", "I.E", "NOTE", "SEE", "FIG", "REF", "ETC", "Q&A",
+})
+
+
+def _is_defined_nearby(term: str, text: str, window: int = 120) -> bool:
+    """Return True if the term appears within `window` chars of a definition
+    signal in the given text (suggesting the document defines it)."""
+    term_lower = term.lower()
+    text_lower = text.lower()
+    pos = 0
+    while True:
+        idx = text_lower.find(term_lower, pos)
+        if idx == -1:
+            break
+        # Check a window before and after the term occurrence.
+        start = max(0, idx - window)
+        end = min(len(text_lower), idx + len(term_lower) + window)
+        excerpt = text_lower[start:end]
+        if _DEFINITION_PATTERNS.search(excerpt):
+            return True
+        pos = idx + 1
+    return False
+
+
+def detect_knowledge_gaps(
+    chunks: list,
+    max_concepts: int = 12,
+) -> list:
+    """
+    Pure-regex prerequisite concept detector.  No LLM, no new dependencies.
+
+    Scans LangChain Document objects (with .page_content and .metadata["page"])
+    and returns a list of dicts:
+      { "term": str, "pages": [int, ...], "frequency": int }
+
+    sorted by frequency descending, capped at `max_concepts`.
+
+    A concept qualifies when:
+      1. It has a domain-specific character (multi-word caps, acronym intro,
+         technical suffix, or bare acronym).
+      2. It is NOT defined anywhere in the document (no definition-signal
+         pattern within 120 chars of any occurrence of the term).
+    """
+    if not chunks:
+        return []
+
+    # Build a flat map: page_number -> full page text
+    page_texts: dict[int, str] = {}
+    for chunk in chunks:
+        page = chunk.metadata.get("page")
+        if page is None:
+            continue
+        page_num = page + 1  # convert 0-based to 1-based for display
+        page_texts.setdefault(page_num, "")
+        page_texts[page_num] += " " + chunk.page_content
+
+    if not page_texts:
+        return []
+
+    full_text = " ".join(page_texts.values())
+
+    # ── Step 1: collect candidate terms ──────────────────────────────────────
+    candidates: dict[str, set] = {}  # normalized_term -> set of page numbers
+
+    def _register(term: str, page_num: int):
+        """Add term/page to candidates dict."""
+        normed = " ".join(term.split())  # collapse whitespace
+        if len(normed) < 3 or len(normed) > 80:
+            return
+        candidates.setdefault(normed, set()).add(page_num)
+
+    for page_num, text in page_texts.items():
+        # Pattern A: multi-word capitalized phrases
+        for m in _MULTI_WORD_CAPS.finditer(text):
+            _register(m.group(1), page_num)
+
+        # Pattern B: term (ACRONYM) introductions — register both forms
+        for m in _ACRONYM_INTRO.finditer(text):
+            _register(m.group(1).strip(), page_num)
+            _register(m.group(2), page_num)
+
+        # Pattern C: technical-suffix words
+        for m in _TECH_SUFFIX.finditer(text):
+            _register(m.group(1), page_num)
+
+        # Pattern D: bare acronyms
+        for m in _BARE_ACRONYM.finditer(text):
+            term = m.group(1)
+            if term not in _ACRONYM_STOPWORDS and len(term) >= 2:
+                _register(term, page_num)
+
+    # ── Step 2: filter out terms that appear on only 1 page (too noisy) ──────
+    candidates = {
+        term: pages
+        for term, pages in candidates.items()
+        if len(pages) >= 2  # must recur on at least 2 pages
+    }
+
+    # ── Step 3: filter out terms defined within the document ─────────────────
+    qualified = []
+    for term, pages in candidates.items():
+        if not _is_defined_nearby(term, full_text):
+            qualified.append((term, sorted(pages)))
+
+    # ── Step 4: rank by page spread (most cross-cutting = most load-bearing) ─
+    qualified.sort(key=lambda x: len(x[1]), reverse=True)
+    qualified = qualified[:max_concepts]
+
+    return [
+        {"term": term, "pages": pages, "frequency": len(pages)}
+        for term, pages in qualified
+    ]
+
+
+@app.post("/knowledge-gaps")
+def knowledge_gaps(data: KnowledgeGapsRequest):
+    """
+    On-demand prerequisite concept mapper.
+
+    Scans the chunks of the requested document (or the first/only document
+    in the session when document_id is omitted) and returns a list of domain-
+    specific terms that are referenced but never defined in the document,
+    each annotated with the page numbers where they appear.
+
+    Authentication follows the same pattern as /summarize.
+    Runs entirely locally — no LLM call, no external requests.
+    """
+    cleanup_expired_sessions()
+    session_id = str(data.session_id)
+
+    with sessions_lock:
+        session = _touch_session_unlocked(session_id)
+        if not session:
+            raise HTTPException(
+                status_code=404,
+                detail="Session expired or invalid. Please re-upload your PDFs.",
+            )
+        _require_session_secret(session, data.session_secret)
+        if "lock" not in session:
+            session["lock"] = threading.Lock()
+        session_lock = session["lock"]
+
+        # Lazy-load vectorstore if not in memory
+        if not session.get("vectorstore"):
+            try:
+                session["vectorstore"] = FAISS.load_local(
+                    str(FAISS_DIR / session_id),
+                    get_embedding_model(),
+                    allow_dangerous_deserialization=True,
+                )
+            except Exception as exc:
+                logger.error("Failed to lazy load vectorstore: %s", exc)
+                raise HTTPException(
+                    status_code=500, detail="Failed to load session index."
+                )
+
+        vectorstore = session["vectorstore"]
+        uploaded_documents = list(session.get("documents", []))
+
+    if not uploaded_documents:
+        raise HTTPException(
+            status_code=422,
+            detail="This session has no uploaded documents. Upload a PDF before running analysis.",
+        )
+
+    # Resolve the target document
+    document_id = data.document_id
+    if document_id:
+        target_doc = next(
+            (d for d in uploaded_documents if d.get("document_id") == document_id),
+            None,
+        )
+        if target_doc is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"document_id '{document_id}' not found in this session.",
+            )
+    else:
+        target_doc = uploaded_documents[0]
+        document_id = target_doc.get("document_id")
+
+    document_filename = target_doc.get("filename", "document")
+
+    # Retrieve all indexed chunks for this document
+    with session_lock:
+        all_indexed = collect_index_documents(vectorstore)
+
+    doc_chunks = documents_for_upload(all_indexed, document_id)
+
+    # Edge case: scanned / image-based PDF — very little text extracted
+    total_chars = sum(len(c.page_content) for c in doc_chunks)
+    if total_chars < 200:
+        return {
+            "session_id": session_id,
+            "document": document_filename,
+            "document_id": document_id,
+            "concept_count": 0,
+            "concepts": [],
+            "scanned": False,
+            "short_document": False,
+            "message": (
+                "This PDF appears to contain no extractable text (it may be a scanned "
+                "image). Knowledge gap analysis requires readable text content."
+            ),
+        }
+
+    # Determine unique page count for the short-document notice
+    unique_pages = {c.metadata.get("page") for c in doc_chunks if c.metadata.get("page") is not None}
+    is_short = len(unique_pages) < 5
+
+    logger.info(
+        "Running knowledge gap analysis session_id=%s document_id=%s chunks=%s pages=%s",
+        session_id, document_id, len(doc_chunks), len(unique_pages),
+    )
+
+    concepts = detect_knowledge_gaps(doc_chunks)
+
+    return {
+        "session_id": session_id,
+        "document": document_filename,
+        "document_id": document_id,
+        "concept_count": len(concepts),
+        "concepts": concepts,
+        "scanned": True,
+        "short_document": is_short,
+    }
+
+
 if __name__ == "__main__":
     is_production = os.getenv("ENVIRONMENT", "development").lower() == "production"
     host = os.getenv("HOST", "0.0.0.0")
