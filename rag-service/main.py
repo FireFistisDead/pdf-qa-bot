@@ -20,6 +20,9 @@ import multiprocessing
 import os
 import secrets
 import shutil
+import urllib.request
+import urllib.error
+from typing import Optional
 from transformers import (
     AutoConfig,
     AutoTokenizer,
@@ -1258,7 +1261,7 @@ def build_factual_answer(documents, question, source_id_by_key=None):
     return answer
 
 
-def synthesize_with_ollama(prompt: str) -> str | None:
+def synthesize_with_ollama(prompt: str) -> Optional[str]:
     """Send a RAG prompt to a locally running Ollama server and return the
     generated text.  Returns ``None`` on any failure so the caller can fall
     back to the extractive / HuggingFace path without disruption.
@@ -1269,9 +1272,6 @@ def synthesize_with_ollama(prompt: str) -> str | None:
     - Any unexpected HTTP or JSON error
     """
     try:
-        import urllib.request
-        import urllib.error
-
         payload = json.dumps({
             "model": OLLAMA_MODEL,
             "prompt": prompt,
