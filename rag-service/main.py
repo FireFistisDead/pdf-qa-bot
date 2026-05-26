@@ -2488,12 +2488,12 @@ def ask_question(data: Question):
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
 
-        # Session-level retrieval cache
-        retrieval_cache = session.setdefault(
-            "retrieval_cache",
-            OrderedDict()
-        )
         with session_lock:
+            # Session-level retrieval cache
+            retrieval_cache = session.setdefault(
+                "retrieval_cache",
+                OrderedDict()
+            )
             cleanup_retrieval_cache(retrieval_cache)
             # Cache hit
             cache_key = f"{mode}:{normalized_query}"
@@ -2534,17 +2534,16 @@ def ask_question(data: Question):
                     ASK_RETRIEVAL_CANDIDATES,
                 )
 
-                with sessions_lock:
-                    session = sessions.get(session_id)
-                    if session:
-                        retrieval_cache = session.setdefault("retrieval_cache", {})
-                        if len(retrieval_cache) >= RETRIEVAL_CACHE_LIMIT:
-                            oldest_key = next(iter(retrieval_cache))
-                            del retrieval_cache[oldest_key]
-                        retrieval_cache[cache_key] = {
-                            "cached_at": now_ts(),
-                            "scored_candidates": scored_candidates,
-                        }
+        if not cache_hit:
+            with session_lock:
+                retrieval_cache = session.setdefault("retrieval_cache", OrderedDict())
+                if len(retrieval_cache) >= RETRIEVAL_CACHE_LIMIT:
+                    oldest_key = next(iter(retrieval_cache))
+                    del retrieval_cache[oldest_key]
+                retrieval_cache[cache_key] = {
+                    "cached_at": now_ts(),
+                    "scored_candidates": scored_candidates,
+                }
 
     except Exception:
         logger.exception("Similarity search failed session_id=%s", session_id)
@@ -2847,8 +2846,8 @@ def ask_question_stream(data: Question):
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
 
-        retrieval_cache = session.setdefault("retrieval_cache", OrderedDict())
         with session_lock:
+            retrieval_cache = session.setdefault("retrieval_cache", OrderedDict())
             cleanup_retrieval_cache(retrieval_cache)
             cache_key = f"{mode}:{normalized_query}"
             cached_value = retrieval_cache.get(cache_key)
@@ -2885,17 +2884,17 @@ def ask_question_stream(data: Question):
                     question,
                     ASK_RETRIEVAL_CANDIDATES,
                 )
-                with sessions_lock:
-                    current_session = sessions.get(session_id)
-                    if current_session:
-                        rc = current_session.setdefault("retrieval_cache", OrderedDict())
-                        if len(rc) >= RETRIEVAL_CACHE_LIMIT:
-                            oldest = next(iter(rc))
-                            del rc[oldest]
-                        rc[cache_key] = {
-                            "cached_at": now_ts(),
-                            "scored_candidates": scored_candidates,
-                        }
+
+        if not cache_hit:
+            with session_lock:
+                retrieval_cache = session.setdefault("retrieval_cache", OrderedDict())
+                if len(retrieval_cache) >= RETRIEVAL_CACHE_LIMIT:
+                    oldest = next(iter(retrieval_cache))
+                    del retrieval_cache[oldest]
+                retrieval_cache[cache_key] = {
+                    "cached_at": now_ts(),
+                    "scored_candidates": scored_candidates,
+                }
     except Exception:
         logger.exception("Stream similarity search failed session_id=%s", session_id)
         raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
