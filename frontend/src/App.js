@@ -143,21 +143,18 @@ function MainApp() {
         const sessions = await getSessionsApi(knownSessions);
         if (sessions && sessions.length > 0) {
           const secretById = new Map(knownSessions.map((s) => [s.session_id, s.session_secret]));
-          const apiUrl = process.env.REACT_APP_API_URL || "";
           const formattedPdfs = sessions.map(s => {
             const doc = s.documents?.[0];
-            let url = null;
-            if (doc) {
-              const rawUrl = doc.static_url || (doc.filename ? `/uploads/${doc.filename}` : null);
-              if (rawUrl) {
-                url = rawUrl.startsWith('http') ? rawUrl : `${apiUrl}${rawUrl}`;
-              }
-            }
+            // Uploaded files are deleted from the server immediately after
+            // indexing — no server-side URL is available for historical sessions.
+            // The PdfViewer handles a null url gracefully with an informational
+            // empty state. Chat and summarization continue to work normally
+            // because they rely on the FAISS index, not the raw file.
             return {
               id: doc?.document_id || s.session_id,
               name: doc?.filename || "Unknown PDF",
               document_id: doc?.document_id || null,
-              url: url,
+              url: null,
               chat: s.chat || [],
               session_id: s.session_id,
               session_secret: secretById.get(s.session_id) || null,
@@ -206,8 +203,10 @@ function MainApp() {
         currentPdfForUpload?.session_id,
         currentPdfForUpload?.session_secret,
       );
-      const apiUrl = process.env.REACT_APP_API_URL || "";
-      const serverUrl = data.url ? (data.url.startsWith('http') ? data.url : `${apiUrl}${data.url}`) : null;
+      // Use a local blob URL for the in-browser viewer. The server deletes the
+      // uploaded file immediately after the RAG service indexes it, so no
+      // server-side URL exists. The blob URL is valid for the lifetime of this
+      // browser tab and requires no authentication.
       const url = URL.createObjectURL(file);
       const pdfId = data.document?.document_id || data.session_id;
 
@@ -222,7 +221,7 @@ function MainApp() {
       id: pdfId,
       name: file.name,
       document_id: data.document?.document_id || null,
-      url: serverUrl || url,
+      url,
       chat: [],
       session_id: data.session_id,
       session_secret: data.session_secret || null,

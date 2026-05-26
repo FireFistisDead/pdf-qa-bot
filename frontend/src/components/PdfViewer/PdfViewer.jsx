@@ -62,9 +62,8 @@ const PdfViewer = ({ darkMode, currentPdfFile, currentPdfUrl, jumpTarget, heatma
 
   const handleLoadError = (error) => {
     console.error("PDF preview failed:", error);
-
     setLoadError(
-      "Preview unavailable for this PDF. The document was uploaded successfully, so chat and summarization can still use it.",
+      "Preview unavailable. The document was indexed successfully — chat and summarization still work normally.",
     );
   };
 
@@ -324,9 +323,10 @@ const PdfViewer = ({ darkMode, currentPdfFile, currentPdfUrl, jumpTarget, heatma
                 marginBottom: 0,
               }}
             >
-              Upload a PDF document to preview it here, navigate pages, and
-              interact with the AI assistant through intelligent document-based
-              conversations.
+              Upload a PDF to preview it here and navigate its pages. For
+              previously uploaded documents, the preview is not available after
+              the tab is closed — but chat and summarization continue to work
+              normally using the indexed content.
             </p>
           </div>
         )}

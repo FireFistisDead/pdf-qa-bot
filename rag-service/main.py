@@ -113,10 +113,19 @@ def save_sessions_unlocked():
                 if isinstance(value, dict):
                     safe_cache[key] = value
 
-            data[sid] = {
+            # Strip static_url from persisted document entries. The field pointed to
+        # a server-side file path that is deleted immediately after indexing.
+        # Keeping it on disk would cause the frontend to construct a URL that
+        # 404s and, if the /uploads static route were ever re-enabled, could
+        # expose the raw PDF to unauthenticated callers.
+        clean_docs = [
+            {k: v for k, v in doc.items() if k != "static_url"}
+            for doc in meta.get("documents", [])
+        ]
+        data[sid] = {
                 "created_at": meta.get("created_at"),
                 "last_accessed": meta.get("last_accessed"),
-                "documents": meta.get("documents", []),
+                "documents": clean_docs,
                 "retrieval_cache": {},  # Do not persist retrieval cache (contains Document objects)
                 "chat": meta.get("chat", []),
                 "session_secret": meta.get("session_secret"),
@@ -2066,12 +2075,21 @@ def lookup_sessions(data: SessionsLookupRequest):
 
             _require_session_secret(session, item.session_secret)
 
+            # Strip static_url before returning to the client. The field is a
+            # server-side file path that no longer exists (file deleted after
+            # indexing). Returning it would cause the frontend to construct an
+            # unauthenticated URL that either 404s or, if the static route were
+            # re-enabled, would serve the raw PDF without any auth check.
+            clean_docs = [
+                {k: v for k, v in doc.items() if k != "static_url"}
+                for doc in session.get("documents", [])
+            ]
             sessions_out.append(
                 {
                     "session_id": sid,
                     "created_at": session.get("created_at"),
                     "last_accessed": session.get("last_accessed"),
-                    "documents": session.get("documents", []),
+                    "documents": clean_docs,
                     "chat": session.get("chat", []),
                 }
             )
@@ -2235,10 +2253,14 @@ def process_pdf(
         15
     )
     now = now_ts()
+    # static_url is intentionally omitted. The upload temp file is deleted by
+    # the Express gateway immediately after this endpoint returns. Storing the
+    # path would be misleading and could lead to unauthenticated file access if
+    # a static route were re-introduced. The frontend uses URL.createObjectURL
+    # for the in-browser viewer — no server-side URL is needed.
     uploaded_document = {
         "document_id": document_id,
         "filename": filename,
-        "static_url": f"/uploads/{os.path.basename(file.filename)}" if file.filename else None,
         "uploaded_at": now,
         "chunk_count": len(chunks),
     }

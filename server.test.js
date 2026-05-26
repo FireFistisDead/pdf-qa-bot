@@ -423,4 +423,160 @@ describe("route error responses", () => {
     const data = await res.json();
     assert.deepEqual(data, { status: "ok" });
   });
+
+  // ── Issue #263: unauthenticated static file serving ───────────────────────
+  //
+  // The /uploads directory must NOT be mounted as a static file server.
+  // Any caller who learns a UUID filename (e.g. from the upload response or
+  // from sessionStorage via XSS) must not be able to download the raw PDF
+  // without supplying a valid session_secret. These tests confirm that the
+  // express.static middleware is absent and that all /uploads/* paths 404.
+
+  test("GET /uploads/any-file.pdf returns 404 — static serving is disabled", async () => {
+    const res = await fetch(`${baseUrl}/uploads/some-uuid.pdf`);
+    assert.equal(
+      res.status,
+      404,
+      "Static PDF serving must be disabled; /uploads/* must return 404",
+    );
+  });
+
+  test("GET /uploads/ index returns 404 — directory listing is disabled", async () => {
+    const res = await fetch(`${baseUrl}/uploads/`);
+    assert.equal(res.status, 404, "/uploads/ directory listing must not be served");
+  });
+
+  test("GET /uploads/<uuid>.pdf with query params returns 404 — no auth bypass", async () => {
+    const res = await fetch(
+      `${baseUrl}/uploads/550e8400-e29b-41d4-a716-446655440000.pdf?session_id=x&session_secret=y`,
+    );
+    assert.equal(
+      res.status,
+      404,
+      "Query params must not unlock static file serving",
+    );
+  });
+
+  test("successful upload response does not include a url field", async () => {
+    const originalPostForm = axios.postForm;
+    const originalPost = axios.post;
+
+    axios.post = async () => ({ data: { allowed: true } });
+    axios.postForm = async (url, formData) => {
+      await consumeUploadStream(formData);
+      return {
+        data: {
+          session_id: "550e8400-e29b-41d4-a716-446655440000",
+          session_secret: "test-secret-abc",
+          document: { document_id: "doc-123", filename: "sample.pdf" },
+          documents: [],
+        },
+      };
+    };
+
+    try {
+      const res = await fetch(`${baseUrl}/upload`, {
+        method: "POST",
+        body: createPdfUploadBody(),
+      });
+
+      assert.equal(res.status, 200);
+      const data = await res.json();
+
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(data, "url"),
+        false,
+        "Upload response must not include a 'url' field — files are deleted after indexing",
+      );
+      assert.equal(data.session_id, "550e8400-e29b-41d4-a716-446655440000");
+      assert.equal(data.session_secret, "test-secret-abc");
+      assert.ok(data.document, "Upload response must include document metadata");
+    } finally {
+      axios.postForm = originalPostForm;
+      axios.post = originalPost;
+    }
+  });
+
+  test("successful upload response shape is stable and complete", async () => {
+    const originalPostForm = axios.postForm;
+
+    axios.postForm = async (url, formData) => {
+      await consumeUploadStream(formData);
+      return {
+        data: {
+          session_id: "aaaabbbb-cccc-1234-dddd-eeeeeeeeeeee",
+          session_secret: "super-secret-value",
+          document: {
+            document_id: "doc-abc",
+            filename: "report.pdf",
+            chunk_count: 42,
+            uploaded_at: 1700000000,
+          },
+          documents: [
+            { document_id: "doc-abc", filename: "report.pdf" },
+          ],
+        },
+      };
+    };
+
+    try {
+      const res = await fetch(`${baseUrl}/upload`, {
+        method: "POST",
+        body: createPdfUploadBody(),
+      });
+
+      assert.equal(res.status, 200);
+      const data = await res.json();
+
+      assert.equal(data.message, "PDF uploaded & processed successfully!");
+      assert.equal(data.session_id, "aaaabbbb-cccc-1234-dddd-eeeeeeeeeeee");
+      assert.equal(data.session_secret, "super-secret-value");
+      assert.equal(data.document.filename, "report.pdf");
+      assert.ok(Array.isArray(data.documents));
+      // Confirm url is absent — files are never kept on server after indexing
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(data, "url"),
+        false,
+        "url field must be absent from upload response",
+      );
+    } finally {
+      axios.postForm = originalPostForm;
+    }
+  });
+
+  test("POST /upload with non-PDF MIME type returns 400", async () => {
+    const formData = new FormData();
+    formData.append(
+      "file",
+      new Blob(["<html><body>not a pdf</body></html>"], { type: "text/html" }),
+      "evil.pdf",
+    );
+
+    const res = await fetch(`${baseUrl}/upload`, {
+      method: "POST",
+      body: formData,
+    });
+    assert.equal(res.status, 400);
+  });
+
+  test("POST /upload with only session_secret (no session_id) returns 403", async () => {
+    const formData = new FormData();
+    formData.append(
+      "file",
+      new Blob([Buffer.from("%PDF-1.4\n%%EOF")], { type: "application/pdf" }),
+      "test.pdf",
+    );
+    formData.append("session_secret", "orphan-secret");
+
+    const res = await fetch(`${baseUrl}/upload`, {
+      method: "POST",
+      body: formData,
+    });
+    assert.equal(res.status, 403);
+    const data = await res.json();
+    assert.ok(
+      data.error.includes("session_id and session_secret must be provided together"),
+      `Unexpected error message: ${data.error}`,
+    );
+  });
 });
