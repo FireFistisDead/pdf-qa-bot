@@ -223,6 +223,60 @@
   box-shadow: 2px 2px 0px rgba(255, 255, 255, 0.3);
 }
 
+/* OAuth Divider & Buttons */
+.auth-divider {
+  display: flex;
+  align-items: center;
+  text-align: center;
+  margin-top: 16px;
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+  font-size: 11px;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: '';
+  flex: 1;
+  border-bottom: 1px dashed #333;
+}
+
+.auth-divider span {
+  padding: 0 10px;
+}
+
+.oauth-buttons {
+  display: flex;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.oauth-btn {
+  flex: 1;
+  height: 48px;
+  background: #1a1a1a;
+  color: #fff;
+  border: 1px solid #333;
+  border-radius: 6px;
+  font-family: var(--font-body, 'Inter', sans-serif);
+  font-size: 14px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.oauth-btn:hover {
+  background: #252525;
+  border-color: #555;
+  transform: translateY(-2px);
+}
+
 /* Footer */
 .auth-footer {
   text-align: center;

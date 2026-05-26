@@ -1,6 +1,42 @@
 import React from "react";
-import { Button } from "react-bootstrap";
+
 import ReactMarkdown from "react-markdown";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+
+// Strict allowlist for AI-generated markdown content.
+//
+// ReactMarkdown converts markdown to a virtual DOM; rehype-sanitize then
+// walks that DOM and strips anything not in this schema before React renders
+// it. This is the defence-in-depth layer that prevents a crafted LLM response
+// from injecting <script>, <iframe>, event handlers, or javascript: URIs —
+// even if a future change to the AI prompt or model allows them through.
+//
+// Rules:
+//   - All elements in the default schema are kept (headings, lists, code, etc.)
+//   - `href` values on <a> are restricted to http/https/mailto — no javascript:.
+//   - Event handler attributes (onclick, onerror, …) are stripped globally.
+//   - Protocol-relative links (//) are blocked at the attribute level.
+const MARKDOWN_SANITIZE_SCHEMA = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    // Override the default link allowlist: strip javascript: and data: URIs.
+    a: [
+      ...(defaultSchema.attributes?.a ?? []).filter((attr) => attr !== "href"),
+      ["href", /^https?:\/\//i, /^mailto:/i],
+    ],
+    // Disallow all event handlers on every element via the wildcard "*" key.
+    // defaultSchema already omits them, but this makes the policy explicit and
+    // survives future schema updates from the rehype-sanitize package.
+    "*": [
+      ...(defaultSchema.attributes?.["*"] ?? []).filter(
+        (attr) =>
+          typeof attr !== "string" ||
+          !attr.startsWith("on"),
+      ),
+    ],
+  },
+};
 
 const MODE_BADGE = {
   default:  { label: "Standard",  bg: "rgba(107,114,128,0.15)", color: "#6B7280" },
@@ -11,7 +47,7 @@ const MODE_BADGE = {
 };
 
 const MessageBubble = ({ msg, darkMode, onOpenSource }) => {
-  const getSourceText = (source) => source.preview || source.text;
+
   const getSourceLabel = (source) => source.document || "Source Document";
   const hasOpenablePage = (source) => Boolean(source.page && source.document);
 
@@ -59,7 +95,7 @@ const MessageBubble = ({ msg, darkMode, onOpenSource }) => {
       >
         {msg.role === "bot" ? (
           <span>
-            <ReactMarkdown>{msg.text}</ReactMarkdown>
+            <ReactMarkdown rehypePlugins={[[rehypeSanitize, MARKDOWN_SANITIZE_SCHEMA]]}>{msg.text}</ReactMarkdown>
             {msg.streaming && (
               <span style={{
                 display: "inline-block", width: "2px", height: "1em",
@@ -92,88 +128,65 @@ const MessageBubble = ({ msg, darkMode, onOpenSource }) => {
           );
         })()}
 
-        {msg.role === "bot" && msg.sources?.length > 0 && (
-  <div
-    style={{
-      marginTop: "14px",
-      borderTop: darkMode
-        ? "1px solid rgba(255,255,255,0.08)"
-        : "1px solid rgba(0,0,0,0.08)",
-      paddingTop: "12px",
-    }}
-  >
-    <div
-      style={{
-        fontWeight: 600,
-        marginBottom: "10px",
-        fontSize: "14px",
-        opacity: 0.9,
-      }}
-    >
-      Sources Used
-    </div>
+        {msg.role === "bot" && !msg.streaming && msg.sources?.length > 0 && (() => {
+          // deduplicate sources by document and page
+          const uniqueSources = [];
+          const seen = new Set();
+          msg.sources.forEach(source => {
+            const label = getSourceLabel(source);
+            const page = source.page || "unknown";
+            const key = `${label}-${page}`;
+            if (!seen.has(key)) {
+               seen.add(key);
+               uniqueSources.push(source);
+            }
+          });
 
-    {msg.sources.map((source, index) => {
-      const sourceText = getSourceText(source);
-      const sourceLabel = getSourceLabel(source);
-      const canOpenPage = hasOpenablePage(source);
-
-      return (
-      <div
-        key={`${source.document_id || sourceLabel}-${source.page || "unknown"}-${index}`}
-        style={{
-          padding: "10px",
-          marginBottom: "10px",
-          borderRadius: "10px",
-          background: darkMode
-            ? "rgba(255,255,255,0.05)"
-            : "rgba(0,0,0,0.04)",
-          fontSize: "13px",
-        }}
-      >
-        <div style={{ fontWeight: 600 }}>
-          {sourceLabel}
-        </div>
-
-        <div
-          style={{
-            opacity: 0.8,
-            marginBottom: "6px",
-          }}
-        >
-          {source.page ? `Page ${source.page}` : "Source page unavailable"}
-        </div>
-
-        {sourceText && (
-          <div
-            style={{
-              opacity: 0.9,
-              lineHeight: 1.5,
-            }}
-          >
-            "{sourceText}"
-          </div>
-        )}
-
-        <Button
-          variant={darkMode ? "outline-light" : "outline-dark"}
-          size="sm"
-          disabled={!canOpenPage}
-          onClick={() => onOpenSource?.(source)}
-          style={{
-            marginTop: "10px",
-            borderRadius: "8px",
-            fontSize: "12px",
-            fontWeight: 600,
-          }}
-        >
-          Open Page
-        </Button>
-      </div>
-      );
-    })}
-  </div>
-)}
+          return (
+            <div
+              style={{
+                marginTop: "14px",
+                paddingTop: "12px",
+                display: "flex",
+                flexWrap: "wrap",
+                gap: "8px"
+              }}
+            >
+              {uniqueSources.map((source, index) => {
+                const sourceLabel = getSourceLabel(source);
+                const canOpenPage = hasOpenablePage(source);
+                const truncatedLabel = sourceLabel.length > 24 
+                  ? sourceLabel.substring(0, 21) + "..." 
+                  : sourceLabel;
+                  
+                return (
+                  <button
+                    key={`${source.document_id || sourceLabel}-${source.page || "unknown"}-${index}`}
+                    onClick={() => canOpenPage && onOpenSource?.(source)}
+                    title={sourceLabel}
+                    className="citation-chip"
+                    style={{
+                      padding: "4px 10px",
+                      borderRadius: "16px",
+                      background: darkMode ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.05)",
+                      border: darkMode ? "1px solid rgba(255,255,255,0.12)" : "1px solid rgba(0,0,0,0.1)",
+                      color: darkMode ? "#D1D5DB" : "#4B5563",
+                      fontSize: "12px",
+                      fontWeight: 500,
+                      cursor: canOpenPage ? "pointer" : "default",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "6px"
+                    }}
+                  >
+                    <span style={{ opacity: 0.8 }}>📄</span>
+                    <span>{truncatedLabel}{source.page ? ` — Page ${source.page}` : ""}</span>
+                  </button>
+                );
+              })}
+            </div>
+          );
+        })()}
       </div>
     </div>
   );

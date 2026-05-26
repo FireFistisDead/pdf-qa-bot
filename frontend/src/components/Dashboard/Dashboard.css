@@ -1,0 +1,381 @@
+/* ── ROOT LAYOUT ── */
+.dashboard-root {
+  display: flex;
+  min-height: 100vh;
+  background: #0c0c0c;
+  color: #e8e8e8;
+  font-family: 'Inter', -apple-system, sans-serif;
+}
+
+/* ── SIDEBAR ── */
+.dashboard-sidebar {
+  width: 240px;
+  min-height: 100vh;
+  background: #111;
+  border-right: 1px solid #1e1e1e;
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  transition: width 0.2s ease;
+  z-index: 50;
+}
+
+.dashboard-sidebar.collapsed {
+  width: 64px;
+}
+
+/* Logo */
+.sidebar-logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 20px 16px;
+  border-bottom: 1px solid #1e1e1e;
+}
+
+.sidebar-logo-icon {
+  width: 32px;
+  height: 32px;
+  background: #c8ff00;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: #000;
+}
+
+.sidebar-logo-text {
+  font-weight: 700;
+  font-size: 15px;
+  color: #fff;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* Nav */
+.sidebar-nav {
+  flex: 1;
+  padding: 12px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.sidebar-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: #888;
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.sidebar-nav-item:hover {
+  background: #1a1a1a;
+  color: #ddd;
+}
+
+.sidebar-nav-item.active {
+  background: #1a1a1a;
+  color: #c8ff00;
+}
+
+.sidebar-nav-icon {
+  flex-shrink: 0;
+  display: flex;
+}
+
+.sidebar-nav-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Footer */
+.sidebar-footer {
+  border-top: 1px solid #1e1e1e;
+  padding: 12px 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sidebar-user {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  overflow: hidden;
+}
+
+.sidebar-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #c8ff00;
+  color: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.sidebar-user-info {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-user-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #ddd;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-user-email {
+  font-size: 11px;
+  color: #666;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-signout {
+  background: transparent;
+  border: none;
+  color: #555;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+
+.sidebar-signout:hover {
+  background: #2a1111;
+  color: #ff4444;
+}
+
+/* Collapse button */
+.sidebar-collapse-btn {
+  position: absolute;
+  top: 50%;
+  right: -12px;
+  transform: translateY(-50%);
+  width: 24px;
+  height: 24px;
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #888;
+  z-index: 10;
+  transition: background 0.15s, color 0.15s;
+}
+
+.sidebar-collapse-btn:hover {
+  background: #333;
+  color: #fff;
+}
+
+/* ── MAIN CONTENT ── */
+.dashboard-main {
+  flex: 1;
+  margin-left: 240px;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  transition: margin-left 0.2s ease;
+}
+
+.dashboard-sidebar.collapsed ~ .dashboard-main {
+  margin-left: 64px;
+}
+
+/* Header */
+.dashboard-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 32px;
+  height: 60px;
+  border-bottom: 1px solid #1e1e1e;
+  background: #111;
+  position: sticky;
+  top: 0;
+  z-index: 40;
+}
+
+.dashboard-page-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #fff;
+  margin: 0;
+}
+
+.dashboard-header-right {
+  font-size: 13px;
+  color: #666;
+}
+
+.dashboard-welcome strong {
+  color: #ddd;
+}
+
+/* Content */
+.dashboard-content {
+  padding: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+
+/* Stats */
+.dashboard-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+.stat-card {
+  background: #151515;
+  border: 1px solid #1e1e1e;
+  border-radius: 10px;
+  padding: 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.stat-icon {
+  width: 40px;
+  height: 40px;
+  background: #1a1a1a;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #c8ff00;
+  flex-shrink: 0;
+}
+
+.stat-value {
+  font-size: 24px;
+  font-weight: 700;
+  color: #fff;
+}
+
+.stat-label {
+  font-size: 12px;
+  color: #666;
+  margin-top: 2px;
+}
+
+/* Sections */
+.dashboard-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #555;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin: 0;
+}
+
+/* Quick Actions */
+.quick-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.quick-action-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 20px;
+  background: #151515;
+  border: 1px solid #1e1e1e;
+  border-radius: 10px;
+  color: #bbb;
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.quick-action-card:hover {
+  background: #1a1a1a;
+  border-color: #333;
+  color: #fff;
+}
+
+/* Info Card */
+.info-card {
+  background: #151515;
+  border: 1px solid #1e1e1e;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.info-row {
+  display: flex;
+  align-items: center;
+  padding: 14px 20px;
+  border-bottom: 1px solid #1e1e1e;
+  gap: 16px;
+}
+
+.info-row:last-child {
+  border-bottom: none;
+}
+
+.info-key {
+  font-size: 12px;
+  color: #555;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  width: 100px;
+  flex-shrink: 0;
+}
+
+.info-val {
+  font-size: 13px;
+  color: #ccc;
+}
+
+.info-mono {
+  font-family: 'JetBrains Mono', 'Courier New', monospace;
+  font-size: 11px;
+  color: #888;
+  word-break: break-all;
+}

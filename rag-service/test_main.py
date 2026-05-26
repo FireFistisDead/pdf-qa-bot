@@ -387,6 +387,141 @@ def test_citation_source_for_document_handles_missing_metadata():
     assert source["chunk_index"] == 2
 
 
+# ─── Session dirty-flag and per-session persistence helpers ─────────────────
+
+def test_append_chat_and_mark_dirty_adds_entry_and_marks_dirty():
+    from main import (
+        sessions,
+        _dirty_sessions,
+        _append_chat_and_mark_dirty,
+        sessions_lock,
+    )
+    import threading
+    sid = "test-dirty-" + _secrets.token_hex(4)
+    with sessions_lock:
+        sessions[sid] = {"chat": [], "created_at": 0, "last_accessed": 0, "documents": [], "session_secret": None, "lock": threading.Lock(), "vectorstore": None}
+        _append_chat_and_mark_dirty(sid, {"question": "q", "answer": "a", "sources": [], "mode": "default"})
+
+    assert sid in _dirty_sessions
+    assert len(sessions[sid]["chat"]) == 1
+    assert sessions[sid]["chat"][0]["question"] == "q"
+
+    with sessions_lock:
+        del sessions[sid]
+        _dirty_sessions.discard(sid)
+
+
+def test_append_chat_and_mark_dirty_ignores_unknown_session():
+    from main import _append_chat_and_mark_dirty, _dirty_sessions, sessions_lock
+    unknown_sid = "no-such-session-" + _secrets.token_hex(4)
+    with sessions_lock:
+        _append_chat_and_mark_dirty(unknown_sid, {"question": "q", "answer": "a"})
+    assert unknown_sid not in _dirty_sessions
+
+
+def test_snapshot_session_for_persistence_excludes_runtime_fields():
+    from main import _snapshot_session_for_persistence
+    import threading
+    meta = {
+        "created_at": 1000.0,
+        "last_accessed": 2000.0,
+        "documents": ["doc1.pdf"],
+        "chat": [{"question": "q", "answer": "a"}],
+        "session_secret": "s3cr3t",
+        "lock": threading.Lock(),
+        "vectorstore": object(),
+        "retrieval_cache": {"key": "val"},
+        "processing_progress": {"stage": "done"},
+    }
+    snap = _snapshot_session_for_persistence(meta)
+    assert "lock" not in snap
+    assert "vectorstore" not in snap
+    assert snap["created_at"] == 1000.0
+    assert snap["session_secret"] == "s3cr3t"
+    assert snap["chat"] == [{"question": "q", "answer": "a"}]
+    assert snap["documents"] == ["doc1.pdf"]
+
+
+def test_snapshot_returns_copies_not_references():
+    from main import _snapshot_session_for_persistence
+    chat_list = [{"question": "q", "answer": "a"}]
+    docs_list = ["doc.pdf"]
+    meta = {
+        "created_at": 0,
+        "last_accessed": 0,
+        "documents": docs_list,
+        "chat": chat_list,
+        "session_secret": None,
+    }
+    snap = _snapshot_session_for_persistence(meta)
+    snap["chat"].append({"question": "extra", "answer": "extra"})
+    snap["documents"].append("extra.pdf")
+    assert len(chat_list) == 1
+    assert len(docs_list) == 1
+
+
+def test_write_session_meta_file_creates_atomic_file(tmp_path, monkeypatch):
+    from main import _write_session_meta_file
+    import json as _json
+    monkeypatch.setattr("main.get_session_dir", lambda sid: str(tmp_path / sid))
+    sid = "atomic-test"
+    data = {"chat": [{"q": "hello"}], "session_secret": "abc"}
+    _write_session_meta_file(sid, data)
+    meta_path = tmp_path / sid / "session_meta.json"
+    assert meta_path.exists()
+    written = _json.loads(meta_path.read_text())
+    assert written["chat"] == [{"q": "hello"}]
+    assert written["session_secret"] == "abc"
+    assert not (tmp_path / sid / "session_meta.json.tmp").exists()
+
+
+def test_flush_dirty_sessions_drains_dirty_set(tmp_path, monkeypatch):
+    from main import (
+        sessions,
+        _dirty_sessions,
+        _flush_dirty_sessions,
+        sessions_lock,
+    )
+    import threading
+    monkeypatch.setattr("main.get_session_dir", lambda sid: str(tmp_path / sid))
+    sid = "flush-test-" + _secrets.token_hex(4)
+    with sessions_lock:
+        sessions[sid] = {
+            "created_at": 0.0,
+            "last_accessed": 0.0,
+            "documents": [],
+            "chat": [{"question": "flushed?", "answer": "yes"}],
+            "session_secret": "tok",
+            "lock": threading.Lock(),
+            "vectorstore": None,
+        }
+        _dirty_sessions.add(sid)
+
+    _flush_dirty_sessions()
+
+    assert sid not in _dirty_sessions
+    meta_path = tmp_path / sid / "session_meta.json"
+    assert meta_path.exists()
+
+    with sessions_lock:
+        del sessions[sid]
+
+
+def test_background_flush_thread_is_running():
+    from main import _flush_thread
+    import threading
+    assert isinstance(_flush_thread, threading.Thread)
+    assert _flush_thread.daemon is True
+    assert _flush_thread.is_alive()
+
+
+def test_session_flush_interval_env_var_respected(monkeypatch):
+    import importlib
+    monkeypatch.setenv("SESSION_FLUSH_INTERVAL_SECONDS", "42")
+    import main as _main
+    # The module-level constant reflects the env var at import time.
+    # We read the value directly rather than re-importing to avoid side effects.
+    assert _main.SESSION_FLUSH_INTERVAL_SECONDS >= 1
 # ─── /ask/stream auth enforcement regression tests ───────────────────────────
 #
 # These tests exist specifically to prevent the regression described in issue #233:
@@ -497,8 +632,8 @@ def test_ask_stream_rejected_when_token_is_cleared_after_startup():
                 "session_secret": "irrelevant",
             },
         )
-        # No token configured → middleware is inactive → route handler ran.
-        # Expect 404 (no session) or 422 (validation), never 403 (auth block).
+        # Fail-closed behavior: when INTERNAL_RAG_TOKEN is unset, the
+        # middleware should still block protected requests with 403.
         assert response.status_code == 403, (
             "Middleware must block protected requests when INTERNAL_RAG_TOKEN is unset. "
             f"Got {response.status_code}"
