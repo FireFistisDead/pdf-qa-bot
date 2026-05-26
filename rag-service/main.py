@@ -2832,7 +2832,7 @@ def ask_question_stream(data: Question):
             try:
                 session["vectorstore"] = FAISS.load_local(
                     str(FAISS_DIR / session_id),
-                    embedding_model,
+                    get_embedding_model(),
                     allow_dangerous_deserialization=True,
                 )
             except Exception as exc:
