@@ -10,7 +10,13 @@ const crypto = require("crypto");
 const { rateLimit } = require("express-rate-limit");
 const slowDown = require("express-slow-down");
 const helmet = require("helmet");
-const { askSchema, summarizeSchema, sessionsLookupSchema } = require("./validators/schemas");
+const {
+  askSchema,
+  summarizeSchema,
+  sessionsLookupSchema,
+  generateFlashcardsSchema,
+  updateFlashcardProgressSchema,
+} = require("./validators/schemas");
 const { clientIpFromRequest } = require("./security/ip");
 const { createRedisClient } = require("./security/redis");
 const authRoutes = require("./src/routes/authRoutes");
@@ -718,6 +724,66 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
 
     return res.status(statusCode).json({
       error: typeof details === "string" ? details : "Error summarizing PDF",
+      details: isDevelopment ? details : "Internal processing error",
+    });
+  }
+});
+
+app.post("/sessions/flashcards", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+  const validation = generateFlashcardsSchema.safeParse(req.body);
+
+  if (!validation.success) {
+    return res.status(400).json({
+      error: "Validation failed",
+      details: validation.error.flatten(),
+    });
+  }
+
+  try {
+    const response = await axios.post(
+      `${RAG_SERVICE_URL}/sessions/flashcards/generate`,
+      validation.data,
+      { headers: ragAuthHeaders(), timeout: 90000 }
+    );
+
+    return res.json(response.data);
+  } catch (err) {
+    const statusCode = err.response?.status || 500;
+    const details = extractServiceDetails(err, "Failed to generate flashcards");
+    console.error("Flashcards generation failed:", details);
+
+    return res.status(statusCode).json({
+      error: typeof details === "string" ? details : "Failed to generate flashcards",
+      details: isDevelopment ? details : "Internal processing error",
+    });
+  }
+});
+
+app.post("/sessions/flashcards/progress", async (req, res) => {
+  const validation = updateFlashcardProgressSchema.safeParse(req.body);
+
+  if (!validation.success) {
+    return res.status(400).json({
+      error: "Validation failed",
+      details: validation.error.flatten(),
+    });
+  }
+
+  try {
+    const response = await axios.post(
+      `${RAG_SERVICE_URL}/sessions/flashcards/update-progress`,
+      validation.data,
+      { headers: ragAuthHeaders() }
+    );
+
+    return res.json(response.data);
+  } catch (err) {
+    const statusCode = err.response?.status || 500;
+    const details = extractServiceDetails(err, "Failed to update flashcard progress");
+    console.error("Flashcard progress update failed:", details);
+
+    return res.status(statusCode).json({
+      error: typeof details === "string" ? details : "Failed to update flashcard progress",
       details: isDevelopment ? details : "Internal processing error",
     });
   }
