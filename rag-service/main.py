@@ -200,6 +200,16 @@ def update_processing_progress(session_id, stage, progress):
 
 INTERNAL_RAG_TOKEN = os.getenv("INTERNAL_RAG_TOKEN", "").strip()
 
+
+def internal_token_valid(provided: str | None, expected: str) -> bool:
+    candidate = (provided or "").strip()
+    return bool(expected) and bool(candidate) and secrets.compare_digest(candidate, expected)
+
+
+def require_internal_rag_token_configured():
+    if not INTERNAL_RAG_TOKEN:
+        raise RuntimeError("INTERNAL_RAG_TOKEN must be configured for protected endpoints.")
+
 # How often the background flush thread wakes and writes dirty session metadata
 # files to disk. Lower values reduce the data-loss window on unclean shutdown
 # at the cost of more frequent I/O; higher values batch more writes.
@@ -909,14 +919,13 @@ def _write_session_meta_file(session_id: str, data: dict) -> None:
 
 
 def _append_chat_and_mark_dirty(session_id: str, entry: dict) -> None:
-    """Append *entry* to the in-memory chat list and mark the session dirty.
+    """Mark a session as dirty so background persistence flushes metadata.
 
     Must be called while sessions_lock is held.
     """
     meta = sessions.get(session_id)
     if not meta:
         return
-    meta.setdefault("chat", []).append(entry)
     _dirty_sessions.add(session_id)
 
 
@@ -2902,7 +2911,7 @@ def ask_question(data: Question):
     with sessions_lock:
         session = sessions.get(session_id)
         if session:
-            retrieval_cache = session.setdefault(
+            session.setdefault(
                 "retrieval_cache",
                 {}
             )

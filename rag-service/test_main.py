@@ -445,7 +445,7 @@ def test_append_chat_exchange_normalizes_and_persists_message_schema():
 
 # ─── Session dirty-flag and per-session persistence helpers ─────────────────
 
-def test_append_chat_and_mark_dirty_adds_entry_and_marks_dirty():
+def test_append_chat_and_mark_dirty_marks_dirty_without_mutating_chat():
     from main import (
         sessions,
         _dirty_sessions,
@@ -459,8 +459,7 @@ def test_append_chat_and_mark_dirty_adds_entry_and_marks_dirty():
         _append_chat_and_mark_dirty(sid, {"question": "q", "answer": "a", "sources": [], "mode": "default"})
 
     assert sid in _dirty_sessions
-    assert len(sessions[sid]["chat"]) == 1
-    assert sessions[sid]["chat"][0]["question"] == "q"
+    assert len(sessions[sid]["chat"]) == 0
 
     with sessions_lock:
         del sessions[sid]

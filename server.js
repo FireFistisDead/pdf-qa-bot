@@ -16,7 +16,7 @@ const { createRedisClient } = require("./security/redis");
 const authRoutes = require("./src/routes/authRoutes");
 
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
-const INTERNAL_RAG_TOKEN = (process.env.INTERNAL_RAG_TOKEN || "").trim();
+const getInternalRagToken = () => (process.env.INTERNAL_RAG_TOKEN || "").trim();
 const PORT = process.env.PORT || 4000;
 
 const app = express();
@@ -443,14 +443,14 @@ const extractServiceDetails = (err, fallbackMessage = "Upstream service request 
 };
 
 const requireInternalRagToken = () => {
-  if (!INTERNAL_RAG_TOKEN) {
+  if (!getInternalRagToken()) {
     throw new Error("INTERNAL_RAG_TOKEN must be configured for RAG service requests.");
   }
 };
 
 const ragAuthHeaders = () => {
   requireInternalRagToken();
-  return { "X-Internal-Token": INTERNAL_RAG_TOKEN };
+  return { "X-Internal-Token": getInternalRagToken() };
 };
 
 const normalizeSessionSecret = (value) =>
