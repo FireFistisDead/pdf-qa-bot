@@ -547,16 +547,12 @@ if (signatureBuffer.toString() !== "%PDF") {
     "Invalid file type. Only real PDF documents are accepted.",
   );
 }
-    const formData = {
-      file: fs.createReadStream(absoluteFilePath),
-      original_filename: req.file.originalname,
-    };
-    if (sessionId && sessionSecret) {
-      formData.session_id = sessionId;
-      formData.session_secret = sessionSecret;
-    } else if (sessionId || sessionSecret) {
+    // Validate session credential pairing before opening the file stream.
+    // Creating fs.createReadStream before this check would leave a dangling
+    // open handle on the file if the request is rejected and cleanupFile
+    // deletes the file before the stream is ever consumed.
+    if ((sessionId || sessionSecret) && !(sessionId && sessionSecret)) {
       await cleanupFile(uploadedFilePath);
-
       return sendUploadError(
         res,
         403,
@@ -564,6 +560,15 @@ if (signatureBuffer.toString() !== "%PDF") {
       );
     }
 
+    // All validation passed — safe to open the file stream for forwarding.
+    const formData = {
+      file: fs.createReadStream(absoluteFilePath),
+      original_filename: req.file.originalname,
+    };
+    if (sessionId && sessionSecret) {
+      formData.session_id = sessionId;
+      formData.session_secret = sessionSecret;
+    }
 
     const response = await axios.postForm(
       `${RAG_SERVICE_URL}/process-pdf`,
