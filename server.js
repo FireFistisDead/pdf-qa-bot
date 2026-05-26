@@ -296,13 +296,22 @@ if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
 
-// Serve the uploads directory statically so frontend can view historical PDFs
-app.use("/uploads", express.static(UPLOADS_DIR));
-
-// ─── Background File Cleanup ─────────────────────────────────────────────────
-// Retain uploaded files for 24 hours. Files older than this will be deleted.
-const FILE_RETENTION_MS = parseInt(process.env.FILE_RETENTION_MS || "86400000", 10);
-const CLEANUP_INTERVAL_MS = parseInt(process.env.CLEANUP_INTERVAL_MS || "3600000", 10); // Run every hour
+// ─── Background File Cleanup (safety net) ────────────────────────────────────
+// Uploaded PDFs are deleted from disk immediately after the RAG service has
+// finished indexing them (see cleanupFile call in the /upload success path).
+// This interval is a safety net only: it removes any files that survived the
+// immediate delete — e.g. because cleanupFile threw or the process crashed
+// mid-request. The window is deliberately short (1 hour default) so orphaned
+// files do not linger and cannot be accessed via direct path guessing.
+//
+// The /uploads directory is intentionally NOT mounted as a static file server.
+// Serving PDFs through express.static would let any caller with a filename
+// download the raw document with no session_secret check. Files must be
+// accessed only through the authenticated /pdf/:filename route (if re-introduced
+// in future) or via the in-browser blob URL created by URL.createObjectURL on
+// the frontend.
+const FILE_RETENTION_MS = parseInt(process.env.FILE_RETENTION_MS || "3600000", 10);
+const CLEANUP_INTERVAL_MS = parseInt(process.env.CLEANUP_INTERVAL_MS || "3600000", 10);
 
 const startUploadsCleanup = () => {
   const intervalId = setInterval(async () => {
@@ -310,32 +319,31 @@ const startUploadsCleanup = () => {
       const files = await fsPromises.readdir(UPLOADS_DIR);
       const now = Date.now();
       for (const file of files) {
-        if (file === '.gitkeep') continue; // Ignore .gitkeep
+        if (file === ".gitkeep") continue;
         const filePath = path.join(UPLOADS_DIR, file);
         try {
           const stats = await fsPromises.stat(filePath);
           if (now - stats.birthtimeMs > FILE_RETENTION_MS) {
             await fsPromises.unlink(filePath);
-            console.log(`[Cleanup] Deleted old file: ${filePath}`);
+            if (isDevelopment) {
+              console.log(`[cleanup] safety-net deleted orphaned file: ${path.basename(filePath)}`);
+            }
           }
         } catch (err) {
-          console.error(`[Cleanup] Failed to stat/delete file ${filePath}:`, err.message);
+          if (err.code !== "ENOENT") {
+            console.error(`[cleanup] failed to remove ${path.basename(filePath)}:`, err.message);
+          }
         }
       }
     } catch (err) {
-      console.error(`[Cleanup] Failed to read uploads directory:`, err.message);
+      console.error("[cleanup] failed to read uploads directory:", err.message);
     }
   }, CLEANUP_INTERVAL_MS);
-  
-  // Unref the interval so it doesn't prevent the server process from exiting gracefully
-  // (Optional but good practice)
-  if (intervalId && typeof intervalId.unref === 'function') {
+
+  if (typeof intervalId.unref === "function") {
     intervalId.unref();
   }
 };
-
-// Start the cleanup routine
-startUploadsCleanup();
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -367,9 +375,14 @@ const cleanupFile = async (filePath) => {
   try {
     const safePath = path.join(UPLOADS_DIR, path.basename(filePath));
     await fsPromises.unlink(safePath);
-    console.log(`Deleted temp file: ${safePath}`);
+    if (isDevelopment) {
+      console.log(`[upload] deleted temp file: ${path.basename(safePath)}`);
+    }
   } catch (err) {
-    console.error(`Failed to delete temp file ${filePath}:`, err.message);
+    // ENOENT means the file was already removed — treat as success.
+    if (err.code !== "ENOENT") {
+      console.error(`[upload] failed to delete temp file:`, err.message);
+    }
   }
 };
 
@@ -558,8 +571,12 @@ if (signatureBuffer.toString() !== "%PDF") {
       { headers: ragAuthHeaders() },
     );
 
-    // Provide the static URL back to the frontend
-    const staticUrl = `/uploads/${path.basename(absoluteFilePath)}`;
+    // Delete the temp file immediately after the RAG service has fully read and
+    // indexed it. The frontend uses URL.createObjectURL for the in-browser viewer
+    // so no server-side copy is needed. Keeping the file and serving it via an
+    // unauthenticated static route would let any caller with the filename download
+    // the raw PDF without supplying a session_secret.
+    await cleanupFile(uploadedFilePath);
 
     return res.json({
       message: "PDF uploaded & processed successfully!",
@@ -567,7 +584,6 @@ if (signatureBuffer.toString() !== "%PDF") {
       session_secret: response.data.session_secret,
       document: response.data.document,
       documents: response.data.documents || [],
-      url: staticUrl
     });
   } catch (err) {
     await cleanupFile(uploadedFilePath);
