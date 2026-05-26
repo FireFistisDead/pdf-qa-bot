@@ -9,8 +9,10 @@ import PdfViewer from "./components/PdfViewer/PdfViewer";
 import ChatPanel from "./components/ChatPanel/ChatPanel";
 import toast, { Toaster } from "react-hot-toast";
 import LandingPage from "./components/Landing/LandingPage";
-import Signup from "./pages/Signup";
-import Login from "./pages/Login";
+import SignIn from "./components/Auth/SignIn";
+import SignUp from "./components/Auth/SignUp";
+import { AuthProvider } from "./contexts/AuthContext";
+import Dashboard from "./components/Dashboard/Dashboard";
 
 import { extractApiErrorMessage, uploadPdfApi, getSessionsApi } from "./services/api";
 
@@ -171,18 +173,7 @@ function MainApp() {
     fetchHistory();
   }, [loadKnownSessions]);
 
-  // Router logic to serve new UI on /new
-  const path = window.location.pathname;
-  if (path === "/new" || path === "/new/") {
-    return <LandingPage />;
-  }
-  if (path === "/signup" || path === "/signup/") {
-    return <Signup />;
-  }
 
-  if (path === "/login" || path === "/login/") {
-    return <Login />;
-  }
 
   const handleUpload = async (file) => {
     // Validate file type
@@ -473,16 +464,21 @@ const handleOpenSource = (source) => {
   );
 }
 
+
+
 function App() {
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<MainApp />} />
-        <Route path="/new" element={<LandingPage />} />
-        <Route path="/signin" element={<Login />} />
-        <Route path="/signup" element={<Signup />} />
-      </Routes>
-    </BrowserRouter>
+    <AuthProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/workspace" element={<MainApp />} />
+          <Route path="/signin" element={<SignIn />} />
+          <Route path="/signup" element={<SignUp />} />
+          <Route path="/dashboard" element={<Dashboard />} />
+        </Routes>
+      </BrowserRouter>
+    </AuthProvider>
   );
 }
 

@@ -100,6 +100,8 @@ services:
       # React app runs in the browser, so it accesses the backend via localhost on the user's host machine.
       # The backend container is exposed on port 4000 on the host machine.
       - REACT_APP_API_URL=http://localhost:4000
+      - REACT_APP_SUPABASE_URL=${REACT_APP_SUPABASE_URL}
+      - REACT_APP_SUPABASE_ANON_KEY=${REACT_APP_SUPABASE_ANON_KEY}
     depends_on:
       - backend
 
