@@ -283,9 +283,9 @@ const inferenceLimiter = rateLimit({
   },
 });
 
-// Apply the ban guard and global limiter to every single route.
-app.use(banGuard);
+// Apply global limiter before ban guard so DB-backed ban checks are rate-limited.
 app.use(globalLimiter);
+app.use(banGuard);
 app.use("/api/auth", authRoutes);
 
 const MAX_PDF_SIZE_BYTES = 20 * 1024 * 1024;
