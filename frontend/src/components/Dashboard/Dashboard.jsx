@@ -28,6 +28,27 @@ const Dashboard = () => {
           This is your private neural workspace. You are successfully authenticated.
         </p>
 
+        <button 
+          onClick={() => navigate('/workspace')}
+          style={{
+            background: 'var(--accent, #c8ff00)',
+            color: '#000',
+            border: 'none',
+            padding: '16px 32px',
+            fontSize: '16px',
+            fontWeight: 'bold',
+            fontFamily: 'var(--font-mono, monospace)',
+            textTransform: 'uppercase',
+            letterSpacing: '0.05em',
+            cursor: 'pointer',
+            borderRadius: '4px',
+            marginBottom: '48px',
+            boxShadow: '4px 4px 0px rgba(255,255,255,0.2)'
+          }}
+        >
+          Open PDF Intelligence →
+        </button>
+
         <div style={{
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',

@@ -384,8 +384,8 @@ function App() {
     <AuthProvider>
       <BrowserRouter>
         <Routes>
-          <Route path="/" element={<MainApp />} />
-          <Route path="/new" element={<LandingPage />} />
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/workspace" element={<MainApp />} />
           <Route path="/signin" element={<SignIn />} />
           <Route path="/signup" element={<SignUp />} />
           <Route path="/dashboard" element={<Dashboard />} />

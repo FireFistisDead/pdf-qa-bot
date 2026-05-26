@@ -10,9 +10,14 @@ import {
 
 import LightModeIcon from "@mui/icons-material/LightMode";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
+import { useNavigate } from "react-router-dom";
+import { useAuth } from "../../contexts/AuthContext";
+import { supabase } from "../../services/supabaseClient";
 import logo from "./Nav_logo.png";
 
 const Navbar = ({ darkMode, setDarkMode }) => {
+  const navigate = useNavigate();
+  const { user } = useAuth();
   return (
     <AppBar
       position="static"
@@ -33,10 +38,12 @@ const Navbar = ({ darkMode, setDarkMode }) => {
           <Avatar
             src={logo}
             alt="Logo"
+            onClick={() => navigate('/')}
             sx={{
               width: 48,
               height: 48,
               bgcolor: "transparent",
+              cursor: "pointer",
             }}
           />
 
@@ -64,33 +71,76 @@ const Navbar = ({ darkMode, setDarkMode }) => {
 
         <Box sx={{ display: "flex", gap: 2, alignItems: "center" }}>
 
-          <button
-            onClick={() => (window.location.href = "/login")}
-            style={{
-              padding: "8px 16px",
-              borderRadius: "10px",
-              border: "none",
-              cursor: "pointer",
-              fontWeight: 600,
-            }}
-          >
-            Login
-          </button>
+          {user ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <button
+                onClick={() => navigate('/dashboard')}
+                style={{
+                  padding: "8px 16px",
+                  borderRadius: "10px",
+                  border: "none",
+                  background: "#eee",
+                  color: "#333",
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                Dashboard
+              </button>
+              <button 
+                onClick={() => supabase.auth.signOut()}
+                style={{
+                  background: '#7C4DFF',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: '50%',
+                  width: '36px',
+                  height: '36px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontWeight: 'bold',
+                  fontFamily: 'monospace',
+                  cursor: 'pointer',
+                }}
+                title="Sign Out"
+              >
+                {user.email ? user.email.charAt(0).toUpperCase() : 'U'}
+              </button>
+            </div>
+          ) : (
+            <>
+              <button
+                onClick={() => navigate('/signin')}
+                style={{
+                  padding: "8px 16px",
+                  borderRadius: "10px",
+                  border: "none",
+                  cursor: "pointer",
+                  fontWeight: 600,
+                  background: 'transparent',
+                  color: darkMode ? "#fff" : "#111",
+                }}
+              >
+                Login
+              </button>
 
-          <button
-            onClick={() => (window.location.href = "/signup")}
-            style={{
-              padding: "8px 16px",
-              borderRadius: "10px",
-              border: "none",
-              background: "#7C4DFF",
-              color: "#fff",
-              cursor: "pointer",
-              fontWeight: 600,
-            }}
-          >
-            Signup
-          </button>
+              <button
+                onClick={() => navigate('/signup')}
+                style={{
+                  padding: "8px 16px",
+                  borderRadius: "10px",
+                  border: "none",
+                  background: "#7C4DFF",
+                  color: "#fff",
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                Signup
+              </button>
+            </>
+          )}
 
           <IconButton
             onClick={() => setDarkMode(!darkMode)}
