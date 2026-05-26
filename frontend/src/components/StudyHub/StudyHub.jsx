@@ -167,11 +167,6 @@ export default function StudyHub({
       }
     }, 1500);
   };
-
-  const activeReviewCardsCount = flashcards.filter(
-    (c) => c.box < 5
-  ).length;
-
   const masteredCardsCount = flashcards.filter((c) => c.box >= 5).length;
   const inProgressCardsCount = flashcards.filter((c) => c.box > 1 && c.box < 5).length;
 
