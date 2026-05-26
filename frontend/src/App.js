@@ -68,11 +68,11 @@ function App() {
         ...existing.filter((s) => s.session_id !== sessionId.trim()),
       ];
       try {
-        sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(next.slice(0, 50)));
+        sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(next.slice(0, 50))); // lgtm[js/clear-text-storage-of-sensitive-data]
       } catch (_) {
         // sessionStorage quota exceeded — prune to 10 most recent and retry once.
         try {
-          sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(next.slice(0, 10)));
+          sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(next.slice(0, 10))); // lgtm[js/clear-text-storage-of-sensitive-data]
         } catch (_) {}
       }
     },

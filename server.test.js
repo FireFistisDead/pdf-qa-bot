@@ -220,6 +220,11 @@ describe("session_secret schema enforcement", () => {
       session_secret: "",
     });
     assert.equal(result.success, false);
+    const errors = result.error.flatten().fieldErrors;
+    assert.ok(
+      errors.session_secret,
+      "Expected validation error on session_secret field",
+    );
   });
 
   test("summarizeSchema rejects whitespace-only session_secret", () => {
@@ -228,6 +233,11 @@ describe("session_secret schema enforcement", () => {
       session_secret: "  \t  ",
     });
     assert.equal(result.success, false);
+    const errors = result.error.flatten().fieldErrors;
+    assert.ok(
+      errors.session_secret,
+      "Expected validation error on session_secret field",
+    );
   });
 
   test("summarizeSchema accepts non-empty session_secret", () => {

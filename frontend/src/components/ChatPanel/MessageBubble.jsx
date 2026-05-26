@@ -23,7 +23,7 @@ const MARKDOWN_SANITIZE_SCHEMA = {
     // Override the default link allowlist: strip javascript: and data: URIs.
     a: [
       ...(defaultSchema.attributes?.a ?? []).filter((attr) => attr !== "href"),
-      ["href", /^https?:\/\//, /^mailto:/],
+      ["href", /^https?:\/\//i, /^mailto:/i],
     ],
     // Disallow all event handlers on every element via the wildcard "*" key.
     // defaultSchema already omits them, but this makes the policy explicit and

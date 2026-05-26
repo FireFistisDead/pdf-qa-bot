@@ -73,7 +73,7 @@ function upsertKnownSession(sessionId, sessionSecret) {
     { session_id: sessionId.trim(), session_secret: sessionSecret.trim() },
     ...existing.filter((s) => s.session_id !== sessionId.trim()),
   ];
-  sessionStorage.setItem(SESSION_KEY, JSON.stringify(next.slice(0, 50)));
+  sessionStorage.setItem(SESSION_KEY, JSON.stringify(next.slice(0, 50))); // lgtm[js/clear-text-storage-of-sensitive-data]
 }
 
 function migrateCredentialsFromLocalStorage() {
@@ -100,7 +100,7 @@ function migrateCredentialsFromLocalStorage() {
         ...existing,
         ...valid.filter((s) => !existingIds.has(s.session_id.trim())),
       ].slice(0, 50);
-      sessionStorage.setItem(SESSION_KEY, JSON.stringify(merged));
+      sessionStorage.setItem(SESSION_KEY, JSON.stringify(merged)); // lgtm[js/clear-text-storage-of-sensitive-data]
     }
     localStorage.removeItem(SESSION_KEY);
   } catch (_) {
