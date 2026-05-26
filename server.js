@@ -288,7 +288,16 @@ app.use(banGuard);
 app.use(globalLimiter);
 app.use("/api/auth", authRoutes);
 
-const MAX_PDF_SIZE_BYTES = 20 * 1024 * 1024;
+// ─── File Size Limits ──────────────────────────────────────────────────────────
+// MAX_UPLOAD_SIZE_MB controls the maximum PDF file size allowed per upload.
+// Default is 50 MB. Set to a lower value in resource-constrained environments.
+// Multer will automatically reject files exceeding this limit with 413 Payload Too Large.
+const MAX_UPLOAD_SIZE_MB = parseInt(process.env.MAX_UPLOAD_SIZE_MB || "50", 10);
+if (!Number.isFinite(MAX_UPLOAD_SIZE_MB) || MAX_UPLOAD_SIZE_MB <= 0) {
+  throw new Error("MAX_UPLOAD_SIZE_MB must be a positive integer (e.g., 50)");
+}
+const MAX_PDF_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
+
 const UPLOADS_DIR = path.resolve("uploads");
 const isDevelopment = process.env.NODE_ENV !== "production";
 
@@ -356,7 +365,11 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: MAX_PDF_SIZE_BYTES },
+  limits: {
+    fileSize: MAX_PDF_SIZE_BYTES,
+    // Additional limits to prevent abuse
+    files: 1, // Only allow one file per request
+  },
   fileFilter: (req, file, cb) => {
     const isPdfMime = file.mimetype === "application/pdf";
     const isPdfExtension = file.originalname.toLowerCase().endsWith(".pdf");
@@ -448,6 +461,47 @@ const ragAuthHeaders = () =>
 const normalizeSessionSecret = (value) =>
   typeof value === "string" ? value.trim() || null : null;
 
+// ─── Multer Error Handler ───────────────────────────────────────────────────────
+// Catches file size violations (413 Payload Too Large) and other multer errors.
+// This middleware must be placed after upload.single() to catch multer-specific errors.
+const multerErrorHandler = (err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res.status(413).json({
+        error: "File too large",
+        message: `Upload failed: PDF exceeds maximum size of ${MAX_UPLOAD_SIZE_MB}MB. The file you provided is ${(err.limit / 1024 / 1024).toFixed(2)}MB.`,
+        details: `Maximum allowed: ${MAX_UPLOAD_SIZE_MB}MB | Your file: ${(err.limit / 1024 / 1024).toFixed(2)}MB`,
+        maxSizeMB: MAX_UPLOAD_SIZE_MB,
+      });
+    } else if (err.code === "LIMIT_FILE_COUNT") {
+      return res.status(400).json({
+        error: "Too many files",
+        message: "Only one PDF file is allowed per upload request.",
+      });
+    } else if (err.code === "LIMIT_PART_COUNT") {
+      return res.status(400).json({
+        error: "Too many parts",
+        message: "The form request contains too many fields. Please try again.",
+      });
+    }
+    // Generic multer error
+    return res.status(400).json({
+      error: "Upload failed",
+      message: err.message || "An error occurred during file upload.",
+    });
+  }
+
+  if (err && err.message && err.message.includes("Only PDF files are allowed")) {
+    return res.status(415).json({
+      error: "Invalid file type",
+      message: "Only PDF files are allowed. Please upload a valid PDF document.",
+    });
+  }
+
+  // Pass other errors to Express error handler
+  next(err);
+};
+
 const validateSessionExtension = async (sessionId, sessionSecret) => {
   if (!sessionId) {
     return {
@@ -489,7 +543,7 @@ const validateSessionExtension = async (sessionId, sessionSecret) => {
   }
 };
 
-app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
+app.post("/upload", uploadLimiter, upload.single("file"), multerErrorHandler, async (req, res) => {
   const uploadedFilePath = req.file?.path;
   // CodeQL [js/path-injection] Mitigation: Break taint flow by forcing basename
   const absoluteFilePath = uploadedFilePath
