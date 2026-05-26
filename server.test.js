@@ -9,6 +9,7 @@ const { Blob } = require("node:buffer");
 let app, askSchema, summarizeSchema, extractServiceDetails;
 let clientIpFromRequest, normalizeIp;
 test("module loads without error", () => {
+  process.env.JWT_SECRET = "test-secret-for-ci";
   const mod = require("./server.js");
   app = mod.app;
   askSchema = mod.askSchema;
