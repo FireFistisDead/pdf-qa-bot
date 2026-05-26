@@ -7,12 +7,14 @@ const { validatePassword } = require("../utils/passwordValidator");
 
 const usersFile = path.join(__dirname, "../data/users.json");
 
-const SECRET = process.env.JWT_SECRET || null;
+const getJwtSecret = () => process.env.JWT_SECRET || null;
 
 const ensureSecret = () => {
-  if (!SECRET) {
+  const secret = getJwtSecret();
+  if (!secret) {
     throw new Error("JWT_SECRET missing in .env");
   }
+  return secret;
 };
 
 const getUsers = () => {
@@ -65,8 +67,8 @@ exports.signup = async (req, res) => {
 
     saveUsers(users);
 
-    ensureSecret();
-    const token = jwt.sign({ email }, SECRET, { expiresIn: "7d" });
+    const secret = ensureSecret();
+    const token = jwt.sign({ email }, secret, { expiresIn: "7d" });
 
     res.status(201).json({
       token,
@@ -111,8 +113,8 @@ exports.login = async (req, res) => {
       });
     }
 
-    ensureSecret();
-    const token = jwt.sign({ email: user.email }, SECRET, { expiresIn: "7d" });
+    const secret = ensureSecret();
+    const token = jwt.sign({ email: user.email }, secret, { expiresIn: "7d" });
 
     res.json({
       token,

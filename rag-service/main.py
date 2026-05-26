@@ -2493,30 +2493,30 @@ def ask_question(data: Question):
             "retrieval_cache",
             OrderedDict()
         )
+        with session_lock:
+            cleanup_retrieval_cache(retrieval_cache)
+            # Cache hit
+            cache_key = f"{mode}:{normalized_query}"
+            cached_value = retrieval_cache.get(cache_key)
+            if isinstance(cached_value, dict) and "scored_candidates" in cached_value:
+                logger.info(
+                    "Retrieval cache hit session_id=%s cache_key=%s",
+                    session_id,
+                    cache_key,
+                )
+                scored_candidates = cached_value["scored_candidates"]
+                cache_hit = True
+            elif cached_value is not None:
+                logger.info(
+                    "Retrieval cache invalidated session_id=%s cache_key=%s",
+                    session_id,
+                    cache_key,
+                )
+                retrieval_cache.pop(cache_key, None)
+                cache_hit = False
 
-        cleanup_retrieval_cache(retrieval_cache)
-        # Cache hit
-        cache_key = f"{mode}:{normalized_query}"
-        cached_value = retrieval_cache.get(cache_key)
-        if isinstance(cached_value, dict) and "scored_candidates" in cached_value:
-            logger.info(
-                "Retrieval cache hit session_id=%s cache_key=%s",
-                session_id,
-                cache_key,
-            )
-            scored_candidates = cached_value["scored_candidates"]
-            cache_hit = True
-        elif cached_value is not None:
-            logger.info(
-                "Retrieval cache invalidated session_id=%s cache_key=%s",
-                session_id,
-                cache_key,
-            )
-            retrieval_cache.pop(cache_key, None)
-            cache_hit = False
-
-        else:
-            cache_hit = False
+            else:
+                cache_hit = False
 
     try:
         with session_lock:
@@ -2848,27 +2848,28 @@ def ask_question_stream(data: Question):
         vectorstore = session["vectorstore"]
 
         retrieval_cache = session.setdefault("retrieval_cache", OrderedDict())
-        cleanup_retrieval_cache(retrieval_cache)
-        cache_key = f"{mode}:{normalized_query}"
-        cached_value = retrieval_cache.get(cache_key)
-        if isinstance(cached_value, dict) and "scored_candidates" in cached_value:
-            logger.info(
-                "Stream retrieval cache hit session_id=%s cache_key=%s",
-                session_id,
-                cache_key,
-            )
-            scored_candidates = cached_value["scored_candidates"]
-            cache_hit = True
-        elif cached_value is not None:
-            logger.info(
-                "Stream retrieval cache invalidated session_id=%s cache_key=%s",
-                session_id,
-                cache_key,
-            )
-            retrieval_cache.pop(cache_key, None)
-            cache_hit = False
-        else:
-            cache_hit = False
+        with session_lock:
+            cleanup_retrieval_cache(retrieval_cache)
+            cache_key = f"{mode}:{normalized_query}"
+            cached_value = retrieval_cache.get(cache_key)
+            if isinstance(cached_value, dict) and "scored_candidates" in cached_value:
+                logger.info(
+                    "Stream retrieval cache hit session_id=%s cache_key=%s",
+                    session_id,
+                    cache_key,
+                )
+                scored_candidates = cached_value["scored_candidates"]
+                cache_hit = True
+            elif cached_value is not None:
+                logger.info(
+                    "Stream retrieval cache invalidated session_id=%s cache_key=%s",
+                    session_id,
+                    cache_key,
+                )
+                retrieval_cache.pop(cache_key, None)
+                cache_hit = False
+            else:
+                cache_hit = False
 
     try:
         with session_lock:
