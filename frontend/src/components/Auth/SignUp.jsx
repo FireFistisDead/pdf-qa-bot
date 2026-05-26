@@ -20,14 +20,14 @@ const SignUp = () => {
     }
     
     setLoading(true);
-    const { data, error } = await supabase.auth.signUp({
+    const { error } = await supabase.auth.signUp({
       email,
       password,
       options: {
         data: {
           full_name: fullName,
-        }
-      }
+        },
+      },
     });
     
     setLoading(false);
@@ -43,7 +43,7 @@ const SignUp = () => {
   };
 
   const handleOAuthLogin = async (provider) => {
-    const { data, error } = await supabase.auth.signInWithOAuth({
+    const { error } = await supabase.auth.signInWithOAuth({
       provider,
       options: {
         redirectTo: `${window.location.origin}/dashboard`
