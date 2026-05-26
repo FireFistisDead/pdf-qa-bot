@@ -1,13 +1,12 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
-import LandingNavbar from '../Landing/LandingNavbar';
+import { supabase } from '../../services/supabaseClient';
 
 const Dashboard = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
 
-  // If someone manually goes to /dashboard and is not logged in, boot them
   React.useEffect(() => {
     if (!user) {
       navigate('/signin');
@@ -17,8 +16,31 @@ const Dashboard = () => {
   if (!user) return null;
 
   return (
-    <div style={{ minHeight: '100vh', backgroundColor: '#0f0f0f', color: '#fff', fontFamily: 'var(--font-body, "Inter", sans-serif)' }}>
-      <LandingNavbar />
+    <div style={{ minHeight: '100vh', backgroundColor: '#0f0f0f', color: '#fff' }}>
+
+      {/* Simple App Top Bar - no marketing nav */}
+      <header style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '0 32px', height: '60px',
+        borderBottom: '1px solid #222', background: '#111',
+        position: 'sticky', top: 0, zIndex: 100,
+      }}>
+        <span style={{ fontWeight: 'bold', fontSize: '16px', letterSpacing: '0.05em' }}>DOCUMIND</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          <span style={{ fontSize: '13px', color: '#888' }}>{user.email}</span>
+          <button
+            onClick={() => supabase.auth.signOut()}
+            style={{
+              background: 'transparent', border: '1px solid #333',
+              color: '#ccc', padding: '6px 14px', borderRadius: '6px',
+              cursor: 'pointer', fontSize: '13px',
+            }}
+          >
+            Sign Out
+          </button>
+        </div>
+      </header>
+
       
       <main style={{ padding: '120px 40px', maxWidth: '1200px', margin: '0 auto' }}>
         <h1 style={{ fontFamily: 'var(--font-display, "Space Grotesk", sans-serif)', fontSize: '48px', marginBottom: '16px' }}>
