@@ -73,8 +73,23 @@ const sessionsLookupSchema = z.object({
     .min(1, "sessions is required."),
 });
 
+const generateFlashcardsSchema = z.object({
+  session_id: uuidSchema,
+  session_secret: sessionSecretSchema,
+  count: z.number().int().min(1).max(50).optional().default(10),
+});
+
+const updateFlashcardProgressSchema = z.object({
+  session_id: uuidSchema,
+  session_secret: sessionSecretSchema,
+  card_id: z.string().trim().min(1, "card_id is required."),
+  rating: z.enum(["again", "good", "easy"]),
+});
+
 module.exports = {
   askSchema,
   summarizeSchema,
   sessionsLookupSchema,
+  generateFlashcardsSchema,
+  updateFlashcardProgressSchema,
 };
