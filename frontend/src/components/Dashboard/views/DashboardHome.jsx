@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../../contexts/AuthContext';
 import { useDashboardData } from '../../../hooks/useDashboardData';
 import '../Dashboard.css';
@@ -49,6 +50,7 @@ const SkeletonList = ({ count = 4 }) => (
 
 const DashboardHome = () => {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const { stats, activity, insights, isLoading, error } = useDashboardData();
 
   const name = user?.user_metadata?.full_name || user?.email?.split('@')[0] || '';
@@ -112,7 +114,7 @@ const DashboardHome = () => {
             </p>
 
             <div className="hero-actions-front">
-              <button className="front-btn primary">UPLOAD DOCUMENT</button>
+              <button className="front-btn primary" onClick={() => navigate('/dashboard/documents')}>UPLOAD DOCUMENT</button>
               <button className="front-btn secondary">NEW QUERY</button>
             </div>
           </div>
