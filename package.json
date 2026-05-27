@@ -25,7 +25,7 @@
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.0.2",
-    "rate-limit-redis": "^4.2.3",
+    "rate-limit-redis": "^5.0.0",
     "react-hot-toast": "^2.6.0",
     "redis": "^4.7.1",
     "zod": "^4.4.3"
