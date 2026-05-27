@@ -259,18 +259,23 @@ const askQuestion = async () => {
                   </div>
                 </div>
               </div>
-              {currentChat.map((msg, i) => (
-                <MessageBubble
-                  key={msg.id || i}
-                  msg={msg}
-                  darkMode={darkMode}
-                  onOpenSource={onOpenSource}
-                  isBookmarked={savedMessageIds?.has(msg.id)}
-                  onToggleBookmark={onToggleBookmark}
-                  highlighted={highlightedMessageId === msg.id}
-                  registerMessageRef={(node) => onRegisterMessageRef?.(msg.id, node)}
-                />
-              ))}
+              {currentChat.map((msg, i) => {
+                const messageId = msg.id || `legacy-message-${i}`;
+                const messageWithId = { ...msg, id: messageId };
+
+                return (
+                  <MessageBubble
+                    key={messageId}
+                    msg={messageWithId}
+                    darkMode={darkMode}
+                    onOpenSource={onOpenSource}
+                    isBookmarked={savedMessageIds?.has(messageId)}
+                    onToggleBookmark={onToggleBookmark}
+                    highlighted={highlightedMessageId === messageId}
+                    registerMessageRef={(node) => onRegisterMessageRef?.(messageId, node)}
+                  />
+                );
+              })}
 
               {asking && (
                 <div className="d-flex justify-content-start mb-3 chat-message">

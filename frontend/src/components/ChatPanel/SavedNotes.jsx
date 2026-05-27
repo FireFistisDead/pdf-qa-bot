@@ -88,11 +88,12 @@ const SavedNotes = ({
               paddingRight: "2px",
             }}
           >
-            {sortedNotes.map((note) => {
+            {sortedNotes.map((note, index) => {
               const isAvailable = availableMessageIds.has(note.messageId);
+              const noteKey = note.id || note.messageId || `saved-note-${index}`;
               return (
                 <div
-                  key={note.id}
+                  key={noteKey}
                   className="saved-note-item"
                   style={{
                     borderRadius: "14px",
