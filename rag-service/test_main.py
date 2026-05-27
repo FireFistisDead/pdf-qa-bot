@@ -445,18 +445,18 @@ def test_append_chat_exchange_normalizes_and_persists_message_schema():
 
 # ─── Session dirty-flag and per-session persistence helpers ─────────────────
 
-def test_append_chat_and_mark_dirty_marks_dirty_without_mutating_chat():
+def test_mark_session_dirty_marks_dirty_without_mutating_chat():
     from main import (
         sessions,
         _dirty_sessions,
-        _append_chat_and_mark_dirty,
+        _mark_session_dirty,
         sessions_lock,
     )
     import threading
     sid = "test-dirty-" + _secrets.token_hex(4)
     with sessions_lock:
         sessions[sid] = {"chat": [], "created_at": 0, "last_accessed": 0, "documents": [], "session_secret": None, "lock": threading.Lock(), "vectorstore": None}
-        _append_chat_and_mark_dirty(sid, {"question": "q", "answer": "a", "sources": [], "mode": "default"})
+        _mark_session_dirty(sid)
 
     assert sid in _dirty_sessions
     assert len(sessions[sid]["chat"]) == 0
@@ -466,11 +466,11 @@ def test_append_chat_and_mark_dirty_marks_dirty_without_mutating_chat():
         _dirty_sessions.discard(sid)
 
 
-def test_append_chat_and_mark_dirty_ignores_unknown_session():
-    from main import _append_chat_and_mark_dirty, _dirty_sessions, sessions_lock
+def test_mark_session_dirty_ignores_unknown_session():
+    from main import _mark_session_dirty, _dirty_sessions, sessions_lock
     unknown_sid = "no-such-session-" + _secrets.token_hex(4)
     with sessions_lock:
-        _append_chat_and_mark_dirty(unknown_sid, {"question": "q", "answer": "a"})
+        _mark_session_dirty(unknown_sid)
     assert unknown_sid not in _dirty_sessions
 
 
@@ -780,7 +780,8 @@ def test_stream_lazy_load_faiss_uses_get_embedding_model():
                         "question": "test",
                         "session_id": session_id,
                         "session_secret": "test_secret"
-                    }
+                    },
+                    headers={"X-Internal-Token": main_module.INTERNAL_RAG_TOKEN},
                 )
                 
                 mock_get_embedding_model.assert_called_once()

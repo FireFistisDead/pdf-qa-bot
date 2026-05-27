@@ -71,8 +71,16 @@ SESSION_REGISTRY_LOCK_FILE = PERSIST_PATH / "session_registry.lock"
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(FAISS_DIR, exist_ok=True)
 
+
+class NormalizedChatHistory(list):
+    """Marker for chat histories already converted to role/text messages."""
+
+
 def normalize_chat_history(chat):
-    normalized = []
+    if isinstance(chat, NormalizedChatHistory):
+        return chat
+
+    normalized = NormalizedChatHistory()
 
     for item in chat or []:
         if not isinstance(item, dict):
@@ -116,12 +124,10 @@ def load_sessions():
                 for sid, meta in data.items():
                     meta["lock"] = threading.Lock()
                     meta["vectorstore"] = None
-                
                     meta.setdefault("chat", [])
                     meta["chat"] = normalize_chat_history(meta.get("chat", []))
                     meta.setdefault("flashcards", [])
                     base[sid] = meta
-                    
         except Exception as e:
             logger.error(f"Failed to load sessions from sessions.json: {e}")
 
@@ -136,7 +142,7 @@ def load_sessions():
                 with open(meta_path, "r", encoding="utf-8") as f:
                     per = json.load(f)
                 if isinstance(per.get("chat"), list):
-                    meta["chat"] = per["chat"]
+                    meta["chat"] = normalize_chat_history(per["chat"])
                 if isinstance(per.get("flashcards"), list):
                     meta["flashcards"] = per["flashcards"]
                 if per.get("last_accessed") and float(per["last_accessed"] or 0) > float(meta.get("last_accessed") or 0):
@@ -212,6 +218,10 @@ def require_internal_rag_token_configured():
     if not INTERNAL_RAG_TOKEN:
         raise RuntimeError("INTERNAL_RAG_TOKEN must be configured for protected endpoints.")
 
+
+require_internal_rag_token_configured()
+
+
 # How often the background flush thread wakes and writes dirty session metadata
 # files to disk. Lower values reduce the data-loss window on unclean shutdown
 # at the cost of more frequent I/O; higher values batch more writes.
@@ -225,11 +235,6 @@ try:
     from langchain_core.documents import Document  # type: ignore
 except Exception:  # pragma: no cover
     from langchain.schema import Document  # type: ignore
-
-@app.on_event("startup")
-def validate_internal_rag_token_on_startup():
-    require_internal_rag_token_configured()
-
 
 def generate_session_secret() -> str:
     return secrets.token_urlsafe(32)
@@ -541,6 +546,15 @@ def cleanup_retrieval_cache(retrieval_cache):
             len(expired_keys),
             len(retrieval_cache),
         )
+
+
+def ensure_retrieval_cache(session: dict) -> OrderedDict:
+    retrieval_cache = session.setdefault("retrieval_cache", OrderedDict())
+    if not isinstance(retrieval_cache, OrderedDict):
+        retrieval_cache = OrderedDict(retrieval_cache)
+        session["retrieval_cache"] = retrieval_cache
+    return retrieval_cache
+
 
 def session_expires_at(last_accessed: float) -> float:
     return last_accessed + (SESSION_TTL_MINUTES * 60)
@@ -929,7 +943,7 @@ def _write_session_meta_file(session_id: str, data: dict) -> None:
         logger.exception("Failed to write session metadata session_id=%s", session_id)
 
 
-def _append_chat_and_mark_dirty(session_id: str, entry: dict) -> None:
+def _mark_session_dirty(session_id: str) -> None:
     """Mark a session as dirty so background persistence flushes metadata.
 
     Must be called while sessions_lock is held.
@@ -2377,7 +2391,7 @@ def process_pdf(
                 "session_dir": None,
                 "created_at": created_at,
                 "last_accessed": created_at,
-                "retrieval_cache": {},
+                "retrieval_cache": OrderedDict(),
                 "chat": [],
             }
             persist_session_registry_entry(processing_session_id, sessions[processing_session_id])
@@ -2443,7 +2457,7 @@ def process_pdf(
                 session = _touch_session_unlocked(requested_session_id)
                 if not session:
                     raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-                session.setdefault("retrieval_cache", {})
+                ensure_retrieval_cache(session)
                 if "lock" not in session:
                     session["lock"] = threading.Lock()
                 session_lock = session["lock"]
@@ -2467,7 +2481,7 @@ def process_pdf(
                     raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
                 session.setdefault("documents", []).append(uploaded_document)
                 session["last_accessed"] = now
-                session["retrieval_cache"] = {}
+                session["retrieval_cache"] = OrderedDict()
                 session_id = requested_session_id
                 persist_session_registry_entry(session_id, session)
                 logger.info(
@@ -2509,7 +2523,7 @@ def process_pdf(
                     "session_dir": session_dir,
                     "created_at": created_at,
                     "last_accessed": now,
-                    "retrieval_cache": {},
+                    "retrieval_cache": OrderedDict(),
                     "chat": [],
                 }
                 if progress:
@@ -2626,10 +2640,7 @@ def ask_question(data: Question):
         vectorstore = session["vectorstore"]
 
         # Session-level retrieval cache
-        retrieval_cache = session.setdefault(
-            "retrieval_cache",
-            OrderedDict()
-        )
+        retrieval_cache = ensure_retrieval_cache(session)
 
         cleanup_retrieval_cache(retrieval_cache)
         # Cache hit
@@ -2670,7 +2681,7 @@ def ask_question(data: Question):
                 with sessions_lock:
                     session = sessions.get(session_id)
                     if session:
-                        retrieval_cache = session.setdefault("retrieval_cache", {})
+                        retrieval_cache = ensure_retrieval_cache(session)
                         if len(retrieval_cache) >= RETRIEVAL_CACHE_LIMIT:
                             oldest_key = next(iter(retrieval_cache))
                             del retrieval_cache[oldest_key]
@@ -2716,16 +2727,7 @@ def ask_question(data: Question):
                     [],
                     mode,
                 )
-            else:
-                _append_chat_and_mark_dirty(
-                    session_id,
-                    {
-                        "question": question,
-                        "answer": INSUFFICIENT_CONTEXT_MESSAGE,
-                        "sources": [],
-                        "mode": mode,
-                    },
-                )
+            _mark_session_dirty(session_id)
         return response_payload
 
     pages = sorted(set(
@@ -2787,15 +2789,7 @@ def ask_question(data: Question):
                     mode,
                 )
 
-            _append_chat_and_mark_dirty(
-                session_id,
-                {
-                    "question": question,
-                    "answer": framed,
-                    "sources": citation_sources,
-                    "mode": mode,
-                },
-            )
+            _mark_session_dirty(session_id)
         return response_payload
 
     grounded_answer = build_answer_from_documents(
@@ -2833,15 +2827,7 @@ def ask_question(data: Question):
                     mode,
                 )
 
-            _append_chat_and_mark_dirty(
-                session_id,
-                {
-                    "question": question,
-                    "answer": grounded_answer,
-                    "sources": citation_sources,
-                    "mode": mode,
-                },
-            )
+            _mark_session_dirty(session_id)
         return response_payload
     if grounded_answer:
         if ASK_REQUIRE_CITATIONS and not answer_contains_citation(grounded_answer, len(docs)):
@@ -2871,15 +2857,7 @@ def ask_question(data: Question):
                         mode,
                     )
 
-                _append_chat_and_mark_dirty(
-                    session_id,
-                    {
-                        "question": question,
-                        "answer": INSUFFICIENT_CONTEXT_MESSAGE,
-                        "sources": citation_sources,
-                        "mode": mode,
-                    },
-                )
+                _mark_session_dirty(session_id)
             return response_payload
         logger.info(
             "Returning grounded answer session_id=%s intent=%s retrieved_chunks=%s sources=%s",
@@ -2920,15 +2898,7 @@ def ask_question(data: Question):
                     mode,
                 )
 
-            _append_chat_and_mark_dirty(
-                session_id,
-                {
-                    "question": question,
-                    "answer": framed,
-                    "sources": citation_sources,
-                    "mode": mode,
-                },
-            )
+            _mark_session_dirty(session_id)
         return result
 
     prompt = (
@@ -2985,13 +2955,15 @@ def ask_question(data: Question):
         with sessions_lock:
             session = sessions.get(session_id)
             if session:
-                session.setdefault("retrieval_cache", {})
-            _append_chat_and_mark_dirty(session_id, {
-                "question": question,
-                "answer": framed,
-                "sources": citation_sources,
-                "mode": mode,
-            })
+                ensure_retrieval_cache(session)
+                append_chat_exchange(
+                    session,
+                    question,
+                    framed,
+                    citation_sources,
+                    mode,
+                )
+            _mark_session_dirty(session_id)
         return response_payload
 
     # ── Step 2: Fall back to HuggingFace model ───────────────────────────────
@@ -3024,10 +2996,7 @@ def ask_question(data: Question):
     with sessions_lock:
         session = sessions.get(session_id)
         if session:
-            session.setdefault(
-                "retrieval_cache",
-                {}
-            )
+            ensure_retrieval_cache(session)
 
             append_chat_exchange(
                 session,
@@ -3037,15 +3006,7 @@ def ask_question(data: Question):
                 mode,
             )
 
-        _append_chat_and_mark_dirty(
-            session_id,
-            {
-                "question": question,
-                "answer": framed,
-                "sources": citation_sources,
-                "mode": mode,
-            },
-        )
+        _mark_session_dirty(session_id)
 
     return response_payload
 
@@ -3100,7 +3061,7 @@ def ask_question_stream(data: Question):
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
 
-        retrieval_cache = session.setdefault("retrieval_cache", OrderedDict())
+        retrieval_cache = ensure_retrieval_cache(session)
         with session_lock:
             cleanup_retrieval_cache(retrieval_cache)
             cache_key = f"{mode}:{normalized_query}"
@@ -3141,7 +3102,7 @@ def ask_question_stream(data: Question):
                 with sessions_lock:
                     current_session = sessions.get(session_id)
                     if current_session:
-                        rc = current_session.setdefault("retrieval_cache", OrderedDict())
+                        rc = ensure_retrieval_cache(current_session)
                         if len(rc) >= RETRIEVAL_CACHE_LIMIT:
                             oldest = next(iter(rc))
                             del rc[oldest]
@@ -3177,15 +3138,7 @@ def ask_question_stream(data: Question):
                     [],
                     mode,
                 )
-            _append_chat_and_mark_dirty(
-                session_id,
-                {
-                    "question": question,
-                    "answer": INSUFFICIENT_CONTEXT_MESSAGE,
-                    "sources": [],
-                    "mode": mode,
-                },
-            )
+            _mark_session_dirty(session_id)
 
         def _refuse_stream():
             yield INSUFFICIENT_CONTEXT_MESSAGE
@@ -3212,7 +3165,7 @@ def ask_question_stream(data: Question):
         with sessions_lock:
             current_session = sessions.get(session_id)
             if current_session:
-                current_session.setdefault("retrieval_cache", {})
+                ensure_retrieval_cache(current_session)
 
                 append_chat_exchange(
                     current_session,
@@ -3222,15 +3175,7 @@ def ask_question_stream(data: Question):
                     mode,
                 )
 
-            _append_chat_and_mark_dirty(
-                session_id,
-                {
-                    "question": question,
-                    "answer": framed,
-                    "sources": citation_sources,
-                    "mode": mode,
-                },
-            )
+            _mark_session_dirty(session_id)
 
         def _grounded_stream():
             yield framed
@@ -3324,7 +3269,7 @@ def ask_question_stream(data: Question):
                 current_session = sessions.get(session_id)
 
                 if current_session:
-                    current_session.setdefault("retrieval_cache", {})
+                    ensure_retrieval_cache(current_session)
 
                     append_chat_exchange(
                         current_session,
@@ -3334,15 +3279,7 @@ def ask_question_stream(data: Question):
                         mode,
                     )
 
-                _append_chat_and_mark_dirty(
-                    session_id,
-                    {
-                        "question": question,
-                        "answer": framed,
-                        "sources": citation_sources,
-                        "mode": mode,
-                    },
-                )
+                _mark_session_dirty(session_id)
         except Exception:
             logger.exception("Stream generation failed session_id=%s", session_id)
             yield "\n[Generation error. Please try again.]"

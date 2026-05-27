@@ -487,8 +487,11 @@ const requireInternalRagToken = () => {
 };
 
 const ragAuthHeaders = () => {
-  requireInternalRagToken();
-  return { "X-Internal-Token": getInternalRagToken() };
+  const token = getInternalRagToken();
+  if (!token) {
+    throw new Error("INTERNAL_RAG_TOKEN must be configured for RAG service requests.");
+  }
+  return { "X-Internal-Token": token };
 };
 
 const normalizeSessionSecret = (value) =>

@@ -75,6 +75,10 @@ flowchart LR
 > Do not expose it publicly — otherwise attackers can bypass gateway rate limiting by calling RAG endpoints directly.
 > `INTERNAL_RAG_TOKEN` is required so the RAG service rejects requests missing `X-Internal-Token`.
 
+### Upgrade Notes
+
+Existing deployments and local environments must set `INTERNAL_RAG_TOKEN` before starting the Express API or RAG service. Generate a strong shared secret, put the same value in both environments, and restart both services. The RAG service fails closed when this value is missing.
+
 ### Default ports
 
 | Service | Folder | Port | URL |
