@@ -137,3 +137,25 @@ export const askQuestionStreamApi = async (question, sessionId, sessionSecret, m
 
   return fullText;
 };
+
+export const generateFlashcardsApi = async (sessionId, sessionSecret) => {
+  const res = await axios.post(
+    `${API_BASE}/sessions/flashcards`,
+    { session_id: sessionId, session_secret: sessionSecret },
+    {
+      timeout: 100000,
+    }
+  );
+  return res.data;
+};
+
+export const updateFlashcardProgressApi = async (sessionId, sessionSecret, cardId, rating) => {
+  const res = await axios.post(
+    `${API_BASE}/sessions/flashcards/progress`,
+    { session_id: sessionId, session_secret: sessionSecret, card_id: cardId, rating },
+    {
+      timeout: 15000,
+    }
+  );
+  return res.data;
+};

@@ -13,6 +13,7 @@ import SignIn from "./components/Auth/SignIn";
 import SignUp from "./components/Auth/SignUp";
 import { AuthProvider } from "./contexts/AuthContext";
 import Dashboard from "./components/Dashboard/Dashboard";
+import StudyHub from "./components/StudyHub/StudyHub";
 
 import { extractApiErrorMessage, uploadPdfApi, getSessionsApi } from "./services/api";
 
@@ -495,7 +496,7 @@ function App() {
           <Route path="/workspace" element={<MainApp />} />
           <Route path="/signin" element={<SignIn />} />
           <Route path="/signup" element={<SignUp />} />
-          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/dashboard/*" element={<Dashboard />} />
         </Routes>
       </BrowserRouter>
     </AuthProvider>

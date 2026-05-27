@@ -81,6 +81,7 @@ def load_sessions():
                     meta["lock"] = threading.Lock()
                     meta["vectorstore"] = None
                     meta.setdefault("chat", [])
+                    meta.setdefault("flashcards", [])
                     base[sid] = meta
         except Exception as e:
             logger.error(f"Failed to load sessions from sessions.json: {e}")
@@ -97,6 +98,8 @@ def load_sessions():
                     per = json.load(f)
                 if isinstance(per.get("chat"), list):
                     meta["chat"] = per["chat"]
+                if isinstance(per.get("flashcards"), list):
+                    meta["flashcards"] = per["flashcards"]
                 if per.get("last_accessed") and float(per["last_accessed"] or 0) > float(meta.get("last_accessed") or 0):
                     meta["last_accessed"] = float(per["last_accessed"])
         except Exception as e:
@@ -110,27 +113,22 @@ def save_sessions_unlocked():
 
         for sid, meta in sessions.items():
 
-            safe_cache = {}
-
-            for key, value in meta.get("retrieval_cache", {}).items():
-                if isinstance(value, dict):
-                    safe_cache[key] = value
-
             # Strip static_url from persisted document entries. The field pointed to
-        # a server-side file path that is deleted immediately after indexing.
-        # Keeping it on disk would cause the frontend to construct a URL that
-        # 404s and, if the /uploads static route were ever re-enabled, could
-        # expose the raw PDF to unauthenticated callers.
-        clean_docs = [
-            {k: v for k, v in doc.items() if k != "static_url"}
-            for doc in meta.get("documents", [])
-        ]
-        data[sid] = {
+            # a server-side file path that is deleted immediately after indexing.
+            # Keeping it on disk would cause the frontend to construct a URL that
+            # 404s and, if the /uploads static route were ever re-enabled, could
+            # expose the raw PDF to unauthenticated callers.
+            clean_docs = [
+                {k: v for k, v in doc.items() if k != "static_url"}
+                for doc in meta.get("documents", [])
+            ]
+            data[sid] = {
                 "created_at": meta.get("created_at"),
                 "last_accessed": meta.get("last_accessed"),
                 "documents": clean_docs,
                 "retrieval_cache": {},  # Do not persist retrieval cache (contains Document objects)
                 "chat": meta.get("chat", []),
+                "flashcards": meta.get("flashcards", []),
                 "session_secret": meta.get("session_secret"),
             }
 
@@ -843,6 +841,7 @@ def _snapshot_session_for_persistence(meta: dict) -> dict:
         "last_accessed": meta.get("last_accessed"),
         "documents": list(meta.get("documents", [])),
         "chat": list(meta.get("chat", [])),
+        "flashcards": list(meta.get("flashcards", [])),
         "session_secret": meta.get("session_secret"),
     }
 
@@ -2161,6 +2160,17 @@ def lookup_sessions(data: SessionsLookupRequest):
 
     return sessions_out
 
+class FlashcardGenerateRequest(BaseModel):
+    session_id: UUID
+    session_secret: str
+    count: Optional[int] = 10
+
+class FlashcardProgressRequest(BaseModel):
+    session_id: UUID
+    session_secret: str
+    card_id: str
+    rating: str
+
 class SessionWriteRequest(BaseModel):
     session_id: UUID
     session_secret: str
@@ -2941,7 +2951,7 @@ def ask_question_stream(data: Question):
             try:
                 session["vectorstore"] = FAISS.load_local(
                     str(FAISS_DIR / session_id),
-                    embedding_model,
+                    get_embedding_model(),
                     allow_dangerous_deserialization=True,
                 )
             except Exception as exc:
@@ -3028,13 +3038,13 @@ def ask_question_stream(data: Question):
         with sessions_lock:
             current_session = sessions.get(session_id)
             if current_session:
-                current_session.setdefault("chat", []).append({
+                current_session.setdefault("retrieval_cache", {})
+                _append_chat_and_mark_dirty(session_id, {
                     "question": question,
                     "answer": framed,
                     "sources": citation_sources,
                     "mode": mode,
                 })
-                save_sessions_unlocked()
 
         def _grounded_stream():
             yield framed
@@ -3107,17 +3117,35 @@ def ask_question_stream(data: Question):
             generation_thread.join(timeout=180)
 
             full_answer = "".join(full_answer_parts).strip()
-            citation_sources = [citation_source_for_document(doc, idx) for idx, doc in enumerate(docs)]
+
+            framed = apply_mode_framing(
+                full_answer,
+                question,
+                mode,
+                docs,
+                context,
+            )
+
+            if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
+                framed = full_answer
+
+            citation_sources = [
+                citation_source_for_document(doc, idx)
+                for idx, doc in enumerate(docs)
+            ]
+
             with sessions_lock:
                 current_session = sessions.get(session_id)
+
                 if current_session:
-                    current_session.setdefault("chat", []).append({
+                    current_session.setdefault("retrieval_cache", {})
+
+                    _append_chat_and_mark_dirty(session_id, {
                         "question": question,
-                        "answer": full_answer,
+                        "answer": framed,
                         "sources": citation_sources,
                         "mode": mode,
                     })
-                    save_sessions_unlocked()
         except Exception:
             logger.exception("Stream generation failed session_id=%s", session_id)
             yield "\n[Generation error. Please try again.]"
@@ -3172,6 +3200,7 @@ def summarize_pdf(data: SummarizeRequest):
 
     return {"summary": build_session_summary(uploaded_documents, indexed_documents)}
 
+<<<<<<< feat/knowledge-gap
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Knowledge Gap Detection
@@ -3430,6 +3459,186 @@ def knowledge_gaps(data: KnowledgeGapsRequest):
         "short_document": is_short,
     }
 
+=======
+def generate_flashcards_from_text(indexed_docs, count):
+    text_content = ""
+    sorted_docs = sorted(indexed_docs, key=lambda x: (x.metadata.get("page", 0), x.metadata.get("chunk_index", 0)))
+    
+    for doc in sorted_docs:
+        page_num = doc.metadata.get("page", 1)
+        content = doc.page_content.strip()
+        if len(text_content) + len(content) < 3000:
+            text_content += f"\n[Page {page_num}]: {content}\n"
+        else:
+            break
+            
+    prompt = (
+        "Extract 5 key concepts, definitions, or questions and answers from the following text. "
+        "For each concept, provide a clear Question and a precise, concise Answer in plain text. "
+        "Format your response exactly as listed below:\n"
+        "Q: [Question text]\n"
+        "A: [Answer text]\n\n"
+        f"Text:\n{text_content}\n\n"
+        "Q&A:"
+    )
+    
+    response_text = ""
+    ollama_answer = synthesize_with_ollama(prompt)
+    if ollama_answer:
+        response_text = ollama_answer
+    else:
+        try:
+            response_text = generate_response(prompt, max_new_tokens=512)
+        except Exception as e:
+            logger.warning(f"Local LLM response generation failed: {e}")
+            response_text = ""
+        
+    cards = []
+    if response_text:
+        qa_blocks = re.findall(r"Q:\s*(.*?)\s*A:\s*(.*?)(?=(?:Q:|$))", response_text, re.DOTALL | re.IGNORECASE)
+        for question, answer in qa_blocks:
+            question = question.strip()
+            answer = answer.strip()
+            if question and answer:
+                cards.append({
+                    "id": str(uuid.uuid4()),
+                    "question": question,
+                    "answer": answer,
+                    "source_page": 1,
+                    "box": 1,
+                    "next_review": now_ts()
+                })
+            
+    if not cards:
+        sentences = []
+        for doc in sorted_docs:
+            page_num = doc.metadata.get("page", 1)
+            content = doc.page_content.strip()
+            found_sentences = re.split(r'(?<=[.!?])\s+', content)
+            for s in found_sentences:
+                s = s.strip()
+                if 40 < len(s) < 250:
+                    sentences.append((s, page_num))
+                    
+        definitions = []
+        for s, p in sentences:
+            if any(indicator in s.lower() for indicator in ["is a", "is the", "are the", "refers to", "defined as", "means", "consists of"]):
+                definitions.append((s, p))
+                
+        if not definitions:
+            definitions = sentences[:10]
+            
+        for s, p in definitions[:count]:
+            parts = re.split(r'\s+is\s+|\s+refers\s+to\s+|\s+defined\s+as\s+|\s+means\s+', s, maxsplit=1, flags=re.IGNORECASE)
+            if len(parts) == 2:
+                q = f"What is {parts[0].strip()}?"
+                a = parts[1].strip().capitalize()
+            else:
+                q = "Explain the key concept described in the text."
+                a = s
+                
+            if a.endswith('.'):
+                a = a[:-1]
+            a = a + "."
+            
+            cards.append({
+                "id": str(uuid.uuid4()),
+                "question": q,
+                "answer": a,
+                "source_page": p,
+                "box": 1,
+                "next_review": now_ts()
+            })
+            
+    return cards
+
+
+@app.post("/sessions/flashcards/generate")
+def generate_flashcards(data: FlashcardGenerateRequest):
+    cleanup_expired_sessions()
+    session_id = str(data.session_id)
+    
+    with sessions_lock:
+        session = _touch_session_unlocked(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+        _require_session_secret(session, data.session_secret)
+        
+        if session.get("flashcards"):
+            return {"flashcards": session["flashcards"]}
+            
+        if "lock" not in session:
+            session["lock"] = threading.Lock()
+        session_lock = session["lock"]
+        
+        if not session.get("vectorstore"):
+            try:
+                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), get_embedding_model(), allow_dangerous_deserialization=True)
+            except Exception as e:
+                logger.error(f"Failed to lazy load vectorstore: {e}")
+                raise HTTPException(status_code=500, detail="Failed to load session index.")
+        vectorstore = session["vectorstore"]
+        
+    with session_lock:
+        indexed_documents = collect_index_documents(vectorstore)
+        
+    if not indexed_documents:
+        return {"flashcards": []}
+        
+    count = data.count or 10
+    cards = generate_flashcards_from_text(indexed_documents, count)
+    
+    with sessions_lock:
+        session = sessions.get(session_id)
+        if session:
+            session["flashcards"] = cards
+            _dirty_sessions.add(session_id)
+            
+    return {"flashcards": cards}
+
+
+@app.post("/sessions/flashcards/update-progress")
+def update_flashcard_progress(data: FlashcardProgressRequest):
+    cleanup_expired_sessions()
+    session_id = str(data.session_id)
+    
+    with sessions_lock:
+        session = _touch_session_unlocked(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+        _require_session_secret(session, data.session_secret)
+        
+        flashcards = session.get("flashcards", [])
+        card_found = False
+        
+        for card in flashcards:
+            if card.get("id") == data.card_id:
+                rating = data.rating.lower().strip()
+                current_box = card.get("box", 1)
+                
+                if rating == "easy":
+                    new_box = min(current_box + 1, 5)
+                elif rating == "good":
+                    new_box = current_box
+                else:
+                    new_box = 1
+                    
+                intervals = {1: 0, 2: 60, 3: 300, 4: 1800, 5: 86400}
+                interval = intervals.get(new_box, 0)
+                
+                card["box"] = new_box
+                card["next_review"] = now_ts() + interval
+                card_found = True
+                break
+                
+        if not card_found:
+            raise HTTPException(status_code=404, detail="Flashcard not found.")
+            
+        session["flashcards"] = flashcards
+        _dirty_sessions.add(session_id)
+        
+    return {"status": "success", "flashcards": flashcards}
+>>>>>>> master
 
 if __name__ == "__main__":
     is_production = os.getenv("ENVIRONMENT", "development").lower() == "production"
