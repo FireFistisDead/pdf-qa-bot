@@ -167,7 +167,7 @@ const DocumentsView = () => {
                 
                 <div className="slate-body">
                   <h3 className="slate-name" title={doc.name}>{doc.name}</h3>
-                  <p className="slate-meta">{doc.size} // {doc.date}</p>
+                  <p className="slate-meta">{doc.size} {'//'} {doc.date}</p>
                 </div>
 
                 <div className="slate-actions">
