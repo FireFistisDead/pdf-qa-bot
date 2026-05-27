@@ -25,7 +25,9 @@ function MainApp() {
   const [pdfJumpTarget, setPdfJumpTarget] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
-  const [rightPanelTab, setRightPanelTab] = useState("chat");
+  // Knowledge gap results keyed by document_id; lives in app state so switching
+  // PDF tabs preserves each document's map independently.
+  const [knowledgeGapResults, setKnowledgeGapResults] = useState({});
 
   // ── Credential storage key ────────────────────────────────────────────────
   // Session credentials (session_id + session_secret) are stored in
@@ -341,6 +343,21 @@ const handleOpenSource = (source) => {
   const currentPdfSessionId = currentPdf?.session_id || null;
   const currentPdfSessionSecret = currentPdf?.session_secret || null;
   const currentPdfName = currentPdf?.name || null;
+  const currentDocumentId = currentPdf?.document_id || null;
+
+  // The knowledge gap result for the currently-active document (null if none run yet).
+  const currentKnowledgeGapResult =
+    currentDocumentId && knowledgeGapResults[currentDocumentId]
+      ? knowledgeGapResults[currentDocumentId]
+      : null;
+
+  const handleKnowledgeGapResult = (result) => {
+    if (!currentDocumentId) return;
+    setKnowledgeGapResults((prev) => ({
+      ...prev,
+      [currentDocumentId]: result,
+    }));
+  };
 
   // Compute Heatmap Data for the current document
   const heatmapCounts = {};
@@ -443,69 +460,21 @@ const handleOpenSource = (source) => {
                   />
                 </Col>
                 <Col md={5}>
-                  <div style={{ display: "flex", gap: "8px", marginBottom: "16px" }}>
-                    <button
-                      onClick={() => setRightPanelTab("chat")}
-                      style={{
-                        flex: 1,
-                        padding: "10px 16px",
-                        borderRadius: "14px",
-                        border: "none",
-                        background: rightPanelTab === "chat" ? "linear-gradient(135deg, #8B5CF6 0%, #6366F1 100%)" : "rgba(255,255,255,0.05)",
-                        color: "white",
-                        cursor: "pointer",
-                        fontWeight: 700,
-                        boxShadow: rightPanelTab === "chat" ? "0 4px 15px rgba(139, 92, 246, 0.2)" : "none",
-                        transition: "all 0.3s ease",
-                      }}
-                    >
-                      💬 Discussion
-                    </button>
-                    <button
-                      onClick={() => setRightPanelTab("study")}
-                      disabled={!selectedPdf}
-                      style={{
-                        flex: 1,
-                        padding: "10px 16px",
-                        borderRadius: "14px",
-                        border: "none",
-                        background: rightPanelTab === "study" ? "linear-gradient(135deg, #8B5CF6 0%, #6366F1 100%)" : "rgba(255,255,255,0.05)",
-                        color: "white",
-                        cursor: !selectedPdf ? "not-allowed" : "pointer",
-                        fontWeight: 700,
-                        opacity: !selectedPdf ? 0.5 : 1,
-                        boxShadow: rightPanelTab === "study" ? "0 4px 15px rgba(139, 92, 246, 0.2)" : "none",
-                        transition: "all 0.3s ease",
-                      }}
-                    >
-                      🧠 Study Hub
-                    </button>
-                  </div>
-
-                  {rightPanelTab === "chat" ? (
-                    <ChatPanel
-                      darkMode={darkMode}
-                      currentChat={currentChat}
-                      selectedPdf={selectedPdf}
-                      currentPdfName={currentPdfName}
-                      currentPdfSessionId={currentPdfSessionId}
-                      currentPdfSessionSecret={currentPdfSessionSecret}
-                      onAppendMessage={handleAppendMessage}
-                      onOpenSource={handleOpenSource}
-                      onUpdateLastBotMessage={handleUpdateLastBotMessage}
-                      handleClearChat={handleClearChat}
-                    />
-                  ) : (
-                    <StudyHub
-                      darkMode={darkMode}
-                      selectedPdf={selectedPdf}
-                      currentPdfSessionId={currentPdfSessionId}
-                      currentPdfSessionSecret={currentPdfSessionSecret}
-                      currentPdfName={currentPdfName}
-                      pdfs={pdfs}
-                      setPdfs={setPdfs}
-                    />
-                  )}
+                  <ChatPanel
+                    darkMode={darkMode}
+                    currentChat={currentChat}
+                    selectedPdf={selectedPdf}
+                    currentPdfName={currentPdfName}
+                    currentPdfSessionId={currentPdfSessionId}
+                    currentPdfSessionSecret={currentPdfSessionSecret}
+                    currentDocumentId={currentDocumentId}
+                    knowledgeGapResult={currentKnowledgeGapResult}
+                    onKnowledgeGapResult={handleKnowledgeGapResult}
+                    onAppendMessage={handleAppendMessage}
+                    onOpenSource={handleOpenSource}
+                    onUpdateLastBotMessage={handleUpdateLastBotMessage}
+                    handleClearChat={handleClearChat}
+                  />
                 </Col>
               </Row>
             </Col>
@@ -528,6 +497,7 @@ function App() {
           <Route path="/signin" element={<SignIn />} />
           <Route path="/signup" element={<SignUp />} />
           <Route path="/dashboard/*" element={<Dashboard />} />
+          <Route path="/studyhub" element={<StudyHub />} />
         </Routes>
       </BrowserRouter>
     </AuthProvider>
