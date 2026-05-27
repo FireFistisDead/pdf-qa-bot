@@ -18,6 +18,7 @@ const MODE_OPTIONS = [
 const ChatPanel = ({
   darkMode,
   currentChat,
+  currentSavedNotes,
   selectedPdf,
   currentPdfName,
   currentPdfSessionId,
@@ -25,6 +26,8 @@ const ChatPanel = ({
   onUpdateLastBotMessage,
   onAppendMessage,
   onOpenSource,
+  onSaveNote,
+  onRemoveSavedNote,
   handleClearChat,
 }) => {
   const [question, setQuestion] = useState("");
@@ -210,6 +213,59 @@ const askQuestion = async () => {
             paddingRight: "6px",
           }}
         >
+          {currentSavedNotes && currentSavedNotes.length > 0 && (
+            <div
+              style={{
+                marginBottom: "18px",
+                padding: "16px",
+                borderRadius: "20px",
+                background: darkMode ? "rgba(255,255,255,0.06)" : "#FEFBFE",
+                border: darkMode ? "1px solid rgba(255,255,255,0.08)" : "1px solid rgba(0,0,0,0.08)",
+              }}
+            >
+              <div className="d-flex justify-content-between align-items-start mb-3">
+                <div>
+                  <strong>Saved Notes</strong>
+                  <div style={{ fontSize: "12px", color: darkMode ? "#D1D5DB" : "#6B7280" }}>
+                    Quickly revisit important assistant answers from this session.
+                  </div>
+                </div>
+                <span style={{ fontSize: "12px", color: darkMode ? "#E5E7EB" : "#374151" }}>
+                  {currentSavedNotes.length} saved
+                </span>
+              </div>
+              <div style={{ display: "grid", gap: "12px" }}>
+                {currentSavedNotes.map((note) => (
+                  <div
+                    key={note.id}
+                    style={{
+                      padding: "14px",
+                      borderRadius: "18px",
+                      background: darkMode ? "rgba(255,255,255,0.05)" : "#fff",
+                      border: darkMode ? "1px solid rgba(255,255,255,0.08)" : "1px solid rgba(0,0,0,0.06)",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", marginBottom: "10px" }}>
+                      <div style={{ fontSize: "13px", color: darkMode ? "#A1A1AA" : "#6B7280" }}>
+                        Saved from {note.mode === "default" ? "Standard" : note.mode.charAt(0).toUpperCase() + note.mode.slice(1)} answer
+                      </div>
+                      <button
+                        className="btn btn-sm btn-outline-secondary"
+                        type="button"
+                        onClick={() => onRemoveSavedNote?.(note.id)}
+                        style={{ fontSize: "12px", padding: "4px 10px" }}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    <div style={{ whiteSpace: "pre-wrap", color: darkMode ? "#E5E7EB" : "#111", fontSize: "14px" }}>
+                      {note.text}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           {currentChat.length > 0 ? (
             <>
               <div className="d-flex justify-content-start mb-4">
@@ -261,6 +317,11 @@ const askQuestion = async () => {
                   msg={msg}
                   darkMode={darkMode}
                   onOpenSource={onOpenSource}
+                  onSave={() => onSaveNote?.(msg)}
+                  isSaved={
+                    msg.role === "bot" &&
+                    currentSavedNotes?.some((note) => note.text === msg.text)
+                  }
                 />
               ))}
 

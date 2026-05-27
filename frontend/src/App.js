@@ -20,7 +20,7 @@ import { extractApiErrorMessage, uploadPdfApi, getSessionsApi } from "./services
 pdfjs.GlobalWorkerOptions.workerSrc = `${process.env.PUBLIC_URL}/pdf.worker.min.js`;
 
 function MainApp() {
-  const [pdfs, setPdfs] = useState([]); // {id, name, document_id, url, chat: [], session_id: ""}
+  const [pdfs, setPdfs] = useState([]); // {id, name, document_id, url, chat: [], savedNotes: [], session_id: ""}
   const [selectedPdf, setSelectedPdf] = useState(null);
   const [pdfJumpTarget, setPdfJumpTarget] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -158,6 +158,7 @@ function MainApp() {
               document_id: doc?.document_id || null,
               url: null,
               chat: s.chat || [],
+              savedNotes: [],
               session_id: s.session_id,
               session_secret: secretById.get(s.session_id) || null,
             };
@@ -225,6 +226,7 @@ function MainApp() {
       document_id: data.document?.document_id || null,
       url,
       chat: [],
+      savedNotes: [],
       session_id: data.session_id,
       session_secret: data.session_secret || null,
     },
@@ -275,6 +277,49 @@ function MainApp() {
       ),
     );
   };
+  const handleSaveNote = (message) => {
+    if (!message || message.role !== "bot" || message.streaming) return;
+    setPdfs((prev) =>
+      prev.map((pdf) => {
+        if (pdf.id !== selectedPdf) return pdf;
+        const alreadySaved = pdf.savedNotes?.some(
+          (note) => note.text === message.text,
+        );
+        if (alreadySaved) {
+          toast.success("This response is already saved.");
+          return pdf;
+        }
+        const nextNote = {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          text: message.text,
+          sources: message.sources || [],
+          mode: message.mode || "default",
+          savedAt: new Date().toISOString(),
+        };
+        toast.success("Answer saved for later reference.");
+        return {
+          ...pdf,
+          savedNotes: [...(pdf.savedNotes || []), nextNote],
+        };
+      }),
+    );
+  };
+
+  const handleRemoveSavedNote = (noteId) => {
+    setPdfs((prev) =>
+      prev.map((pdf) =>
+        pdf.id === selectedPdf
+          ? {
+              ...pdf,
+              savedNotes: (pdf.savedNotes || []).filter(
+                (note) => note.id !== noteId,
+              ),
+            }
+          : pdf,
+      ),
+    );
+  };
+
   const handleClearChat = () => {
   setPdfs((prev) =>
     prev.map((pdf) =>
@@ -486,6 +531,7 @@ const handleOpenSource = (source) => {
                     <ChatPanel
                       darkMode={darkMode}
                       currentChat={currentChat}
+                      currentSavedNotes={currentPdf?.savedNotes || []}
                       selectedPdf={selectedPdf}
                       currentPdfName={currentPdfName}
                       currentPdfSessionId={currentPdfSessionId}
@@ -493,6 +539,8 @@ const handleOpenSource = (source) => {
                       onAppendMessage={handleAppendMessage}
                       onOpenSource={handleOpenSource}
                       onUpdateLastBotMessage={handleUpdateLastBotMessage}
+                      onSaveNote={handleSaveNote}
+                      onRemoveSavedNote={handleRemoveSavedNote}
                       handleClearChat={handleClearChat}
                     />
                   ) : (

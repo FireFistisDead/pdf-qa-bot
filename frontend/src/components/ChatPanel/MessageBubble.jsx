@@ -46,7 +46,7 @@ const MODE_BADGE = {
   concise:  { label: "Concise",   bg: "rgba(249,115,22,0.15)", color: "#F97316" },
 };
 
-const MessageBubble = ({ msg, darkMode, onOpenSource }) => {
+const MessageBubble = ({ msg, darkMode, onOpenSource, onSave, isSaved }) => {
 
   const getSourceLabel = (source) => source.document || "Source Document";
   const hasOpenablePage = (source) => Boolean(source.page && source.document);
@@ -127,6 +127,28 @@ const MessageBubble = ({ msg, darkMode, onOpenSource }) => {
             </div>
           );
         })()}
+
+        {msg.role === "bot" && !msg.streaming && (
+          <div style={{ marginTop: "8px" }}>
+            <button
+              type="button"
+              onClick={onSave}
+              disabled={isSaved || !onSave}
+              style={{
+                fontSize: "12px",
+                fontWeight: 600,
+                color: isSaved ? "#6B7280" : "#1F2937",
+                background: isSaved ? "rgba(229,231,235,0.88)" : "rgba(251,191,36,0.12)",
+                border: "none",
+                padding: "6px 12px",
+                borderRadius: "999px",
+                cursor: isSaved || !onSave ? "default" : "pointer",
+              }}
+            >
+              {isSaved ? "✔ Saved" : "⭐ Save Answer"}
+            </button>
+          </div>
+        )}
 
         {msg.role === "bot" && !msg.streaming && msg.sources?.length > 0 && (() => {
           // deduplicate sources by document and page
