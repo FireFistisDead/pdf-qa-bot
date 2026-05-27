@@ -113,22 +113,16 @@ def save_sessions_unlocked():
 
         for sid, meta in sessions.items():
 
-            safe_cache = {}
-
-            for key, value in meta.get("retrieval_cache", {}).items():
-                if isinstance(value, dict):
-                    safe_cache[key] = value
-
             # Strip static_url from persisted document entries. The field pointed to
-        # a server-side file path that is deleted immediately after indexing.
-        # Keeping it on disk would cause the frontend to construct a URL that
-        # 404s and, if the /uploads static route were ever re-enabled, could
-        # expose the raw PDF to unauthenticated callers.
-        clean_docs = [
-            {k: v for k, v in doc.items() if k != "static_url"}
-            for doc in meta.get("documents", [])
-        ]
-        data[sid] = {
+            # a server-side file path that is deleted immediately after indexing.
+            # Keeping it on disk would cause the frontend to construct a URL that
+            # 404s and, if the /uploads static route were ever re-enabled, could
+            # expose the raw PDF to unauthenticated callers.
+            clean_docs = [
+                {k: v for k, v in doc.items() if k != "static_url"}
+                for doc in meta.get("documents", [])
+            ]
+            data[sid] = {
                 "created_at": meta.get("created_at"),
                 "last_accessed": meta.get("last_accessed"),
                 "documents": clean_docs,
