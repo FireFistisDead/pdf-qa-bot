@@ -26,6 +26,7 @@ const ChatPanel = ({
   onAppendMessage,
   onOpenSource,
   handleClearChat,
+  onSaveAnswer,
 }) => {
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
@@ -261,6 +262,7 @@ const askQuestion = async () => {
                   msg={msg}
                   darkMode={darkMode}
                   onOpenSource={onOpenSource}
+                  onSaveAnswer={onSaveAnswer}
                 />
               ))}
 

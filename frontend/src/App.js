@@ -26,6 +26,7 @@ function MainApp() {
   const [uploading, setUploading] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
   const [rightPanelTab, setRightPanelTab] = useState("chat");
+  const [savedNotes, setSavedNotes] = useState([]);
 
   // ── Credential storage key ────────────────────────────────────────────────
   // Session credentials (session_id + session_secret) are stored in
@@ -286,6 +287,32 @@ function MainApp() {
   setPdfJumpTarget(null);
 };
 
+// Mark a bot message as saved and add it to the savedNotes list.
+ const handleSaveAnswer = (msg) => {
+   const alreadySaved = savedNotes.some((n) => n.text === msg.text);
+   if (alreadySaved) {
+     setSavedNotes((prev) => prev.filter((n) => n.text !== msg.text));
+   } else {
+     const preview = msg.text.replace(/[#*`>\-]/g, "").trim().slice(0, 60);
+     setSavedNotes((prev) => [
+       ...prev,
+       { id: Date.now(), text: msg.text, label: preview || "Saved Answer" },
+     ]);
+   }
+   setPdfs((prev) =>
+     prev.map((pdf) => {
+       if (pdf.id !== selectedPdf) return pdf;
+       return {
+        ...pdf,
+         chat: pdf.chat.map((m) =>
+           m.text === msg.text && m.role === "bot"
+             ? { ...m, saved: !m.saved }
+             : m,
+         ),
+       };
+     }),
+   );
+ };
 const handleOpenSource = (source) => {
     const matchingPdf = pdfs.find(
       (pdf) =>
@@ -480,6 +507,39 @@ const handleOpenSource = (source) => {
                     >
                       🧠 Study Hub
                     </button>
+                    <button
+                      onClick={() => setRightPanelTab("saved")}
+                      style={{
+                        flex: 1,
+                        padding: "10px 16px",
+                        borderRadius: "14px",
+                        border: "none",
+                        background: rightPanelTab === "saved"
+                          ? "linear-gradient(135deg, #EAB308 0%, #CA8A04 100%)"
+                          : "rgba(255,255,255,0.05)",
+                        color: "white",
+                        cursor: "pointer",
+                        fontWeight: 700,
+                        boxShadow: rightPanelTab === "saved"
+                          ? "0 4px 15px rgba(234, 179, 8, 0.3)"
+                          : "none",
+                        transition: "all 0.3s ease",
+                        position: "relative",
+                      }}
+                    >
+                      ⭐ Saved Notes
+                      {savedNotes.length > 0 && (
+                        <span style={{
+                          position: "absolute", top: "6px", right: "8px",
+                          background: "#EF4444", color: "white",
+                          borderRadius: "50%", width: "18px", height: "18px",
+                          fontSize: "10px", fontWeight: 700,
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                        }}>
+                          {savedNotes.length}
+                        </span>
+                      )}
+                    </button>
                   </div>
 
                   {rightPanelTab === "chat" ? (
@@ -494,6 +554,7 @@ const handleOpenSource = (source) => {
                       onOpenSource={handleOpenSource}
                       onUpdateLastBotMessage={handleUpdateLastBotMessage}
                       handleClearChat={handleClearChat}
+                      onSaveAnswer={handleSaveAnswer}
                     />
                   ) : (
                     <StudyHub

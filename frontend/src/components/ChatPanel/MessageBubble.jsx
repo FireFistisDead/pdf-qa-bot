@@ -46,7 +46,7 @@ const MODE_BADGE = {
   concise:  { label: "Concise",   bg: "rgba(249,115,22,0.15)", color: "#F97316" },
 };
 
-const MessageBubble = ({ msg, darkMode, onOpenSource }) => {
+const MessageBubble = ({ msg, darkMode, onOpenSource, onSaveAnswer }) => {
 
   const getSourceLabel = (source) => source.document || "Source Document";
   const hasOpenablePage = (source) => Boolean(source.page && source.document);
@@ -187,6 +187,27 @@ const MessageBubble = ({ msg, darkMode, onOpenSource }) => {
             </div>
           );
         })()}
+
+        {msg.role === "bot" && !msg.streaming && msg.text && (
+            <div style={{ marginTop: "10px" }}>
+               <button
+                onClick={() => onSaveAnswer?.(msg)}
+                title="Save this answer to Saved Notes"
+                style={{
+                  padding: "3px 10px",
+                  borderRadius: "12px",
+                  background: msg.saved ? "rgba(234,179,8,0.15)" : "transparent",
+                  border: msg.saved ? "1px solid rgba(234,179,8,0.5)" : "1px solid rgba(0,0,0,0.12)",
+                  color: msg.saved ? "#EAB308" : "#6B7280",
+                  fontSize: "11px", fontWeight: 600, cursor: "pointer",
+                  display: "inline-flex", alignItems: "center", gap: "4px",
+                  transition: "all 0.15s ease",
+               }}
+            >
+              {msg.saved ? "⭐ Saved" : "☆ Save Answer"}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
