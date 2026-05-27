@@ -544,7 +544,7 @@ describe("route error responses", () => {
     }
   });
 
-  test("POST /upload with non-PDF MIME type returns 400", async () => {
+  test("POST /upload with non-PDF MIME type returns 415", async () => {
     const formData = new FormData();
     formData.append(
       "file",
@@ -556,7 +556,7 @@ describe("route error responses", () => {
       method: "POST",
       body: formData,
     });
-    assert.equal(res.status, 400);
+    assert.equal(res.status, 415, "Non-PDF MIME types should return 415 Unsupported Media Type");
   });
 
   test("POST /upload with only session_secret (no session_id) returns 403", async () => {
