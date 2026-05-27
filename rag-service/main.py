@@ -631,6 +631,16 @@ def persist_vectorstore(session_id: str, vectorstore):
     return session_dir
 
 
+def _load_vectorstore_for_session_unlocked(session_id: str, meta: dict):
+    session_dir = meta.get("session_dir") or get_session_dir(session_id)
+    meta["session_dir"] = session_dir
+    return FAISS.load_local(
+        session_dir,
+        get_embedding_model(),
+        allow_dangerous_deserialization=True,
+    )
+
+
 def _recover_session_unlocked(session_id: str):
     registry = read_session_registry()
     entry = registry.get(session_id)
@@ -2557,7 +2567,7 @@ def ask_question(data: Question):
         session_lock = session["lock"]
         if not session.get("vectorstore"):
             try:
-                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), get_embedding_model(), allow_dangerous_deserialization=True)
+                session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
             except Exception as e:
                 logger.error(f"Failed to lazy load vectorstore: {e}")
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
@@ -2949,11 +2959,7 @@ def ask_question_stream(data: Question):
         session_lock = session["lock"]
         if not session.get("vectorstore"):
             try:
-                session["vectorstore"] = FAISS.load_local(
-                    str(FAISS_DIR / session_id),
-                    get_embedding_model(),
-                    allow_dangerous_deserialization=True,
-                )
+                session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
             except Exception as exc:
                 logger.error("Failed to lazy load vectorstore session_id=%s error=%s", session_id, exc)
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
@@ -3179,7 +3185,7 @@ def summarize_pdf(data: SummarizeRequest):
         session_lock = session["lock"]
         if not session.get("vectorstore"):
             try:
-                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), get_embedding_model(), allow_dangerous_deserialization=True)
+                session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
             except Exception as e:
                 logger.error(f"Failed to lazy load vectorstore: {e}")
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
@@ -3573,7 +3579,7 @@ def generate_flashcards(data: FlashcardGenerateRequest):
         
         if not session.get("vectorstore"):
             try:
-                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), get_embedding_model(), allow_dangerous_deserialization=True)
+                session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
             except Exception as e:
                 logger.error(f"Failed to lazy load vectorstore: {e}")
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
