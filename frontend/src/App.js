@@ -497,6 +497,7 @@ function App() {
           <Route path="/signin" element={<SignIn />} />
           <Route path="/signup" element={<SignUp />} />
           <Route path="/dashboard/*" element={<Dashboard />} />
+          <Route path="/studyhub" element={<StudyHub />} />
         </Routes>
       </BrowserRouter>
     </AuthProvider>

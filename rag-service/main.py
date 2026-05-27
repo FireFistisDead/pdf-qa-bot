@@ -3200,7 +3200,7 @@ def summarize_pdf(data: SummarizeRequest):
 
     return {"summary": build_session_summary(uploaded_documents, indexed_documents)}
 
-<<<<<<< feat/knowledge-gap
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Knowledge Gap Detection
@@ -3459,7 +3459,7 @@ def knowledge_gaps(data: KnowledgeGapsRequest):
         "short_document": is_short,
     }
 
-=======
+
 def generate_flashcards_from_text(indexed_docs, count):
     text_content = ""
     sorted_docs = sorted(indexed_docs, key=lambda x: (x.metadata.get("page", 0), x.metadata.get("chunk_index", 0)))
@@ -3638,7 +3638,7 @@ def update_flashcard_progress(data: FlashcardProgressRequest):
         _dirty_sessions.add(session_id)
         
     return {"status": "success", "flashcards": flashcards}
->>>>>>> master
+
 
 if __name__ == "__main__":
     is_production = os.getenv("ENVIRONMENT", "development").lower() == "production"
