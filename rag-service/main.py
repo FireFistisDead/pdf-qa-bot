@@ -113,22 +113,16 @@ def save_sessions_unlocked():
 
         for sid, meta in sessions.items():
 
-            safe_cache = {}
-
-            for key, value in meta.get("retrieval_cache", {}).items():
-                if isinstance(value, dict):
-                    safe_cache[key] = value
-
             # Strip static_url from persisted document entries. The field pointed to
-        # a server-side file path that is deleted immediately after indexing.
-        # Keeping it on disk would cause the frontend to construct a URL that
-        # 404s and, if the /uploads static route were ever re-enabled, could
-        # expose the raw PDF to unauthenticated callers.
-        clean_docs = [
-            {k: v for k, v in doc.items() if k != "static_url"}
-            for doc in meta.get("documents", [])
-        ]
-        data[sid] = {
+            # a server-side file path that is deleted immediately after indexing.
+            # Keeping it on disk would cause the frontend to construct a URL that
+            # 404s and, if the /uploads static route were ever re-enabled, could
+            # expose the raw PDF to unauthenticated callers.
+            clean_docs = [
+                {k: v for k, v in doc.items() if k != "static_url"}
+                for doc in meta.get("documents", [])
+            ]
+            data[sid] = {
                 "created_at": meta.get("created_at"),
                 "last_accessed": meta.get("last_accessed"),
                 "documents": clean_docs,
@@ -2950,7 +2944,7 @@ def ask_question_stream(data: Question):
             try:
                 session["vectorstore"] = FAISS.load_local(
                     str(FAISS_DIR / session_id),
-                    embedding_model,
+                    get_embedding_model(),
                     allow_dangerous_deserialization=True,
                 )
             except Exception as exc:
@@ -3116,11 +3110,29 @@ def ask_question_stream(data: Question):
             generation_thread.join(timeout=180)
 
             full_answer = "".join(full_answer_parts).strip()
-            citation_sources = [citation_source_for_document(doc, idx) for idx, doc in enumerate(docs)]
+
+            framed = apply_mode_framing(
+                full_answer,
+                question,
+                mode,
+                docs,
+                context,
+            )
+
+            if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
+                framed = full_answer
+
+            citation_sources = [
+                citation_source_for_document(doc, idx)
+                for idx, doc in enumerate(docs)
+            ]
+
             with sessions_lock:
                 current_session = sessions.get(session_id)
+
                 if current_session:
                     current_session.setdefault("retrieval_cache", {})
+
                     _append_chat_and_mark_dirty(session_id, {
                         "question": question,
                         "answer": framed,

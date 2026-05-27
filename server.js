@@ -294,7 +294,35 @@ app.use(banGuard);
 app.use(globalLimiter);
 app.use("/api/auth", authRoutes);
 
-const MAX_PDF_SIZE_BYTES = 20 * 1024 * 1024;
+// ─── File Size Limits ──────────────────────────────────────────────────────────
+// MAX_UPLOAD_SIZE_MB controls the maximum PDF file size allowed per upload.
+// Default is 50 MB. Set to a lower value in resource-constrained environments.
+// Multer will automatically reject files exceeding this limit with 413 Payload Too Large.
+//
+// Environment variable validation: Ensures the value is a positive integer and rejects
+// malformed strings like "50gb" or "50.5mb" that parseInt would silently truncate.
+const validateUploadSizeConfig = () => {
+  const rawValue = process.env.MAX_UPLOAD_SIZE_MB || "50";
+  // Regex: match only pure positive integers (no units, decimals, or garbage)
+  const integerRegex = /^\d+$/;
+  if (!integerRegex.test(rawValue.trim())) {
+    throw new Error(
+      `MAX_UPLOAD_SIZE_MB must be a positive integer without units. ` +
+      `Received: "${rawValue}". Examples: 50, 100, 200 (not "50mb" or "50.5").`
+    );
+  }
+  const parsed = parseInt(rawValue, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(
+      `MAX_UPLOAD_SIZE_MB must be a positive integer. ` +
+      `Received: ${parsed}. Please set a value like 50, 100, or 200.`
+    );
+  }
+  return parsed;
+};
+const MAX_UPLOAD_SIZE_MB = validateUploadSizeConfig();
+const MAX_PDF_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
+
 const UPLOADS_DIR = path.resolve("uploads");
 const isDevelopment = process.env.NODE_ENV !== "production";
 
@@ -362,7 +390,11 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: MAX_PDF_SIZE_BYTES },
+  limits: {
+    fileSize: MAX_PDF_SIZE_BYTES,
+    // Additional limits to prevent abuse
+    files: 1, // Only allow one file per request
+  },
   fileFilter: (req, file, cb) => {
     const isPdfMime = file.mimetype === "application/pdf";
     const isPdfExtension = file.originalname.toLowerCase().endsWith(".pdf");
@@ -454,6 +486,67 @@ const ragAuthHeaders = () =>
 const normalizeSessionSecret = (value) =>
   typeof value === "string" ? value.trim() || null : null;
 
+// ─── Multer Error Handler ───────────────────────────────────────────────────────
+// Catches file size violations (413 Payload Too Large) and other multer errors.
+// CWE-209 Mitigation: Sanitizes error messages to prevent leaking internal implementation
+// details or server configuration. Verbose technical details are logged internally for
+// debugging but never sent to the client.
+// This middleware must be placed after upload.single() to catch multer-specific errors.
+const multerErrorHandler = (err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      // CWE-209: Don't expose err.limit or raw Multer internals to client.
+      // Multer stops processing immediately when size limit is exceeded, so exact file
+      // size is unknown. Log technical details internally; return user-friendly message.
+      console.warn(
+        `[upload] File size limit exceeded. Limit: ${MAX_PDF_SIZE_BYTES} bytes, ` +
+        `Multer error code: ${err.code}, Message: ${err.message}`
+      );
+      return res.status(413).json({
+        error: "File too large",
+        message: "Upload failed: File too large",
+      });
+    } else if (err.code === "LIMIT_FILE_COUNT") {
+      console.warn(`[upload] Multiple files rejected. Multer code: ${err.code}`);
+      return res.status(409).json({
+        error: "Too many files",
+        message: "Only one PDF file is allowed per upload request.",
+      });
+    } else if (err.code === "LIMIT_PART_COUNT") {
+      console.warn(`[upload] Too many form parts. Multer code: ${err.code}`);
+      return res.status(409).json({
+        error: "Too many parts",
+        message: "The form request contains too many fields. Please try again.",
+      });
+    }
+    // Generic multer error: Log technical details, return sanitized message (CWE-209)
+    console.error(`[upload] Multer error: ${err.code} - ${err.message}`);
+    return res.status(400).json({
+      error: "Upload failed",
+      message: "An error occurred while processing your upload. Please try again.",
+    });
+  }
+
+  if (err && err.message && err.message.includes("Only PDF files are allowed")) {
+    console.warn(`[upload] Invalid file type attempted: ${err.message}`);
+    return res.status(415).json({
+      error: "Invalid file type",
+      message: "Only PDF files are allowed. Please upload a valid PDF document.",
+    });
+  }
+
+  // Unhandled error: Log for debugging, return safe generic message (CWE-209)
+  if (err && isDevelopment) {
+    console.error("[upload] Unhandled error:", err);
+  } else if (err) {
+    // Production: Log error but don't expose details
+    console.error("[upload] Unhandled upload error");
+  }
+
+  // Pass other errors to Express error handler
+  next(err);
+};
+
 const validateSessionExtension = async (sessionId, sessionSecret) => {
   if (!sessionId) {
     return {
@@ -495,7 +588,7 @@ const validateSessionExtension = async (sessionId, sessionSecret) => {
   }
 };
 
-app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
+app.post("/upload", uploadLimiter, upload.single("file"), multerErrorHandler, async (req, res) => {
   const uploadedFilePath = req.file?.path;
   // CodeQL [js/path-injection] Mitigation: Break taint flow by forcing basename
   const absoluteFilePath = uploadedFilePath
