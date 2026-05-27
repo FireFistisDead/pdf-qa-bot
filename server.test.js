@@ -579,4 +579,47 @@ describe("route error responses", () => {
       `Unexpected error message: ${data.error}`,
     );
   });
+
+  test("POST /api/auth/signup normalizes email case and prevents duplicates", async () => {
+    const timestamp = Date.now();
+    const upperCaseEmail = ` TestUser-${timestamp}@Example.com `;
+    const password = "ValidPassword123!";
+
+    const res1 = await fetch(`${baseUrl}/api/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: upperCaseEmail, password }),
+    });
+    assert.equal(res1.status, 201);
+    
+    const res2 = await fetch(`${baseUrl}/api/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: upperCaseEmail.toLowerCase().trim(), password }),
+    });
+    assert.equal(res2.status, 400);
+    const data = await res2.json();
+    assert.equal(data.message, "User already exists");
+  });
+
+  test("POST /api/auth/login allows mixed-case and whitespace in email", async () => {
+    const timestamp = Date.now();
+    const upperCaseEmail = `TestUser2-${timestamp}@Example.com`;
+    const password = "ValidPassword123!";
+
+    await fetch(`${baseUrl}/api/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: upperCaseEmail, password }),
+    });
+
+    const res = await fetch(`${baseUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: ` testuser2-${timestamp}@example.com `, password }),
+    });
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.ok(data.token);
+  });
 });
