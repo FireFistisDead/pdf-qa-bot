@@ -3116,11 +3116,29 @@ def ask_question_stream(data: Question):
             generation_thread.join(timeout=180)
 
             full_answer = "".join(full_answer_parts).strip()
-            citation_sources = [citation_source_for_document(doc, idx) for idx, doc in enumerate(docs)]
+
+            framed = apply_mode_framing(
+                full_answer,
+                question,
+                mode,
+                docs,
+                context,
+            )
+
+            if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
+                framed = full_answer
+
+            citation_sources = [
+                citation_source_for_document(doc, idx)
+                for idx, doc in enumerate(docs)
+            ]
+
             with sessions_lock:
                 current_session = sessions.get(session_id)
+
                 if current_session:
                     current_session.setdefault("retrieval_cache", {})
+
                     _append_chat_and_mark_dirty(session_id, {
                         "question": question,
                         "answer": framed,
