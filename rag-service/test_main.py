@@ -684,3 +684,57 @@ def test_internal_token_valid_case_sensitive():
     """Token comparison must be case-sensitive — 'Secret' != 'secret'."""
     assert internal_token_valid("Secret", "secret") is False
     assert internal_token_valid("secret", "secret") is True
+
+def test_stream_lazy_load_faiss_uses_get_embedding_model():
+    import main as main_module
+    from unittest.mock import patch, MagicMock
+    import threading
+    from fastapi.testclient import TestClient
+
+    original_embedding_model = main_module.embedding_model
+    main_module.embedding_model = None
+
+    client = TestClient(main_module.app, raise_server_exceptions=False)
+    
+    session_id = "00000000-0000-0000-0000-000000000009"
+    with main_module.sessions_lock:
+        main_module.sessions[session_id] = {
+            "lock": threading.Lock(),
+            "session_secret": "test_secret",
+            "vectorstore": None,
+            "documents": [],
+            "last_accessed": main_module.now_ts(),
+            "created_at": main_module.now_ts(),
+        }
+
+    try:
+        with patch("main.get_embedding_model") as mock_get_embedding_model:
+            with patch("main.FAISS.load_local") as mock_faiss_load:
+                # We expect load_local to raise an exception or succeed, but either way it should call get_embedding_model
+                mock_get_embedding_model.return_value = MagicMock()
+                mock_faiss_load.return_value = MagicMock()
+                
+                client.post(
+                    "/ask/stream",
+                    json={
+                        "question": "test",
+                        "session_id": session_id,
+                        "session_secret": "test_secret"
+                    }
+                )
+                
+                mock_get_embedding_model.assert_called_once()
+                mock_faiss_load.assert_called_once()
+
+                # Verify that load_local was called with the result of get_embedding_model()
+                # FAISS.load_local(get_session_dir(session_id), get_embedding_model(), allow_dangerous_deserialization=True)
+                call_args = mock_faiss_load.call_args
+                assert call_args[0][0] == main_module.get_session_dir(session_id)
+                assert call_args[0][1] == mock_get_embedding_model.return_value
+
+                with main_module.sessions_lock:
+                    assert main_module.sessions[session_id]["session_dir"] == main_module.get_session_dir(session_id)
+    finally:
+        main_module.embedding_model = original_embedding_model
+        with main_module.sessions_lock:
+            main_module.sessions.pop(session_id, None)
