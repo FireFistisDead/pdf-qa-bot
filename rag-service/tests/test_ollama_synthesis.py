@@ -70,6 +70,7 @@ class _NullCtx:
 
 # Set required env vars before importing main so module-level guards pass
 os.environ.setdefault("JWT_SECRET", "test-secret-for-ci")
+os.environ.setdefault("INTERNAL_RAG_TOKEN", "test-secret")
 os.environ.setdefault("OLLAMA_BASE_URL", "http://localhost:11434")
 os.environ.setdefault("OLLAMA_MODEL", "llama3")
 os.environ.setdefault("OLLAMA_TIMEOUT_SECS", "5")

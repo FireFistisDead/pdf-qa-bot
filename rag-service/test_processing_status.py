@@ -59,4 +59,3 @@ def test_processing_status_is_pruned_with_session_ttl(monkeypatch):
     monkeypatch.setattr(main, "SESSION_TTL_MINUTES", 0)
     res = client.get(f"/processing-status/{session_id}?session_secret=s", headers={"X-Internal-Token": "secret"})
     assert res.status_code == 404
-
