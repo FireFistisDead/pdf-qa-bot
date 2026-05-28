@@ -693,7 +693,6 @@ def test_stream_lazy_load_faiss_uses_get_embedding_model():
             "documents": [],
             "last_accessed": main_module.now_ts(),
             "created_at": main_module.now_ts(),
-            "session_dir": main_module.get_session_dir(session_id)
         }
 
     try:
@@ -714,11 +713,15 @@ def test_stream_lazy_load_faiss_uses_get_embedding_model():
                 
                 mock_get_embedding_model.assert_called_once()
                 mock_faiss_load.assert_called_once()
-                
+
                 # Verify that load_local was called with the result of get_embedding_model()
-                # FAISS.load_local(str(FAISS_DIR / session_id), get_embedding_model(), allow_dangerous_deserialization=True)
+                # FAISS.load_local(get_session_dir(session_id), get_embedding_model(), allow_dangerous_deserialization=True)
                 call_args = mock_faiss_load.call_args
+                assert call_args[0][0] == main_module.get_session_dir(session_id)
                 assert call_args[0][1] == mock_get_embedding_model.return_value
+
+                with main_module.sessions_lock:
+                    assert main_module.sessions[session_id]["session_dir"] == main_module.get_session_dir(session_id)
     finally:
         main_module.embedding_model = original_embedding_model
         with main_module.sessions_lock:

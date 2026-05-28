@@ -10,13 +10,7 @@ const crypto = require("crypto");
 const { rateLimit } = require("express-rate-limit");
 const slowDown = require("express-slow-down");
 const helmet = require("helmet");
-const {
-  askSchema,
-  summarizeSchema,
-  sessionsLookupSchema,
-  generateFlashcardsSchema,
-  updateFlashcardProgressSchema,
-} = require("./validators/schemas");
+const { askSchema, summarizeSchema, knowledgeGapsSchema, sessionsLookupSchema } = require("./validators/schemas");
 const { clientIpFromRequest } = require("./security/ip");
 const { createRedisClient } = require("./security/redis");
 const authRoutes = require("./src/routes/authRoutes");
@@ -289,9 +283,9 @@ const inferenceLimiter = rateLimit({
   },
 });
 
-// Apply the ban guard and global limiter to every single route.
-app.use(banGuard);
+// Apply global limiter before ban guard so DB-backed ban checks are rate-limited.
 app.use(globalLimiter);
+app.use(banGuard);
 app.use("/api/auth", authRoutes);
 
 // ─── File Size Limits ──────────────────────────────────────────────────────────
@@ -822,8 +816,8 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
   }
 });
 
-app.post("/sessions/flashcards", inferenceSlowDown, inferenceLimiter, async (req, res) => {
-  const validation = generateFlashcardsSchema.safeParse(req.body);
+app.post("/knowledge-gaps", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+  const validation = knowledgeGapsSchema.safeParse(req.body);
 
   if (!validation.success) {
     return res.status(400).json({
@@ -834,49 +828,19 @@ app.post("/sessions/flashcards", inferenceSlowDown, inferenceLimiter, async (req
 
   try {
     const response = await axios.post(
-      `${RAG_SERVICE_URL}/sessions/flashcards/generate`,
+      `${RAG_SERVICE_URL}/knowledge-gaps`,
       validation.data,
-      { headers: ragAuthHeaders(), timeout: 90000 }
+      { headers: ragAuthHeaders() },
     );
-
+    // Pass the response through as-is — no gateway-layer transformation.
     return res.json(response.data);
   } catch (err) {
     const statusCode = err.response?.status || 500;
-    const details = extractServiceDetails(err, "Failed to generate flashcards");
-    console.error("Flashcards generation failed:", details);
+    const details = extractServiceDetails(err, "Error mapping knowledge gaps");
+    console.error("Knowledge gap mapping failed:", details);
 
     return res.status(statusCode).json({
-      error: typeof details === "string" ? details : "Failed to generate flashcards",
-      details: isDevelopment ? details : "Internal processing error",
-    });
-  }
-});
-
-app.post("/sessions/flashcards/progress", async (req, res) => {
-  const validation = updateFlashcardProgressSchema.safeParse(req.body);
-
-  if (!validation.success) {
-    return res.status(400).json({
-      error: "Validation failed",
-      details: validation.error.flatten(),
-    });
-  }
-
-  try {
-    const response = await axios.post(
-      `${RAG_SERVICE_URL}/sessions/flashcards/update-progress`,
-      validation.data,
-      { headers: ragAuthHeaders() }
-    );
-
-    return res.json(response.data);
-  } catch (err) {
-    const statusCode = err.response?.status || 500;
-    const details = extractServiceDetails(err, "Failed to update flashcard progress");
-    console.error("Flashcard progress update failed:", details);
-
-    return res.status(statusCode).json({
-      error: typeof details === "string" ? details : "Failed to update flashcard progress",
+      error: typeof details === "string" ? details : "Error mapping knowledge gaps",
       details: isDevelopment ? details : "Internal processing error",
     });
   }

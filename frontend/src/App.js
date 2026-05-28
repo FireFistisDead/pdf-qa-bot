@@ -38,6 +38,9 @@ function MainApp() {
   const [savedNotes, setSavedNotes] = useState(() => loadSavedNotes());
   const [highlightedMessageId, setHighlightedMessageId] = useState(null);
   const messageRefs = React.useRef(new Map());
+  // Knowledge gap results keyed by document_id; lives in app state so switching
+  // PDF tabs preserves each document's map independently.
+  const [knowledgeGapResults, setKnowledgeGapResults] = useState({});
 
   // ── Credential storage key ────────────────────────────────────────────────
   // Session credentials (session_id + session_secret) are stored in
@@ -540,6 +543,21 @@ const handleOpenSource = (source) => {
       ];
     });
   }, [currentChatWithIds, currentPdfSessionId, selectedPdf]);
+  const currentDocumentId = currentPdf?.document_id || null;
+
+  // The knowledge gap result for the currently-active document (null if none run yet).
+  const currentKnowledgeGapResult =
+    currentDocumentId && knowledgeGapResults[currentDocumentId]
+      ? knowledgeGapResults[currentDocumentId]
+      : null;
+
+  const handleKnowledgeGapResult = (result) => {
+    if (!currentDocumentId) return;
+    setKnowledgeGapResults((prev) => ({
+      ...prev,
+      [currentDocumentId]: result,
+    }));
+  };
 
   // Compute Heatmap Data for the current document
   const heatmapCounts = {};
@@ -697,6 +715,9 @@ const handleOpenSource = (source) => {
                         currentPdfName={currentPdfName}
                         currentPdfSessionId={currentPdfSessionId}
                         currentPdfSessionSecret={currentPdfSessionSecret}
+                        currentDocumentId={currentDocumentId}
+                        knowledgeGapResult={currentKnowledgeGapResult}
+                        onKnowledgeGapResult={handleKnowledgeGapResult}
                         onAppendMessage={handleAppendMessage}
                         onOpenSource={handleOpenSource}
                         onUpdateLastBotMessage={handleUpdateLastBotMessage}
@@ -740,6 +761,7 @@ function App() {
           <Route path="/signin" element={<SignIn />} />
           <Route path="/signup" element={<SignUp />} />
           <Route path="/dashboard/*" element={<Dashboard />} />
+          <Route path="/studyhub" element={<StudyHub />} />
         </Routes>
       </BrowserRouter>
     </AuthProvider>

@@ -62,6 +62,14 @@ const summarizeSchema = z.object({
   session_secret: sessionSecretSchema,
 });
 
+// Knowledge gap mapping: same auth fields as summarize, plus an optional
+// document_id that scopes analysis to the active document in a multi-doc session.
+const knowledgeGapsSchema = z.object({
+  session_id: uuidSchema,
+  session_secret: sessionSecretSchema,
+  document_id: z.string().optional(),
+});
+
 const sessionsLookupSchema = z.object({
   sessions: z
     .array(
@@ -89,6 +97,7 @@ const updateFlashcardProgressSchema = z.object({
 module.exports = {
   askSchema,
   summarizeSchema,
+  knowledgeGapsSchema,
   sessionsLookupSchema,
   generateFlashcardsSchema,
   updateFlashcardProgressSchema,
