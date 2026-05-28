@@ -31,7 +31,7 @@ after(() => {
 // variable (e.g. fsSync) or broken import exists
 let app, askSchema, summarizeSchema, extractServiceDetails, ragAuthHeaders;
 let clientIpFromRequest, normalizeIp;
-test("module loads without error", () => {
+before(() => {
   process.env.JWT_SECRET = "test-secret-for-ci";
   const mod = require("./server.js");
   app = mod.app;
@@ -41,7 +41,9 @@ test("module loads without error", () => {
   ragAuthHeaders = mod.ragAuthHeaders;
 
   ({ clientIpFromRequest, normalizeIp } = require("./security/ip"));
+});
 
+test("module loads without error", () => {
   assert.ok(typeof app === "function", "app should be an Express app");
   assert.ok(typeof askSchema.safeParse === "function", "askSchema should be a Zod schema");
   assert.ok(typeof summarizeSchema.safeParse === "function", "summarizeSchema should be a Zod schema");
