@@ -16,7 +16,7 @@ const { createRedisClient } = require("./security/redis");
 const authRoutes = require("./src/routes/authRoutes");
 
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
-const INTERNAL_RAG_TOKEN = (process.env.INTERNAL_RAG_TOKEN || "").trim();
+const getInternalRagToken = () => (process.env.INTERNAL_RAG_TOKEN || "").trim();
 const PORT = process.env.PORT || 4000;
 
 const app = express();
@@ -475,14 +475,17 @@ const extractServiceDetails = (err, fallbackMessage = "Upstream service request 
 };
 
 const requireInternalRagToken = () => {
-  if (!INTERNAL_RAG_TOKEN) {
+  if (!getInternalRagToken()) {
     throw new Error("INTERNAL_RAG_TOKEN must be configured for RAG service requests.");
   }
 };
 
 const ragAuthHeaders = () => {
-  requireInternalRagToken();
-  return { "X-Internal-Token": INTERNAL_RAG_TOKEN };
+  const token = getInternalRagToken();
+  if (!token) {
+    throw new Error("INTERNAL_RAG_TOKEN must be configured for RAG service requests.");
+  }
+  return { "X-Internal-Token": token };
 };
 
 const normalizeSessionSecret = (value) =>
@@ -764,7 +767,11 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
     const ragResponse = await axios.post(
       `${RAG_SERVICE_URL}/ask/stream`,
       { question, session_id, session_secret, mode },
-      { responseType: "stream", timeout: 120000 }
+      {
+        headers: ragAuthHeaders(),
+        responseType: "stream",
+        timeout: 120000,
+      }
     );
 
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -924,6 +931,8 @@ if (require.main === module) {
   requireInternalRagToken();
 
   (async () => {
+    requireInternalRagToken();
+
     if (redisConnectPromise) {
       console.log("[redis] connecting for distributed rate limiting...");
       await redisConnectPromise;

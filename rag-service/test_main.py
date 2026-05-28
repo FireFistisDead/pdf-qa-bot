@@ -3,6 +3,8 @@ import sys
 from unittest.mock import MagicMock
 import multiprocessing
 
+os.environ.setdefault("INTERNAL_RAG_TOKEN", "test-secret")
+
 # Prevent downloading/loading Hugging Face embeddings during testing by mocking the class
 import langchain_community.embeddings
 langchain_community.embeddings.HuggingFaceEmbeddings = MagicMock()
@@ -25,6 +27,8 @@ from main import (
     document_dedupe_key,
     citation_source_for_document,
     internal_token_valid,
+    append_chat_exchange,
+    normalize_chat_history,
     require_internal_rag_token_configured,
     normalize_session_id,
     get_session_dir,
@@ -400,35 +404,95 @@ def test_citation_source_for_document_handles_missing_metadata():
     assert source["chunk_index"] == 2
 
 
+def test_normalize_chat_history_converts_legacy_exchange_shape():
+    legacy_chat = [
+        {
+            "question": "What is covered?",
+            "answer": "The document covers onboarding.",
+            "sources": [{"document": "policy.pdf", "page": 1}],
+            "mode": "default",
+        }
+    ]
+
+    assert normalize_chat_history(legacy_chat) == [
+        {"role": "user", "text": "What is covered?"},
+        {
+            "role": "bot",
+            "text": "The document covers onboarding.",
+            "sources": [{"document": "policy.pdf", "page": 1}],
+            "streaming": False,
+            "mode": "default",
+        },
+    ]
+
+
+def test_append_chat_exchange_normalizes_and_persists_message_schema():
+    session = {
+        "chat": [
+            {
+                "question": "Old question?",
+                "answer": "Old answer.",
+                "sources": [],
+            }
+        ]
+    }
+
+    append_chat_exchange(
+        session,
+        "New question?",
+        "New answer.",
+        [{"document": "new.pdf", "page": 2}],
+        None,
+    )
+
+    assert session["chat"] == [
+        {"role": "user", "text": "Old question?"},
+        {
+            "role": "bot",
+            "text": "Old answer.",
+            "sources": [],
+            "streaming": False,
+            "mode": "default",
+        },
+        {"role": "user", "text": "New question?"},
+        {
+            "role": "bot",
+            "text": "New answer.",
+            "sources": [{"document": "new.pdf", "page": 2}],
+            "streaming": False,
+            "mode": "default",
+        },
+    ]
+
+
 # ─── Session dirty-flag and per-session persistence helpers ─────────────────
 
-def test_append_chat_and_mark_dirty_adds_entry_and_marks_dirty():
+def test_mark_session_dirty_marks_dirty_without_mutating_chat():
     from main import (
         sessions,
         _dirty_sessions,
-        _append_chat_and_mark_dirty,
+        _mark_session_dirty,
         sessions_lock,
     )
     import threading
     sid = "test-dirty-" + _secrets.token_hex(4)
     with sessions_lock:
         sessions[sid] = {"chat": [], "created_at": 0, "last_accessed": 0, "documents": [], "session_secret": None, "lock": threading.Lock(), "vectorstore": None}
-        _append_chat_and_mark_dirty(sid, {"question": "q", "answer": "a", "sources": [], "mode": "default"})
+        _mark_session_dirty(sid)
 
     assert sid in _dirty_sessions
-    assert len(sessions[sid]["chat"]) == 1
-    assert sessions[sid]["chat"][0]["question"] == "q"
+    assert len(sessions[sid]["chat"]) == 0
 
     with sessions_lock:
         del sessions[sid]
         _dirty_sessions.discard(sid)
 
 
-def test_append_chat_and_mark_dirty_ignores_unknown_session():
-    from main import _append_chat_and_mark_dirty, _dirty_sessions, sessions_lock
+def test_mark_session_dirty_ignores_unknown_session():
+    from main import _mark_session_dirty, _dirty_sessions, sessions_lock
     unknown_sid = "no-such-session-" + _secrets.token_hex(4)
     with sessions_lock:
-        _append_chat_and_mark_dirty(unknown_sid, {"question": "q", "answer": "a"})
+        _mark_session_dirty(unknown_sid)
     assert unknown_sid not in _dirty_sessions
 
 
@@ -627,7 +691,6 @@ def test_ask_stream_passes_middleware_with_correct_token():
         )
     finally:
         main_module.INTERNAL_RAG_TOKEN = original
-
 
 def test_ask_stream_rejected_when_token_is_cleared_after_startup():
     """Protected endpoints fail closed if token config becomes unavailable."""
