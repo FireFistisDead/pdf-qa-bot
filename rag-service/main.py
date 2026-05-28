@@ -167,6 +167,7 @@ PROTECTED_RAG_PATHS = {
     "/ask",
     "/ask/stream",
     "/summarize",
+    "/knowledge-gaps",
     "/validate-session-write",
     "/sessions/lookup",
 }
@@ -199,13 +200,7 @@ def require_internal_rag_token_configured():
         raise RuntimeError("INTERNAL_RAG_TOKEN must be configured for protected endpoints.")
 
 
-def validate_internal_rag_token_on_startup():
-    require_internal_rag_token_configured()
-
-
-# Keep the explicit startup hook so the service fails fast on missing
-# INTERNAL_RAG_TOKEN instead of booting in an insecure state.
-app.on_event("startup")(validate_internal_rag_token_on_startup)
+require_internal_rag_token_configured()
 
 
 def generate_session_secret() -> str:
@@ -310,24 +305,6 @@ async def internal_auth_middleware(request: Request, call_next):
       2. Prefix set — covers entire sub-trees so that any future sub-route (e.g.
          /ask/v2/stream) is automatically protected without requiring a code change here.
     """
-
-    protected_paths = {
-        "/process-pdf",
-        "/ask",
-        "/ask/stream",
-        "/summarize",
-        "/knowledge-gaps",
-        "/validate-session-write",
-        "/sessions/lookup",
-    }
-
-    # Prefix-based guard: any sub-path under these trees is also protected.
-    # This ensures that adding a new streaming variant or versioned route can
-    # never silently bypass auth because a developer forgot to update the set above.
-    protected_prefixes = (
-        "/ask/",
-        "/processing-status/",
-    )
 
     path = request.url.path
 

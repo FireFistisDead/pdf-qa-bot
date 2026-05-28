@@ -26,7 +26,6 @@ from main import (
     citation_source_for_document,
     internal_token_valid,
     require_internal_rag_token_configured,
-    validate_internal_rag_token_on_startup,
     normalize_session_id,
     get_session_dir,
     _extract_pdf_text_worker,
@@ -104,7 +103,7 @@ def test_startup_validation_fails_when_internal_token_unset(monkeypatch):
     monkeypatch.setattr(main_module, "INTERNAL_RAG_TOKEN", "")
 
     with pytest.raises(RuntimeError, match="INTERNAL_RAG_TOKEN"):
-        validate_internal_rag_token_on_startup()
+        require_internal_rag_token_configured()
 
 
 def test_internal_token_validation_passes_when_configured(monkeypatch):

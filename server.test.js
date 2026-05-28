@@ -52,7 +52,7 @@ test("ragAuthHeaders forwards the internal token", () => {
   assert.deepEqual(ragAuthHeaders(), { "X-Internal-Token": process.env.INTERNAL_RAG_TOKEN.trim() });
 });
 
-test("server initialization fails when INTERNAL_RAG_TOKEN is unset", () => {
+test("server module can be imported when INTERNAL_RAG_TOKEN is unset", () => {
   const result = spawnSync(
     process.execPath,
     ["-e", "require('./server.js')"],
@@ -64,6 +64,25 @@ test("server initialization fails when INTERNAL_RAG_TOKEN is unset", () => {
         JWT_SECRET: "test-jwt-secret",
       },
       encoding: "utf8",
+    },
+  );
+
+  assert.equal(result.status, 0);
+});
+
+test("server startup fails when INTERNAL_RAG_TOKEN is unset", () => {
+  const result = spawnSync(
+    process.execPath,
+    ["server.js"],
+    {
+      cwd: __dirname,
+      env: {
+        ...process.env,
+        INTERNAL_RAG_TOKEN: "",
+        JWT_SECRET: "test-jwt-secret",
+      },
+      encoding: "utf8",
+      timeout: 5000,
     },
   );
 
