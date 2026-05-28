@@ -719,7 +719,8 @@ def test_stream_lazy_load_faiss_uses_get_embedding_model():
                         "question": "test",
                         "session_id": session_id,
                         "session_secret": "test_secret"
-                    }
+                    },
+                    headers={"X-Internal-Token": main_module.INTERNAL_RAG_TOKEN},
                 )
                 
                 mock_get_embedding_model.assert_called_once()
