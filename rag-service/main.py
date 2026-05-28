@@ -310,8 +310,7 @@ async def internal_auth_middleware(request: Request, call_next):
       2. Prefix set — covers entire sub-trees so that any future sub-route (e.g.
          /ask/v2/stream) is automatically protected without requiring a code change here.
     """
-<<<<<<< HEAD
-=======
+
     protected_paths = {
         "/process-pdf",
         "/ask",
@@ -330,7 +329,6 @@ async def internal_auth_middleware(request: Request, call_next):
         "/processing-status/",
     )
 
->>>>>>> upstream/master
     path = request.url.path
 
     if (
