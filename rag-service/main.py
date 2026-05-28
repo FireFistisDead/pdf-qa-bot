@@ -20,6 +20,9 @@ import multiprocessing
 import os
 import secrets
 import shutil
+import urllib.request
+import urllib.error
+from typing import Optional
 from transformers import (
     AutoConfig,
     AutoTokenizer,
@@ -78,6 +81,7 @@ def load_sessions():
                     meta["lock"] = threading.Lock()
                     meta["vectorstore"] = None
                     meta.setdefault("chat", [])
+                    meta.setdefault("flashcards", [])
                     base[sid] = meta
         except Exception as e:
             logger.error(f"Failed to load sessions from sessions.json: {e}")
@@ -94,6 +98,8 @@ def load_sessions():
                     per = json.load(f)
                 if isinstance(per.get("chat"), list):
                     meta["chat"] = per["chat"]
+                if isinstance(per.get("flashcards"), list):
+                    meta["flashcards"] = per["flashcards"]
                 if per.get("last_accessed") and float(per["last_accessed"] or 0) > float(meta.get("last_accessed") or 0):
                     meta["last_accessed"] = float(per["last_accessed"])
         except Exception as e:
@@ -107,27 +113,22 @@ def save_sessions_unlocked():
 
         for sid, meta in sessions.items():
 
-            safe_cache = {}
-
-            for key, value in meta.get("retrieval_cache", {}).items():
-                if isinstance(value, dict):
-                    safe_cache[key] = value
-
             # Strip static_url from persisted document entries. The field pointed to
-        # a server-side file path that is deleted immediately after indexing.
-        # Keeping it on disk would cause the frontend to construct a URL that
-        # 404s and, if the /uploads static route were ever re-enabled, could
-        # expose the raw PDF to unauthenticated callers.
-        clean_docs = [
-            {k: v for k, v in doc.items() if k != "static_url"}
-            for doc in meta.get("documents", [])
-        ]
-        data[sid] = {
+            # a server-side file path that is deleted immediately after indexing.
+            # Keeping it on disk would cause the frontend to construct a URL that
+            # 404s and, if the /uploads static route were ever re-enabled, could
+            # expose the raw PDF to unauthenticated callers.
+            clean_docs = [
+                {k: v for k, v in doc.items() if k != "static_url"}
+                for doc in meta.get("documents", [])
+            ]
+            data[sid] = {
                 "created_at": meta.get("created_at"),
                 "last_accessed": meta.get("last_accessed"),
                 "documents": clean_docs,
                 "retrieval_cache": {},  # Do not persist retrieval cache (contains Document objects)
                 "chat": meta.get("chat", []),
+                "flashcards": meta.get("flashcards", []),
                 "session_secret": meta.get("session_secret"),
             }
 
@@ -290,6 +291,7 @@ async def internal_auth_middleware(request: Request, call_next):
         "/ask",
         "/ask/stream",
         "/summarize",
+        "/knowledge-gaps",
         "/validate-session-write",
         "/sessions/lookup",
     }
@@ -395,6 +397,14 @@ SEMANTIC_CHUNK_MERGE_WARN_SECS = float(
 SEMANTIC_CHUNK_HIERARCHICAL = os.getenv(
     "SEMANTIC_CHUNK_HIERARCHICAL", "true"
 ).strip().lower() in {"1", "true", "yes", "on"}
+
+# ── Ollama LLM Synthesis ─────────────────────────────────────────────────────
+# When Ollama is running locally the /ask endpoint will use it as the primary
+# generative synthesiser. If Ollama is unreachable the pipeline falls back to
+# the built-in HuggingFace model (generate_response) transparently.
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
+OLLAMA_TIMEOUT_SECS = int(os.getenv("OLLAMA_TIMEOUT_SECS", "30"))
 QUERY_STOPWORDS = {
     "about", "according", "also", "and", "are", "between", "compare",
     "describe", "does", "document", "documents", "explain", "from", "give",
@@ -621,6 +631,16 @@ def persist_vectorstore(session_id: str, vectorstore):
     return session_dir
 
 
+def _load_vectorstore_for_session_unlocked(session_id: str, meta: dict):
+    session_dir = meta.get("session_dir") or get_session_dir(session_id)
+    meta["session_dir"] = session_dir
+    return FAISS.load_local(
+        session_dir,
+        get_embedding_model(),
+        allow_dangerous_deserialization=True,
+    )
+
+
 def _recover_session_unlocked(session_id: str):
     registry = read_session_registry()
     entry = registry.get(session_id)
@@ -831,6 +851,7 @@ def _snapshot_session_for_persistence(meta: dict) -> dict:
         "last_accessed": meta.get("last_accessed"),
         "documents": list(meta.get("documents", [])),
         "chat": list(meta.get("chat", [])),
+        "flashcards": list(meta.get("flashcards", [])),
         "session_secret": meta.get("session_secret"),
     }
 
@@ -1248,6 +1269,53 @@ def build_factual_answer(documents, question, source_id_by_key=None):
     if additional_sentences:
         answer += " " + " ".join(additional_sentences)
     return answer
+
+
+def synthesize_with_ollama(prompt: str) -> Optional[str]:
+    """Send a RAG prompt to a locally running Ollama server and return the
+    generated text.  Returns ``None`` on any failure so the caller can fall
+    back to the extractive / HuggingFace path without disruption.
+
+    Failure modes that are handled silently:
+    - Ollama not installed / not running (ConnectionError / timeout)
+    - Requested model not yet pulled (Ollama returns HTTP 404)
+    - Any unexpected HTTP or JSON error
+    """
+    try:
+        payload = json.dumps({
+            "model": OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0,
+                "num_predict": 512,
+                "stop": ["\n\n\n"],
+            },
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT_SECS) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            text = (body.get("response") or "").strip()
+            if text:
+                logger.info(
+                    "Ollama synthesis succeeded model=%s chars=%d",
+                    OLLAMA_MODEL,
+                    len(text),
+                )
+                return text
+            logger.warning("Ollama returned an empty response")
+            return None
+
+    except Exception as exc:  # noqa: BLE001 — intentional catch-all for fallback
+        logger.info("Ollama unavailable, falling back to extractive path: %s", exc)
+        return None
 
 
 def build_answer_from_documents(question, documents, intent, source_id_by_key=None):
@@ -2034,6 +2102,12 @@ class SummarizeRequest(BaseModel):
     session_secret: str | None = None
 
 
+class KnowledgeGapsRequest(BaseModel):
+    session_id: UUID
+    session_secret: str
+    document_id: str | None = None
+
+
 class SessionLookupItem(BaseModel):
     session_id: UUID
     session_secret: str = Field(..., min_length=1)
@@ -2095,6 +2169,17 @@ def lookup_sessions(data: SessionsLookupRequest):
             )
 
     return sessions_out
+
+class FlashcardGenerateRequest(BaseModel):
+    session_id: UUID
+    session_secret: str
+    count: Optional[int] = 10
+
+class FlashcardProgressRequest(BaseModel):
+    session_id: UUID
+    session_secret: str
+    card_id: str
+    rating: str
 
 class SessionWriteRequest(BaseModel):
     session_id: UUID
@@ -2482,7 +2567,7 @@ def ask_question(data: Question):
         session_lock = session["lock"]
         if not session.get("vectorstore"):
             try:
-                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), get_embedding_model(), allow_dangerous_deserialization=True)
+                session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
             except Exception as e:
                 logger.error(f"Failed to lazy load vectorstore: {e}")
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
@@ -2571,6 +2656,7 @@ def ask_question(data: Question):
             "answer": INSUFFICIENT_CONTEXT_MESSAGE,
             "sources": [],
             "retrieval_type": "refusal",
+            "answer_mode": "refusal",
             "mode": mode,
             "cache_hit": cache_hit,
         }
@@ -2627,6 +2713,7 @@ def ask_question(data: Question):
             "answer": framed,
             "sources": citation_sources,
             "retrieval_type": "socratic",
+            "answer_mode": "socratic",
             "cache_hit": cache_hit,
             "mode": mode,
         }
@@ -2659,6 +2746,7 @@ def ask_question(data: Question):
             "answer": grounded_answer,
             "sources": citation_sources,
             "retrieval_type": "citation-aware",
+            "answer_mode": "refusal",
             "cache_hit": cache_hit,
             "mode": mode,
         }
@@ -2718,10 +2806,11 @@ def ask_question(data: Question):
             "answer": framed,
             "sources": citation_sources,
             "retrieval_type": "citation-aware",
+            "answer_mode": "extractive",
             "cache_hit": cache_hit,
             "mode": mode,
         }
-        
+
         with sessions_lock:
             _append_chat_and_mark_dirty(session_id, {
                 "question": question,
@@ -2757,11 +2846,50 @@ def ask_question(data: Question):
         retrieved_sources,
     )
 
+    # ── Step 1: Try Ollama (local generative LLM) ────────────────────────────
+    # synthesize_with_ollama() returns None on any failure so the pipeline
+    # falls through to the HuggingFace model transparently.
+    ollama_answer = synthesize_with_ollama(prompt)
+
+    if ollama_answer:
+        framed = apply_mode_framing(ollama_answer, question, mode, docs, context)
+        # Mode-framing can strip citations for non-standard modes; keep the
+        # raw Ollama answer as-is — it already cited sources in the prompt.
+        if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
+            logger.info(
+                "Mode framing stripped citations from Ollama answer; reverting session_id=%s mode=%s",
+                session_id,
+                mode,
+            )
+            framed = ollama_answer
+
+        response_payload = {
+            "answer": framed,
+            "sources": citation_sources,
+            "retrieval_type": "citation-aware",
+            "answer_mode": "generative",
+            "cache_hit": cache_hit,
+            "mode": mode,
+        }
+        with sessions_lock:
+            session = sessions.get(session_id)
+            if session:
+                session.setdefault("retrieval_cache", {})
+            _append_chat_and_mark_dirty(session_id, {
+                "question": question,
+                "answer": framed,
+                "sources": citation_sources,
+                "mode": mode,
+            })
+        return response_payload
+
+    # ── Step 2: Fall back to HuggingFace model ───────────────────────────────
+    logger.info("Falling back to HuggingFace generate_response session_id=%s", session_id)
     answer = generate_response(
         prompt,
         max_new_tokens=256
     )
-    
+
     framed = apply_mode_framing(answer, question, mode, docs, context)
 
     # If citations were required and mode-framing stripped them, revert to original.
@@ -2777,6 +2905,7 @@ def ask_question(data: Question):
         "answer": framed,
         "sources": citation_sources,
         "retrieval_type": "citation-aware",
+        "answer_mode": "hf-generative",
         "cache_hit": cache_hit,
         "mode": mode,
     }
@@ -2836,11 +2965,7 @@ def ask_question_stream(data: Question):
         session_lock = session["lock"]
         if not session.get("vectorstore"):
             try:
-                session["vectorstore"] = FAISS.load_local(
-                    str(FAISS_DIR / session_id),
-                    get_embedding_model(),
-                    allow_dangerous_deserialization=True,
-                )
+                session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
             except Exception as exc:
                 logger.error("Failed to lazy load vectorstore session_id=%s error=%s", session_id, exc)
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
@@ -2939,13 +3064,13 @@ def ask_question_stream(data: Question):
         with sessions_lock:
             current_session = sessions.get(session_id)
             if current_session:
-                current_session.setdefault("chat", []).append({
+                current_session.setdefault("retrieval_cache", {})
+                _append_chat_and_mark_dirty(session_id, {
                     "question": question,
                     "answer": framed,
                     "sources": citation_sources,
                     "mode": mode,
                 })
-                save_sessions_unlocked()
 
         def _grounded_stream():
             yield framed
@@ -3018,17 +3143,35 @@ def ask_question_stream(data: Question):
             generation_thread.join(timeout=180)
 
             full_answer = "".join(full_answer_parts).strip()
-            citation_sources = [citation_source_for_document(doc, idx) for idx, doc in enumerate(docs)]
+
+            framed = apply_mode_framing(
+                full_answer,
+                question,
+                mode,
+                docs,
+                context,
+            )
+
+            if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
+                framed = full_answer
+
+            citation_sources = [
+                citation_source_for_document(doc, idx)
+                for idx, doc in enumerate(docs)
+            ]
+
             with sessions_lock:
                 current_session = sessions.get(session_id)
+
                 if current_session:
-                    current_session.setdefault("chat", []).append({
+                    current_session.setdefault("retrieval_cache", {})
+
+                    _append_chat_and_mark_dirty(session_id, {
                         "question": question,
-                        "answer": full_answer,
+                        "answer": framed,
                         "sources": citation_sources,
                         "mode": mode,
                     })
-                    save_sessions_unlocked()
         except Exception:
             logger.exception("Stream generation failed session_id=%s", session_id)
             yield "\n[Generation error. Please try again.]"
@@ -3062,7 +3205,7 @@ def summarize_pdf(data: SummarizeRequest):
         session_lock = session["lock"]
         if not session.get("vectorstore"):
             try:
-                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), get_embedding_model(), allow_dangerous_deserialization=True)
+                session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
             except Exception as e:
                 logger.error(f"Failed to lazy load vectorstore: {e}")
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
@@ -3082,6 +3225,447 @@ def summarize_pdf(data: SummarizeRequest):
     )
 
     return {"summary": build_session_summary(uploaded_documents, indexed_documents)}
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Knowledge Gap Detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Signals that a term IS defined inside the document (exclude these).
+_DEFINITION_PATTERNS = re.compile(
+    r"\b(?:is a |refers to |is defined as |what is |means |stands for )",
+    re.IGNORECASE,
+)
+
+# Multi-word capitalized phrase: two or more Title-Case words, tolerating
+# possessives (Bayes' Theorem) and hyphens (Cross-Entropy Loss).
+_MULTI_WORD_CAPS = re.compile(
+    r"\b([A-Z][a-z]+(?:'s?|-[A-Z][a-z]+)?(?:\s+[A-Z][a-z]+(?:'s?|-[A-Z][a-z]+)?)+)\b"
+)
+
+# Term immediately followed by its acronym: Convolutional Neural Network (CNN)
+_ACRONYM_INTRO = re.compile(
+    r"\b([A-Z][a-zA-Z\s-]{3,60})\s+\(([A-Z]{2,5})\)"
+)
+
+# Technical-suffix words recurring across pages.
+_TECH_SUFFIX = re.compile(
+    r"\b([A-Za-z]{4,}(?:tion|ity|ism|ology|ics|ance|ence|ment))\b"
+)
+
+# Bare acronyms (2–5 uppercase letters, no adjacent lowercase).
+_BARE_ACRONYM = re.compile(r"(?<![a-z])\b([A-Z]{2,5})\b(?![a-z])")
+
+# Common English words that happen to be all-caps abbreviations but are NOT
+# domain-specific prerequisites.  Extend this list conservatively.
+_ACRONYM_STOPWORDS = frozenset({
+    "I", "A", "AN", "THE", "AND", "OR", "NOT", "IN", "ON", "AT", "TO",
+    "BY", "OF", "IS", "IT", "BE", "DO", "GO", "US", "UK", "EU", "UN",
+    "PDF", "URL", "HTTP", "API", "ID", "OK", "DR", "MR", "MS", "VS",
+    "E.G", "I.E", "NOTE", "SEE", "FIG", "REF", "ETC", "Q&A",
+})
+
+
+def _is_defined_nearby(term: str, text: str, window: int = 120) -> bool:
+    """Return True if the term appears within `window` chars of a definition
+    signal in the given text (suggesting the document defines it)."""
+    term_lower = term.lower()
+    text_lower = text.lower()
+    pos = 0
+    while True:
+        idx = text_lower.find(term_lower, pos)
+        if idx == -1:
+            break
+        # Check a window before and after the term occurrence.
+        start = max(0, idx - window)
+        end = min(len(text_lower), idx + len(term_lower) + window)
+        excerpt = text_lower[start:end]
+        if _DEFINITION_PATTERNS.search(excerpt):
+            return True
+        pos = idx + 1
+    return False
+
+
+def detect_knowledge_gaps(
+    chunks: list,
+    max_concepts: int = 12,
+) -> list:
+    """
+    Pure-regex prerequisite concept detector.  No LLM, no new dependencies.
+
+    Scans LangChain Document objects (with .page_content and .metadata["page"])
+    and returns a list of dicts:
+      { "term": str, "pages": [int, ...], "frequency": int }
+
+    sorted by frequency descending, capped at `max_concepts`.
+
+    A concept qualifies when:
+      1. It has a domain-specific character (multi-word caps, acronym intro,
+         technical suffix, or bare acronym).
+      2. It is NOT defined anywhere in the document (no definition-signal
+         pattern within 120 chars of any occurrence of the term).
+    """
+    if not chunks:
+        return []
+
+    # Build a flat map: page_number -> full page text
+    page_texts: dict[int, str] = {}
+    for chunk in chunks:
+        page = chunk.metadata.get("page")
+        if page is None:
+            continue
+        page_num = page + 1  # convert 0-based to 1-based for display
+        page_texts.setdefault(page_num, "")
+        page_texts[page_num] += " " + chunk.page_content
+
+    if not page_texts:
+        return []
+
+    full_text = " ".join(page_texts.values())
+
+    # ── Step 1: collect candidate terms ──────────────────────────────────────
+    candidates: dict[str, set] = {}  # normalized_term -> set of page numbers
+
+    def _register(term: str, page_num: int):
+        """Add term/page to candidates dict."""
+        normed = " ".join(term.split())  # collapse whitespace
+        if len(normed) < 3 or len(normed) > 80:
+            return
+        candidates.setdefault(normed, set()).add(page_num)
+
+    for page_num, text in page_texts.items():
+        # Pattern A: multi-word capitalized phrases
+        for m in _MULTI_WORD_CAPS.finditer(text):
+            _register(m.group(1), page_num)
+
+        # Pattern B: term (ACRONYM) introductions — register both forms
+        for m in _ACRONYM_INTRO.finditer(text):
+            _register(m.group(1).strip(), page_num)
+            _register(m.group(2), page_num)
+
+        # Pattern C: technical-suffix words
+        for m in _TECH_SUFFIX.finditer(text):
+            _register(m.group(1), page_num)
+
+        # Pattern D: bare acronyms
+        for m in _BARE_ACRONYM.finditer(text):
+            term = m.group(1)
+            if term not in _ACRONYM_STOPWORDS and len(term) >= 2:
+                _register(term, page_num)
+
+    # ── Step 2: filter out terms that appear on only 1 page (too noisy) ──────
+    candidates = {
+        term: pages
+        for term, pages in candidates.items()
+        if len(pages) >= 2  # must recur on at least 2 pages
+    }
+
+    # ── Step 3: filter out terms defined within the document ─────────────────
+    qualified = []
+    for term, pages in candidates.items():
+        if not _is_defined_nearby(term, full_text):
+            qualified.append((term, sorted(pages)))
+
+    # ── Step 4: rank by page spread (most cross-cutting = most load-bearing) ─
+    qualified.sort(key=lambda x: len(x[1]), reverse=True)
+    qualified = qualified[:max_concepts]
+
+    return [
+        {"term": term, "pages": pages, "frequency": len(pages)}
+        for term, pages in qualified
+    ]
+
+
+@app.post("/knowledge-gaps")
+def knowledge_gaps(data: KnowledgeGapsRequest):
+    """
+    On-demand prerequisite concept mapper.
+
+    Scans the chunks of the requested document (or the first/only document
+    in the session when document_id is omitted) and returns a list of domain-
+    specific terms that are referenced but never defined in the document,
+    each annotated with the page numbers where they appear.
+
+    Authentication follows the same pattern as /summarize.
+    Runs entirely locally — no LLM call, no external requests.
+    """
+    cleanup_expired_sessions()
+    session_id = str(data.session_id)
+
+    with sessions_lock:
+        session = _touch_session_unlocked(session_id)
+        if not session:
+            raise HTTPException(
+                status_code=404,
+                detail="Session expired or invalid. Please re-upload your PDFs.",
+            )
+        _require_session_secret(session, data.session_secret)
+        if "lock" not in session:
+            session["lock"] = threading.Lock()
+        session_lock = session["lock"]
+
+        # Lazy-load vectorstore if not in memory
+        if not session.get("vectorstore"):
+            try:
+                session["vectorstore"] = FAISS.load_local(
+                    str(FAISS_DIR / session_id),
+                    get_embedding_model(),
+                    allow_dangerous_deserialization=True,
+                )
+            except Exception as exc:
+                logger.error("Failed to lazy load vectorstore: %s", exc)
+                raise HTTPException(
+                    status_code=500, detail="Failed to load session index."
+                )
+
+        vectorstore = session["vectorstore"]
+        uploaded_documents = list(session.get("documents", []))
+
+    if not uploaded_documents:
+        raise HTTPException(
+            status_code=422,
+            detail="This session has no uploaded documents. Upload a PDF before running analysis.",
+        )
+
+    # Resolve the target document
+    document_id = data.document_id
+    if document_id:
+        target_doc = next(
+            (d for d in uploaded_documents if d.get("document_id") == document_id),
+            None,
+        )
+        if target_doc is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"document_id '{document_id}' not found in this session.",
+            )
+    else:
+        target_doc = uploaded_documents[0]
+        document_id = target_doc.get("document_id")
+
+    document_filename = target_doc.get("filename", "document")
+
+    # Retrieve all indexed chunks for this document
+    with session_lock:
+        all_indexed = collect_index_documents(vectorstore)
+
+    doc_chunks = documents_for_upload(all_indexed, document_id)
+
+    # Edge case: scanned / image-based PDF — very little text extracted
+    total_chars = sum(len(c.page_content) for c in doc_chunks)
+    if total_chars < 200:
+        return {
+            "document": document_filename,
+            "document_id": document_id,
+            "concept_count": 0,
+            "concepts": [],
+            "scanned": False,
+            "short_document": False,
+            "message": (
+                "This PDF appears to contain no extractable text (it may be a scanned "
+                "image). Knowledge gap analysis requires readable text content."
+            ),
+        }
+
+    # Determine unique page count for the short-document notice
+    unique_pages = {c.metadata.get("page") for c in doc_chunks if c.metadata.get("page") is not None}
+    is_short = len(unique_pages) < 5
+
+
+
+    concepts = detect_knowledge_gaps(doc_chunks)
+
+    return {
+        "document": document_filename,
+        "document_id": document_id,
+        "concept_count": len(concepts),
+        "concepts": concepts,
+        "scanned": True,
+        "short_document": is_short,
+    }
+
+
+def generate_flashcards_from_text(indexed_docs, count):
+    text_content = ""
+    sorted_docs = sorted(indexed_docs, key=lambda x: (x.metadata.get("page", 0), x.metadata.get("chunk_index", 0)))
+    
+    for doc in sorted_docs:
+        page_num = doc.metadata.get("page", 1)
+        content = doc.page_content.strip()
+        if len(text_content) + len(content) < 3000:
+            text_content += f"\n[Page {page_num}]: {content}\n"
+        else:
+            break
+            
+    prompt = (
+        "Extract 5 key concepts, definitions, or questions and answers from the following text. "
+        "For each concept, provide a clear Question and a precise, concise Answer in plain text. "
+        "Format your response exactly as listed below:\n"
+        "Q: [Question text]\n"
+        "A: [Answer text]\n\n"
+        f"Text:\n{text_content}\n\n"
+        "Q&A:"
+    )
+    
+    response_text = ""
+    ollama_answer = synthesize_with_ollama(prompt)
+    if ollama_answer:
+        response_text = ollama_answer
+    else:
+        try:
+            response_text = generate_response(prompt, max_new_tokens=512)
+        except Exception as e:
+            logger.warning(f"Local LLM response generation failed: {e}")
+            response_text = ""
+        
+    cards = []
+    if response_text:
+        qa_blocks = re.findall(r"Q:\s*(.*?)\s*A:\s*(.*?)(?=(?:Q:|$))", response_text, re.DOTALL | re.IGNORECASE)
+        for question, answer in qa_blocks:
+            question = question.strip()
+            answer = answer.strip()
+            if question and answer:
+                cards.append({
+                    "id": str(uuid.uuid4()),
+                    "question": question,
+                    "answer": answer,
+                    "source_page": 1,
+                    "box": 1,
+                    "next_review": now_ts()
+                })
+            
+    if not cards:
+        sentences = []
+        for doc in sorted_docs:
+            page_num = doc.metadata.get("page", 1)
+            content = doc.page_content.strip()
+            found_sentences = re.split(r'(?<=[.!?])\s+', content)
+            for s in found_sentences:
+                s = s.strip()
+                if 40 < len(s) < 250:
+                    sentences.append((s, page_num))
+                    
+        definitions = []
+        for s, p in sentences:
+            if any(indicator in s.lower() for indicator in ["is a", "is the", "are the", "refers to", "defined as", "means", "consists of"]):
+                definitions.append((s, p))
+                
+        if not definitions:
+            definitions = sentences[:10]
+            
+        for s, p in definitions[:count]:
+            parts = re.split(r'\s+is\s+|\s+refers\s+to\s+|\s+defined\s+as\s+|\s+means\s+', s, maxsplit=1, flags=re.IGNORECASE)
+            if len(parts) == 2:
+                q = f"What is {parts[0].strip()}?"
+                a = parts[1].strip().capitalize()
+            else:
+                q = "Explain the key concept described in the text."
+                a = s
+                
+            if a.endswith('.'):
+                a = a[:-1]
+            a = a + "."
+            
+            cards.append({
+                "id": str(uuid.uuid4()),
+                "question": q,
+                "answer": a,
+                "source_page": p,
+                "box": 1,
+                "next_review": now_ts()
+            })
+            
+    return cards
+
+
+@app.post("/sessions/flashcards/generate")
+def generate_flashcards(data: FlashcardGenerateRequest):
+    cleanup_expired_sessions()
+    session_id = str(data.session_id)
+    
+    with sessions_lock:
+        session = _touch_session_unlocked(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+        _require_session_secret(session, data.session_secret)
+        
+        if session.get("flashcards"):
+            return {"flashcards": session["flashcards"]}
+            
+        if "lock" not in session:
+            session["lock"] = threading.Lock()
+        session_lock = session["lock"]
+        
+        if not session.get("vectorstore"):
+            try:
+                session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
+            except Exception as e:
+                logger.error(f"Failed to lazy load vectorstore: {e}")
+                raise HTTPException(status_code=500, detail="Failed to load session index.")
+        vectorstore = session["vectorstore"]
+        
+    with session_lock:
+        indexed_documents = collect_index_documents(vectorstore)
+        
+    if not indexed_documents:
+        return {"flashcards": []}
+        
+    count = data.count or 10
+    cards = generate_flashcards_from_text(indexed_documents, count)
+    
+    with sessions_lock:
+        session = sessions.get(session_id)
+        if session:
+            session["flashcards"] = cards
+            _dirty_sessions.add(session_id)
+            
+    return {"flashcards": cards}
+
+
+@app.post("/sessions/flashcards/update-progress")
+def update_flashcard_progress(data: FlashcardProgressRequest):
+    cleanup_expired_sessions()
+    session_id = str(data.session_id)
+    
+    with sessions_lock:
+        session = _touch_session_unlocked(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+        _require_session_secret(session, data.session_secret)
+        
+        flashcards = session.get("flashcards", [])
+        card_found = False
+        
+        for card in flashcards:
+            if card.get("id") == data.card_id:
+                rating = data.rating.lower().strip()
+                current_box = card.get("box", 1)
+                
+                if rating == "easy":
+                    new_box = min(current_box + 1, 5)
+                elif rating == "good":
+                    new_box = current_box
+                else:
+                    new_box = 1
+                    
+                intervals = {1: 0, 2: 60, 3: 300, 4: 1800, 5: 86400}
+                interval = intervals.get(new_box, 0)
+                
+                card["box"] = new_box
+                card["next_review"] = now_ts() + interval
+                card_found = True
+                break
+                
+        if not card_found:
+            raise HTTPException(status_code=404, detail="Flashcard not found.")
+            
+        session["flashcards"] = flashcards
+        _dirty_sessions.add(session_id)
+        
+    return {"status": "success", "flashcards": flashcards}
+
+
 if __name__ == "__main__":
     is_production = os.getenv("ENVIRONMENT", "development").lower() == "production"
     host = os.getenv("HOST", "0.0.0.0")
