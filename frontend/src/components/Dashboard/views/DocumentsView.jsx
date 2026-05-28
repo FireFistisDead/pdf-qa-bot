@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../../services/supabaseClient';
 import { useAuth } from '../../../contexts/AuthContext';
+import { processDocument, getProcessingStatus } from '../../../services/ragService';
 
 const DocumentsView = () => {
   const { user } = useAuth();
@@ -11,7 +12,11 @@ const DocumentsView = () => {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [documents, setDocuments] = useState([]);
   const [error, setError] = useState('');
+  // { [docId]: 'indexing' | 'ready' | 'error' }
   const [processingDocs, setProcessingDocs] = useState({});
+  // { [docId]: 'Extracting text...' | 'Generating embeddings...' etc. }
+  const [processingStage, setProcessingStage] = useState({});
+  const pollingRefs = useRef({});
 
   // Fetch documents on load
   useEffect(() => {
@@ -109,27 +114,67 @@ const DocumentsView = () => {
   };
 
   const handleProcess = async (docId) => {
-    setProcessingDocs(prev => ({ ...prev, [docId]: 'indexing' }));
+    const doc = documents.find(d => d.id === docId);
+    if (!doc) return;
 
-    // Simulate backend extraction and embedding generation (4s)
-    setTimeout(async () => {
-      // Update Supabase Database status — this is the source of truth
-      const { error } = await supabase
+    setProcessingDocs(prev => ({ ...prev, [docId]: 'indexing' }));
+    setProcessingStage(prev => ({ ...prev, [docId]: 'Connecting to RAG service...' }));
+
+    try {
+      // Call Node.js gateway → downloads PDF from Supabase → indexes in FAISS
+      const result = await processDocument(doc.url, doc.name);
+
+      const { session_id, session_secret } = result;
+
+      // Poll for real processing stages while RAG service works
+      if (session_id) {
+        const pollInterval = setInterval(async () => {
+          const status = await getProcessingStatus(session_id).catch(() => null);
+          if (status?.stage) {
+            setProcessingStage(prev => ({ ...prev, [docId]: status.stage }));
+          }
+        }, 1500);
+        pollingRefs.current[docId] = pollInterval;
+
+        // Stop polling after 3 minutes max
+        setTimeout(() => {
+          clearInterval(pollInterval);
+          delete pollingRefs.current[docId];
+        }, 180000);
+      }
+
+      // Persist session_id + session_secret into Supabase DB
+      const { error: dbError } = await supabase
         .from('documents')
-        .update({ status: 'READY FOR CHAT' })
+        .update({
+          status: 'READY FOR CHAT',
+          session_id,
+          session_secret,
+        })
         .eq('id', docId);
 
-      if (error) {
-        console.error('Error updating document status:', error);
-        setProcessingDocs(prev => ({ ...prev, [docId]: undefined }));
-      } else {
-        // Sync local documents array so UI updates immediately
-        setDocuments(prevDocs => prevDocs.map(d =>
-          d.id === docId ? { ...d, status: 'READY FOR CHAT' } : d
-        ));
-        setProcessingDocs(prev => ({ ...prev, [docId]: 'ready' }));
-      }
-    }, 4000);
+      if (dbError) throw dbError;
+
+      // Stop polling now that we're done
+      clearInterval(pollingRefs.current[docId]);
+      delete pollingRefs.current[docId];
+
+      // Sync local state
+      setDocuments(prevDocs => prevDocs.map(d =>
+        d.id === docId
+          ? { ...d, status: 'READY FOR CHAT', session_id, session_secret }
+          : d
+      ));
+      setProcessingDocs(prev => ({ ...prev, [docId]: 'ready' }));
+      setProcessingStage(prev => ({ ...prev, [docId]: 'Done' }));
+
+    } catch (err) {
+      console.error('Processing error:', err);
+      clearInterval(pollingRefs.current[docId]);
+      delete pollingRefs.current[docId];
+      setProcessingDocs(prev => ({ ...prev, [docId]: 'error' }));
+      setProcessingStage(prev => ({ ...prev, [docId]: err.message || 'Processing failed' }));
+    }
   };
 
   const handleDrop = (e) => {
@@ -234,19 +279,27 @@ const DocumentsView = () => {
             {documents.map(doc => {
               const isIndexing = processingDocs[doc.id] === 'indexing';
               const isReady = doc.status === 'READY FOR CHAT' || processingDocs[doc.id] === 'ready';
+              const isError = processingDocs[doc.id] === 'error';
+              const stage = processingStage[doc.id] || '';
 
               return (
-                <div key={doc.id} className="masonry-slate">
+                <div key={doc.id} className={`masonry-slate ${isIndexing ? 'slate-processing' : ''}`}>
                   <div className="slate-top">
                     <span className="slate-id">{doc.custom_id || doc.id}</span>
-                    <span className={`slate-status ${doc.status === 'ERROR' ? 'error' : isReady ? 'ready' : 'ok'}`}>
-                      {isIndexing ? 'INDEXING...' : isReady ? 'READY FOR CHAT' : doc.status}
+                    <span className={`slate-status ${isError ? 'error' : isReady ? 'ready' : 'ok'}`}>
+                      {isError ? 'ERROR' : isIndexing ? 'INDEXING...' : isReady ? 'READY FOR CHAT' : doc.status}
                     </span>
                   </div>
                   
                   <div className="slate-body">
                     <h3 className="slate-name" title={doc.name}>{doc.name}</h3>
                     <p className="slate-meta">{doc.size} {'//'} {doc.created_at ? new Date(doc.created_at).toISOString().split('T')[0] : 'Just now'}</p>
+                    {isIndexing && stage && (
+                      <p className="slate-stage">{stage}</p>
+                    )}
+                    {isError && stage && (
+                      <p className="slate-stage error">{stage}</p>
+                    )}
                   </div>
 
                   <div className="slate-actions">
@@ -259,6 +312,14 @@ const DocumentsView = () => {
                         onClick={() => navigate('/dashboard/chat', { state: { documentId: doc.id } })}
                       >
                         START CHAT
+                      </button>
+                    ) : isError ? (
+                      <button 
+                        className="action-btn process"
+                        style={{ color: '#ff5f56', borderColor: '#ff5f56' }}
+                        onClick={() => handleProcess(doc.id)}
+                      >
+                        RETRY
                       </button>
                     ) : (
                       <button 
