@@ -97,7 +97,7 @@ def test_internal_token_valid_accepts_exact_match():
     assert internal_token_valid("secret", "secret") is True
 
 
-def test_startup_validation_fails_when_internal_token_unset(monkeypatch):
+def test_require_internal_token_config_fails_when_unset(monkeypatch):
     import main as main_module
 
     monkeypatch.setattr(main_module, "INTERNAL_RAG_TOKEN", "")
@@ -122,6 +122,20 @@ def test_internal_auth_middleware_protects_validate_session_write():
     try:
         client = TestClient(app)
         response = client.post("/validate-session-write")
+        assert response.status_code == 403
+        assert response.json()["error"] == "Forbidden"
+    finally:
+        main_module.INTERNAL_RAG_TOKEN = original_token
+
+
+def test_internal_auth_middleware_protects_trailing_slash_paths():
+    import main as main_module
+
+    original_token = main_module.INTERNAL_RAG_TOKEN
+    main_module.INTERNAL_RAG_TOKEN = "test-secret"
+    try:
+        client = TestClient(app)
+        response = client.post("/process-pdf/")
         assert response.status_code == 403
         assert response.json()["error"] == "Forbidden"
     finally:

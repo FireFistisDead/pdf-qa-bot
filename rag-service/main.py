@@ -306,7 +306,10 @@ async def internal_auth_middleware(request: Request, call_next):
          /ask/v2/stream) is automatically protected without requiring a code change here.
     """
 
-    path = request.url.path
+    raw_path = request.url.path
+    # Normalize one trailing slash (except root) so /process-pdf and /process-pdf/
+    # are protected identically.
+    path = raw_path if raw_path == "/" else raw_path.rstrip("/")
 
     if (
         path in PROTECTED_RAG_PATHS
@@ -316,7 +319,7 @@ async def internal_auth_middleware(request: Request, call_next):
         if not internal_token_valid(provided, INTERNAL_RAG_TOKEN):
             logger.warning(
                 "Internal auth rejected path=%s ip=%s",
-                path,
+                raw_path,
                 request.client.host if request.client else "unknown",
             )
             return standard_error_response(403, "Forbidden")
