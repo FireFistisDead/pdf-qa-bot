@@ -46,7 +46,7 @@ export const uploadPdfApi = async (file, sessionId = null, sessionSecret = null)
     formData.append("session_secret", sessionSecret);
   }
 
-  const res = await axios.post(`${API_BASE}/process-pdf`, formData, {
+  const res = await axios.post(`${API_BASE}/upload`, formData, {
     timeout: 30000, // 30 second timeout
   });
   return res.data;
@@ -114,13 +114,29 @@ export const askQuestionStreamApi = async (question, sessionId, sessionSecret, m
     signal,
   });
 
-  if (!response.ok) {
-    let errorMessage = "Error getting answer. Please try again.";
+    if (!response.ok) {
+    let parsedBody = null;
+
     try {
-      const errorBody = await response.json();
-      errorMessage = errorBody.error || errorBody.detail || errorMessage;
+      parsedBody = await response.json();
     } catch (_) {}
-    throw Object.assign(new Error(errorMessage), { response: { status: response.status } });
+
+    const errorMessage = extractApiErrorMessage(
+      {
+        response: {
+          status: response.status,
+          data: parsedBody,
+        },
+      },
+      "Error getting answer. Please try again.",
+    );
+
+    throw Object.assign(new Error(errorMessage), {
+      response: {
+        status: response.status,
+        data: parsedBody,
+      },
+    });
   }
 
   const reader = response.body.getReader();

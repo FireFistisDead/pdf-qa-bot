@@ -1,6 +1,9 @@
+import os
 import sys
 from unittest.mock import MagicMock
 import multiprocessing
+
+os.environ.setdefault("INTERNAL_RAG_TOKEN", "test-secret")
 
 # Prevent downloading/loading Hugging Face embeddings during testing by mocking the class
 import langchain_community.embeddings
@@ -24,6 +27,9 @@ from main import (
     document_dedupe_key,
     citation_source_for_document,
     internal_token_valid,
+    append_chat_exchange,
+    normalize_chat_history,
+    require_internal_rag_token_configured,
     normalize_session_id,
     get_session_dir,
     _extract_pdf_text_worker,
@@ -80,9 +86,9 @@ def test_sanitize_upload_filename_invalid():
         sanitize_upload_filename("test$file.pdf")
 
 
-def test_internal_token_valid_allows_when_unset():
-    assert internal_token_valid(None, "") is True
-    assert internal_token_valid("", "") is True
+def test_internal_token_valid_rejects_when_unset():
+    assert internal_token_valid(None, "") is False
+    assert internal_token_valid("", "") is False
 
 
 def test_internal_token_valid_rejects_missing_when_set():
@@ -93,6 +99,15 @@ def test_internal_token_valid_rejects_missing_when_set():
 
 def test_internal_token_valid_accepts_exact_match():
     assert internal_token_valid("secret", "secret") is True
+
+
+def test_require_internal_rag_token_configured_fails_fast_when_unset(monkeypatch):
+    import main as main_module
+
+    monkeypatch.setattr(main_module, "INTERNAL_RAG_TOKEN", "")
+
+    with pytest.raises(RuntimeError, match="INTERNAL_RAG_TOKEN"):
+        require_internal_rag_token_configured()
 
 
 def test_internal_auth_middleware_protects_validate_session_write():
@@ -367,35 +382,95 @@ def test_citation_source_for_document_handles_missing_metadata():
     assert source["chunk_index"] == 2
 
 
+def test_normalize_chat_history_converts_legacy_exchange_shape():
+    legacy_chat = [
+        {
+            "question": "What is covered?",
+            "answer": "The document covers onboarding.",
+            "sources": [{"document": "policy.pdf", "page": 1}],
+            "mode": "default",
+        }
+    ]
+
+    assert normalize_chat_history(legacy_chat) == [
+        {"role": "user", "text": "What is covered?"},
+        {
+            "role": "bot",
+            "text": "The document covers onboarding.",
+            "sources": [{"document": "policy.pdf", "page": 1}],
+            "streaming": False,
+            "mode": "default",
+        },
+    ]
+
+
+def test_append_chat_exchange_normalizes_and_persists_message_schema():
+    session = {
+        "chat": [
+            {
+                "question": "Old question?",
+                "answer": "Old answer.",
+                "sources": [],
+            }
+        ]
+    }
+
+    append_chat_exchange(
+        session,
+        "New question?",
+        "New answer.",
+        [{"document": "new.pdf", "page": 2}],
+        None,
+    )
+
+    assert session["chat"] == [
+        {"role": "user", "text": "Old question?"},
+        {
+            "role": "bot",
+            "text": "Old answer.",
+            "sources": [],
+            "streaming": False,
+            "mode": "default",
+        },
+        {"role": "user", "text": "New question?"},
+        {
+            "role": "bot",
+            "text": "New answer.",
+            "sources": [{"document": "new.pdf", "page": 2}],
+            "streaming": False,
+            "mode": "default",
+        },
+    ]
+
+
 # ─── Session dirty-flag and per-session persistence helpers ─────────────────
 
-def test_append_chat_and_mark_dirty_adds_entry_and_marks_dirty():
+def test_mark_session_dirty_marks_dirty_without_mutating_chat():
     from main import (
         sessions,
         _dirty_sessions,
-        _append_chat_and_mark_dirty,
+        _mark_session_dirty,
         sessions_lock,
     )
     import threading
     sid = "test-dirty-" + _secrets.token_hex(4)
     with sessions_lock:
         sessions[sid] = {"chat": [], "created_at": 0, "last_accessed": 0, "documents": [], "session_secret": None, "lock": threading.Lock(), "vectorstore": None}
-        _append_chat_and_mark_dirty(sid, {"question": "q", "answer": "a", "sources": [], "mode": "default"})
+        _mark_session_dirty(sid)
 
     assert sid in _dirty_sessions
-    assert len(sessions[sid]["chat"]) == 1
-    assert sessions[sid]["chat"][0]["question"] == "q"
+    assert len(sessions[sid]["chat"]) == 0
 
     with sessions_lock:
         del sessions[sid]
         _dirty_sessions.discard(sid)
 
 
-def test_append_chat_and_mark_dirty_ignores_unknown_session():
-    from main import _append_chat_and_mark_dirty, _dirty_sessions, sessions_lock
+def test_mark_session_dirty_ignores_unknown_session():
+    from main import _mark_session_dirty, _dirty_sessions, sessions_lock
     unknown_sid = "no-such-session-" + _secrets.token_hex(4)
     with sessions_lock:
-        _append_chat_and_mark_dirty(unknown_sid, {"question": "q", "answer": "a"})
+        _mark_session_dirty(unknown_sid)
     assert unknown_sid not in _dirty_sessions
 
 
@@ -596,12 +671,8 @@ def test_ask_stream_passes_middleware_with_correct_token():
         main_module.INTERNAL_RAG_TOKEN = original
 
 
-def test_ask_stream_allowed_when_no_token_configured():
-    """When INTERNAL_RAG_TOKEN is empty, /ask/stream must be reachable without a header.
-
-    This preserves the open-by-default development experience: in local dev where
-    the token is not set, the middleware must not block anything.
-    """
+def test_ask_stream_rejected_when_no_token_configured():
+    """When INTERNAL_RAG_TOKEN is empty, /ask/stream must fail closed."""
     import main as main_module
 
     original = main_module.INTERNAL_RAG_TOKEN
@@ -618,8 +689,8 @@ def test_ask_stream_allowed_when_no_token_configured():
         )
         # No token configured → middleware is inactive → route handler ran.
         # Expect 404 (no session) or 422 (validation), never 403 (auth block).
-        assert response.status_code != 403, (
-            "Middleware must not block requests when INTERNAL_RAG_TOKEN is unset. "
+        assert response.status_code == 403, (
+            "Middleware must block protected requests when INTERNAL_RAG_TOKEN is unset. "
             f"Got {response.status_code}"
         )
     finally:
@@ -708,7 +779,8 @@ def test_stream_lazy_load_faiss_uses_get_embedding_model():
                         "question": "test",
                         "session_id": session_id,
                         "session_secret": "test_secret"
-                    }
+                    },
+                    headers={"X-Internal-Token": main_module.INTERNAL_RAG_TOKEN},
                 )
                 
                 mock_get_embedding_model.assert_called_once()
