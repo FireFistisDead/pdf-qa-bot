@@ -71,6 +71,50 @@ SESSION_REGISTRY_LOCK_FILE = PERSIST_PATH / "session_registry.lock"
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(FAISS_DIR, exist_ok=True)
 
+
+class NormalizedChatHistory(list):
+    """Marker for chat histories already converted to role/text messages."""
+
+
+def normalize_chat_history(chat):
+    if isinstance(chat, NormalizedChatHistory):
+        return chat
+
+    normalized = NormalizedChatHistory()
+
+    for item in chat or []:
+        if not isinstance(item, dict):
+            continue
+
+        if item.get("role") in {"user", "bot"}:
+            message = dict(item)
+            if message.get("role") == "bot":
+                message.setdefault("sources", [])
+                message.setdefault("streaming", False)
+                message.setdefault("mode", "default")
+            normalized.append(message)
+            continue
+
+        if "question" in item or "answer" in item:
+            question = item.get("question")
+            answer = item.get("answer")
+            mode = item.get("mode") or "default"
+
+            if question:
+                normalized.append({"role": "user", "text": question})
+
+            if answer:
+                normalized.append({
+                    "role": "bot",
+                    "text": answer,
+                    "sources": item.get("sources", []),
+                    "streaming": False,
+                    "mode": mode,
+                })
+
+    return normalized
+
+
 def load_sessions():
     base: dict = {}
     if SESSIONS_FILE.exists():
@@ -81,6 +125,7 @@ def load_sessions():
                     meta["lock"] = threading.Lock()
                     meta["vectorstore"] = None
                     meta.setdefault("chat", [])
+                    meta["chat"] = normalize_chat_history(meta.get("chat", []))
                     meta.setdefault("flashcards", [])
                     base[sid] = meta
         except Exception as e:
@@ -97,7 +142,7 @@ def load_sessions():
                 with open(meta_path, "r", encoding="utf-8") as f:
                     per = json.load(f)
                 if isinstance(per.get("chat"), list):
-                    meta["chat"] = per["chat"]
+                    meta["chat"] = normalize_chat_history(per["chat"])
                 if isinstance(per.get("flashcards"), list):
                     meta["flashcards"] = per["flashcards"]
                 if per.get("last_accessed") and float(per["last_accessed"] or 0) > float(meta.get("last_accessed") or 0):
@@ -163,6 +208,20 @@ def update_processing_progress(session_id, stage, progress):
 
 INTERNAL_RAG_TOKEN = os.getenv("INTERNAL_RAG_TOKEN", "").strip()
 
+
+def internal_token_valid(provided: str | None, expected: str) -> bool:
+    candidate = (provided or "").strip()
+    return bool(expected) and bool(candidate) and secrets.compare_digest(candidate, expected)
+
+
+def require_internal_rag_token_configured():
+    if not INTERNAL_RAG_TOKEN:
+        raise RuntimeError("INTERNAL_RAG_TOKEN must be configured for protected endpoints.")
+
+
+require_internal_rag_token_configured()
+
+
 # How often the background flush thread wakes and writes dirty session metadata
 # files to disk. Lower values reduce the data-loss window on unclean shutdown
 # at the cost of more frequent I/O; higher values batch more writes.
@@ -177,13 +236,6 @@ try:
 except Exception:  # pragma: no cover
     from langchain.schema import Document  # type: ignore
 
-def internal_token_valid(provided: str | None, expected: str) -> bool:
-    if not expected:
-        return True
-    candidate = (provided or "").strip()
-    return bool(candidate) and candidate == expected
-
-
 def generate_session_secret() -> str:
     return secrets.token_urlsafe(32)
 
@@ -195,6 +247,29 @@ def standard_error_response(status_code: int, detail: str, **extra):
         **extra,
     }
     return JSONResponse(status_code=status_code, content=payload)
+
+
+def append_chat_exchange(session: dict, question: str, answer: str, sources: list, mode: str | None = None):
+    chat = normalize_chat_history(session.get("chat", []))
+    session["chat"] = chat
+
+    normalized_mode = mode or "default"
+    bot_message = {
+        "role": "bot",
+        "text": answer,
+        "sources": sources,
+        "streaming": False,
+        "mode": normalized_mode,
+    }
+
+    chat.extend([
+        {
+            "role": "user",
+            "text": question,
+        },
+        bot_message,
+    ])
+
 
 def extract_pdf_documents_sandboxed(pdf_path: str, filename: str):
     """
@@ -276,7 +351,7 @@ def extract_pdf_documents_sandboxed(pdf_path: str, filename: str):
 @app.middleware("http")
 async def internal_auth_middleware(request: Request, call_next):
     """
-    Enforce service-to-service auth for RAG endpoints when INTERNAL_RAG_TOKEN is set.
+    Enforce service-to-service auth for protected RAG endpoints.
 
     This prevents attackers from bypassing the API gateway's rate limits by calling
     the RAG service directly (for example when port 5000 is accidentally exposed).
@@ -291,6 +366,7 @@ async def internal_auth_middleware(request: Request, call_next):
         "/ask",
         "/ask/stream",
         "/summarize",
+        "/knowledge-gaps",
         "/validate-session-write",
         "/sessions/lookup",
     }
@@ -305,7 +381,7 @@ async def internal_auth_middleware(request: Request, call_next):
 
     path = request.url.path
 
-    if INTERNAL_RAG_TOKEN and (
+    if (
         path in protected_paths
         or any(path.startswith(prefix) for prefix in protected_prefixes)
     ):
@@ -472,6 +548,15 @@ def cleanup_retrieval_cache(retrieval_cache):
             len(retrieval_cache),
         )
 
+
+def ensure_retrieval_cache(session: dict) -> OrderedDict:
+    retrieval_cache = session.setdefault("retrieval_cache", OrderedDict())
+    if not isinstance(retrieval_cache, OrderedDict):
+        retrieval_cache = OrderedDict(retrieval_cache)
+        session["retrieval_cache"] = retrieval_cache
+    return retrieval_cache
+
+
 def session_expires_at(last_accessed: float) -> float:
     return last_accessed + (SESSION_TTL_MINUTES * 60)
 
@@ -628,6 +713,16 @@ def persist_vectorstore(session_id: str, vectorstore):
     os.makedirs(session_dir, exist_ok=True)
     vectorstore.save_local(session_dir)
     return session_dir
+
+
+def _load_vectorstore_for_session_unlocked(session_id: str, meta: dict):
+    session_dir = meta.get("session_dir") or get_session_dir(session_id)
+    meta["session_dir"] = session_dir
+    return FAISS.load_local(
+        session_dir,
+        get_embedding_model(),
+        allow_dangerous_deserialization=True,
+    )
 
 
 def _recover_session_unlocked(session_id: str):
@@ -859,15 +954,14 @@ def _write_session_meta_file(session_id: str, data: dict) -> None:
         logger.exception("Failed to write session metadata session_id=%s", session_id)
 
 
-def _append_chat_and_mark_dirty(session_id: str, entry: dict) -> None:
-    """Append *entry* to the in-memory chat list and mark the session dirty.
+def _mark_session_dirty(session_id: str) -> None:
+    """Mark a session as dirty so background persistence flushes metadata.
 
     Must be called while sessions_lock is held.
     """
     meta = sessions.get(session_id)
     if not meta:
         return
-    meta.setdefault("chat", []).append(entry)
     _dirty_sessions.add(session_id)
 
 
@@ -1325,7 +1419,7 @@ def _generate_followup_question(answer: str, question: str, docs: list) -> str:
     """Derive one non-yes/no follow-up from the answer text."""
     sentences = split_sentences(answer)
     base = sentences[0] if sentences else answer[:200]
-    
+
     prompt = (
         "Given this answer from a document: "
         f'"{base}" '
@@ -2091,6 +2185,12 @@ class SummarizeRequest(BaseModel):
     session_secret: str | None = None
 
 
+class KnowledgeGapsRequest(BaseModel):
+    session_id: UUID
+    session_secret: str
+    document_id: str | None = None
+
+
 class SessionLookupItem(BaseModel):
     session_id: UUID
     session_secret: str = Field(..., min_length=1)
@@ -2308,7 +2408,7 @@ def process_pdf(
                 "session_dir": None,
                 "created_at": created_at,
                 "last_accessed": created_at,
-                "retrieval_cache": {},
+                "retrieval_cache": OrderedDict(),
                 "chat": [],
             }
             persist_session_registry_entry(processing_session_id, sessions[processing_session_id])
@@ -2374,7 +2474,7 @@ def process_pdf(
                 session = _touch_session_unlocked(requested_session_id)
                 if not session:
                     raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-                session.setdefault("retrieval_cache", {})
+                ensure_retrieval_cache(session)
                 if "lock" not in session:
                     session["lock"] = threading.Lock()
                 session_lock = session["lock"]
@@ -2398,7 +2498,7 @@ def process_pdf(
                     raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
                 session.setdefault("documents", []).append(uploaded_document)
                 session["last_accessed"] = now
-                session["retrieval_cache"] = {}
+                session["retrieval_cache"] = OrderedDict()
                 session_id = requested_session_id
                 persist_session_registry_entry(session_id, session)
                 logger.info(
@@ -2440,7 +2540,7 @@ def process_pdf(
                     "session_dir": session_dir,
                     "created_at": created_at,
                     "last_accessed": now,
-                    "retrieval_cache": {},
+                    "retrieval_cache": OrderedDict(),
                     "chat": [],
                 }
                 if progress:
@@ -2530,7 +2630,7 @@ def ask_question(data: Question):
 
     # Normalize query for cache reuse
     normalized_query = normalize_query(question)
-    
+
 
     with sessions_lock:
 
@@ -2550,17 +2650,14 @@ def ask_question(data: Question):
         session_lock = session["lock"]
         if not session.get("vectorstore"):
             try:
-                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), get_embedding_model(), allow_dangerous_deserialization=True)
+                session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
             except Exception as e:
                 logger.error(f"Failed to lazy load vectorstore: {e}")
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
 
         # Session-level retrieval cache
-        retrieval_cache = session.setdefault(
-            "retrieval_cache",
-            OrderedDict()
-        )
+        retrieval_cache = ensure_retrieval_cache(session)
 
         cleanup_retrieval_cache(retrieval_cache)
         # Cache hit
@@ -2601,7 +2698,7 @@ def ask_question(data: Question):
                 with sessions_lock:
                     session = sessions.get(session_id)
                     if session:
-                        retrieval_cache = session.setdefault("retrieval_cache", {})
+                        retrieval_cache = ensure_retrieval_cache(session)
                         if len(retrieval_cache) >= RETRIEVAL_CACHE_LIMIT:
                             oldest_key = next(iter(retrieval_cache))
                             del retrieval_cache[oldest_key]
@@ -2638,12 +2735,16 @@ def ask_question(data: Question):
             "cache_hit": cache_hit,
         }
         with sessions_lock:
-            _append_chat_and_mark_dirty(session_id, {
-                "question": question,
-                "answer": INSUFFICIENT_CONTEXT_MESSAGE,
-                "sources": [],
-                "mode": mode,
-            })
+            session = sessions.get(session_id)
+            if session:
+                append_chat_exchange(
+                    session,
+                    question,
+                    INSUFFICIENT_CONTEXT_MESSAGE,
+                    [],
+                    mode,
+                )
+            _mark_session_dirty(session_id)
         return response_payload
 
     pages = sorted(set(
@@ -2695,12 +2796,17 @@ def ask_question(data: Question):
             "mode": mode,
         }
         with sessions_lock:
-            _append_chat_and_mark_dirty(session_id, {
-                "question": question,
-                "answer": framed,
-                "sources": citation_sources,
-                "mode": mode,
-            })
+            session = sessions.get(session_id)
+            if session:
+                append_chat_exchange(
+                    session,
+                    question,
+                    framed,
+                    citation_sources,
+                    mode,
+                )
+
+            _mark_session_dirty(session_id)
         return response_payload
 
     grounded_answer = build_answer_from_documents(
@@ -2728,12 +2834,17 @@ def ask_question(data: Question):
             "mode": mode,
         }
         with sessions_lock:
-            _append_chat_and_mark_dirty(session_id, {
-                "question": question,
-                "answer": grounded_answer,
-                "sources": citation_sources,
-                "mode": mode,
-            })
+            session = sessions.get(session_id)
+            if session:
+                append_chat_exchange(
+                    session,
+                    question,
+                    grounded_answer,
+                    citation_sources,
+                    mode,
+                )
+
+            _mark_session_dirty(session_id)
         return response_payload
     if grounded_answer:
         if ASK_REQUIRE_CITATIONS and not answer_contains_citation(grounded_answer, len(docs)):
@@ -2753,12 +2864,17 @@ def ask_question(data: Question):
                 "cache_hit": cache_hit,
             }
             with sessions_lock:
-                _append_chat_and_mark_dirty(session_id, {
-                    "question": question,
-                    "answer": INSUFFICIENT_CONTEXT_MESSAGE,
-                    "sources": citation_sources,
-                    "mode": mode,
-                })
+                session = sessions.get(session_id)
+                if session:
+                    append_chat_exchange(
+                        session,
+                        question,
+                        INSUFFICIENT_CONTEXT_MESSAGE,
+                        citation_sources,
+                        mode,
+                    )
+
+                _mark_session_dirty(session_id)
             return response_payload
         logger.info(
             "Returning grounded answer session_id=%s intent=%s retrieved_chunks=%s sources=%s",
@@ -2789,12 +2905,17 @@ def ask_question(data: Question):
         }
 
         with sessions_lock:
-            _append_chat_and_mark_dirty(session_id, {
-                "question": question,
-                "answer": framed,
-                "sources": citation_sources,
-                "mode": mode,
-            })
+            session = sessions.get(session_id)
+            if session:
+                append_chat_exchange(
+                    session,
+                    question,
+                    framed,
+                    citation_sources,
+                    mode,
+                )
+
+            _mark_session_dirty(session_id)
         return result
 
     prompt = (
@@ -2851,13 +2972,15 @@ def ask_question(data: Question):
         with sessions_lock:
             session = sessions.get(session_id)
             if session:
-                session.setdefault("retrieval_cache", {})
-            _append_chat_and_mark_dirty(session_id, {
-                "question": question,
-                "answer": framed,
-                "sources": citation_sources,
-                "mode": mode,
-            })
+                ensure_retrieval_cache(session)
+                append_chat_exchange(
+                    session,
+                    question,
+                    framed,
+                    citation_sources,
+                    mode,
+                )
+            _mark_session_dirty(session_id)
         return response_payload
 
     # ── Step 2: Fall back to HuggingFace model ───────────────────────────────
@@ -2890,13 +3013,17 @@ def ask_question(data: Question):
     with sessions_lock:
         session = sessions.get(session_id)
         if session:
-            session.setdefault("retrieval_cache", {})
-        _append_chat_and_mark_dirty(session_id, {
-            "question": question,
-            "answer": framed,
-            "sources": citation_sources,
-            "mode": mode,
-        })
+            ensure_retrieval_cache(session)
+
+            append_chat_exchange(
+                session,
+                question,
+                framed,
+                citation_sources,
+                mode,
+            )
+
+        _mark_session_dirty(session_id)
 
     return response_payload
 
@@ -2912,8 +3039,7 @@ def ask_question_stream(data: Question):
 
     Authentication is enforced by internal_auth_middleware — this endpoint is
     in both `protected_paths` (exact match) and under the `/ask/` prefix guard,
-    so it cannot be reached without a valid X-Internal-Token when
-    INTERNAL_RAG_TOKEN is configured.
+    so it cannot be reached without a valid X-Internal-Token.
     """
     cleanup_expired_sessions()
 
@@ -2942,28 +3068,35 @@ def ask_question_stream(data: Question):
         session_lock = session["lock"]
         if not session.get("vectorstore"):
             try:
-                session["vectorstore"] = FAISS.load_local(
-                    str(FAISS_DIR / session_id),
-                    get_embedding_model(),
-                    allow_dangerous_deserialization=True,
-                )
+                session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
             except Exception as exc:
                 logger.error("Failed to lazy load vectorstore session_id=%s error=%s", session_id, exc)
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
 
-        retrieval_cache = session.setdefault("retrieval_cache", {})
-        cache_key = f"{mode}:{normalized_query}"
-        if cache_key in retrieval_cache:
-            logger.info(
-                "Stream retrieval cache hit session_id=%s cache_key=%s",
-                session_id,
-                cache_key,
-            )
-            scored_candidates = retrieval_cache[cache_key]
-            cache_hit = True
-        else:
-            cache_hit = False
+        retrieval_cache = ensure_retrieval_cache(session)
+        with session_lock:
+            cleanup_retrieval_cache(retrieval_cache)
+            cache_key = f"{mode}:{normalized_query}"
+            cached_value = retrieval_cache.get(cache_key)
+            if isinstance(cached_value, dict) and "scored_candidates" in cached_value:
+                logger.info(
+                    "Stream retrieval cache hit session_id=%s cache_key=%s",
+                    session_id,
+                    cache_key,
+                )
+                scored_candidates = cached_value["scored_candidates"]
+                cache_hit = True
+            elif cached_value is not None:
+                logger.info(
+                    "Stream retrieval cache invalidated session_id=%s cache_key=%s",
+                    session_id,
+                    cache_key,
+                )
+                retrieval_cache.pop(cache_key, None)
+                cache_hit = False
+            else:
+                cache_hit = False
 
     try:
         with session_lock:
@@ -2982,11 +3115,14 @@ def ask_question_stream(data: Question):
                 with sessions_lock:
                     current_session = sessions.get(session_id)
                     if current_session:
-                        rc = current_session.setdefault("retrieval_cache", {})
+                        rc = ensure_retrieval_cache(current_session)
                         if len(rc) >= RETRIEVAL_CACHE_LIMIT:
                             oldest = next(iter(rc))
                             del rc[oldest]
-                        rc[cache_key] = scored_candidates
+                        rc[cache_key] = {
+                            "cached_at": now_ts(),
+                            "scored_candidates": scored_candidates,
+                        }
     except Exception:
         logger.exception("Stream similarity search failed session_id=%s", session_id)
         raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
@@ -3005,6 +3141,17 @@ def ask_question_stream(data: Question):
             intent,
             best_score,
         )
+        with sessions_lock:
+            current_session = sessions.get(session_id)
+            if current_session:
+                append_chat_exchange(
+                    current_session,
+                    question,
+                    INSUFFICIENT_CONTEXT_MESSAGE,
+                    [],
+                    mode,
+                )
+            _mark_session_dirty(session_id)
 
         def _refuse_stream():
             yield INSUFFICIENT_CONTEXT_MESSAGE
@@ -3031,13 +3178,17 @@ def ask_question_stream(data: Question):
         with sessions_lock:
             current_session = sessions.get(session_id)
             if current_session:
-                current_session.setdefault("retrieval_cache", {})
-                _append_chat_and_mark_dirty(session_id, {
-                    "question": question,
-                    "answer": framed,
-                    "sources": citation_sources,
-                    "mode": mode,
-                })
+                ensure_retrieval_cache(current_session)
+
+                append_chat_exchange(
+                    current_session,
+                    question,
+                    framed,
+                    citation_sources,
+                    mode,
+                )
+
+            _mark_session_dirty(session_id)
 
         def _grounded_stream():
             yield framed
@@ -3131,14 +3282,17 @@ def ask_question_stream(data: Question):
                 current_session = sessions.get(session_id)
 
                 if current_session:
-                    current_session.setdefault("retrieval_cache", {})
+                    ensure_retrieval_cache(current_session)
 
-                    _append_chat_and_mark_dirty(session_id, {
-                        "question": question,
-                        "answer": framed,
-                        "sources": citation_sources,
-                        "mode": mode,
-                    })
+                    append_chat_exchange(
+                        current_session,
+                        question,
+                        full_answer,
+                        citation_sources,
+                        mode,
+                    )
+
+                _mark_session_dirty(session_id)
         except Exception:
             logger.exception("Stream generation failed session_id=%s", session_id)
             yield "\n[Generation error. Please try again.]"
@@ -3172,7 +3326,7 @@ def summarize_pdf(data: SummarizeRequest):
         session_lock = session["lock"]
         if not session.get("vectorstore"):
             try:
-                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), get_embedding_model(), allow_dangerous_deserialization=True)
+                session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
             except Exception as e:
                 logger.error(f"Failed to lazy load vectorstore: {e}")
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
@@ -3192,6 +3346,266 @@ def summarize_pdf(data: SummarizeRequest):
     )
 
     return {"summary": build_session_summary(uploaded_documents, indexed_documents)}
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Knowledge Gap Detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Signals that a term IS defined inside the document (exclude these).
+_DEFINITION_PATTERNS = re.compile(
+    r"\b(?:is a |refers to |is defined as |what is |means |stands for )",
+    re.IGNORECASE,
+)
+
+# Multi-word capitalized phrase: two or more Title-Case words, tolerating
+# possessives (Bayes' Theorem) and hyphens (Cross-Entropy Loss).
+_MULTI_WORD_CAPS = re.compile(
+    r"\b([A-Z][a-z]+(?:'s?|-[A-Z][a-z]+)?(?:\s+[A-Z][a-z]+(?:'s?|-[A-Z][a-z]+)?)+)\b"
+)
+
+# Term immediately followed by its acronym: Convolutional Neural Network (CNN)
+_ACRONYM_INTRO = re.compile(
+    r"\b([A-Z][a-zA-Z\s-]{3,60})\s+\(([A-Z]{2,5})\)"
+)
+
+# Technical-suffix words recurring across pages.
+_TECH_SUFFIX = re.compile(
+    r"\b([A-Za-z]{4,}(?:tion|ity|ism|ology|ics|ance|ence|ment))\b"
+)
+
+# Bare acronyms (2–5 uppercase letters, no adjacent lowercase).
+_BARE_ACRONYM = re.compile(r"(?<![a-z])\b([A-Z]{2,5})\b(?![a-z])")
+
+# Common English words that happen to be all-caps abbreviations but are NOT
+# domain-specific prerequisites.  Extend this list conservatively.
+_ACRONYM_STOPWORDS = frozenset({
+    "I", "A", "AN", "THE", "AND", "OR", "NOT", "IN", "ON", "AT", "TO",
+    "BY", "OF", "IS", "IT", "BE", "DO", "GO", "US", "UK", "EU", "UN",
+    "PDF", "URL", "HTTP", "API", "ID", "OK", "DR", "MR", "MS", "VS",
+    "E.G", "I.E", "NOTE", "SEE", "FIG", "REF", "ETC", "Q&A",
+})
+
+
+def _is_defined_nearby(term: str, text: str, window: int = 120) -> bool:
+    """Return True if the term appears within `window` chars of a definition
+    signal in the given text (suggesting the document defines it)."""
+    term_lower = term.lower()
+    text_lower = text.lower()
+    pos = 0
+    while True:
+        idx = text_lower.find(term_lower, pos)
+        if idx == -1:
+            break
+        # Check a window before and after the term occurrence.
+        start = max(0, idx - window)
+        end = min(len(text_lower), idx + len(term_lower) + window)
+        excerpt = text_lower[start:end]
+        if _DEFINITION_PATTERNS.search(excerpt):
+            return True
+        pos = idx + 1
+    return False
+
+
+def detect_knowledge_gaps(
+    chunks: list,
+    max_concepts: int = 12,
+) -> list:
+    """
+    Pure-regex prerequisite concept detector.  No LLM, no new dependencies.
+
+    Scans LangChain Document objects (with .page_content and .metadata["page"])
+    and returns a list of dicts:
+      { "term": str, "pages": [int, ...], "frequency": int }
+
+    sorted by frequency descending, capped at `max_concepts`.
+
+    A concept qualifies when:
+      1. It has a domain-specific character (multi-word caps, acronym intro,
+         technical suffix, or bare acronym).
+      2. It is NOT defined anywhere in the document (no definition-signal
+         pattern within 120 chars of any occurrence of the term).
+    """
+    if not chunks:
+        return []
+
+    # Build a flat map: page_number -> full page text
+    page_texts: dict[int, str] = {}
+    for chunk in chunks:
+        page = chunk.metadata.get("page")
+        if page is None:
+            continue
+        page_num = page + 1  # convert 0-based to 1-based for display
+        page_texts.setdefault(page_num, "")
+        page_texts[page_num] += " " + chunk.page_content
+
+    if not page_texts:
+        return []
+
+    full_text = " ".join(page_texts.values())
+
+    # ── Step 1: collect candidate terms ──────────────────────────────────────
+    candidates: dict[str, set] = {}  # normalized_term -> set of page numbers
+
+    def _register(term: str, page_num: int):
+        """Add term/page to candidates dict."""
+        normed = " ".join(term.split())  # collapse whitespace
+        if len(normed) < 3 or len(normed) > 80:
+            return
+        candidates.setdefault(normed, set()).add(page_num)
+
+    for page_num, text in page_texts.items():
+        # Pattern A: multi-word capitalized phrases
+        for m in _MULTI_WORD_CAPS.finditer(text):
+            _register(m.group(1), page_num)
+
+        # Pattern B: term (ACRONYM) introductions — register both forms
+        for m in _ACRONYM_INTRO.finditer(text):
+            _register(m.group(1).strip(), page_num)
+            _register(m.group(2), page_num)
+
+        # Pattern C: technical-suffix words
+        for m in _TECH_SUFFIX.finditer(text):
+            _register(m.group(1), page_num)
+
+        # Pattern D: bare acronyms
+        for m in _BARE_ACRONYM.finditer(text):
+            term = m.group(1)
+            if term not in _ACRONYM_STOPWORDS and len(term) >= 2:
+                _register(term, page_num)
+
+    # ── Step 2: filter out terms that appear on only 1 page (too noisy) ──────
+    candidates = {
+        term: pages
+        for term, pages in candidates.items()
+        if len(pages) >= 2  # must recur on at least 2 pages
+    }
+
+    # ── Step 3: filter out terms defined within the document ─────────────────
+    qualified = []
+    for term, pages in candidates.items():
+        if not _is_defined_nearby(term, full_text):
+            qualified.append((term, sorted(pages)))
+
+    # ── Step 4: rank by page spread (most cross-cutting = most load-bearing) ─
+    qualified.sort(key=lambda x: len(x[1]), reverse=True)
+    qualified = qualified[:max_concepts]
+
+    return [
+        {"term": term, "pages": pages, "frequency": len(pages)}
+        for term, pages in qualified
+    ]
+
+
+@app.post("/knowledge-gaps")
+def knowledge_gaps(data: KnowledgeGapsRequest):
+    """
+    On-demand prerequisite concept mapper.
+
+    Scans the chunks of the requested document (or the first/only document
+    in the session when document_id is omitted) and returns a list of domain-
+    specific terms that are referenced but never defined in the document,
+    each annotated with the page numbers where they appear.
+
+    Authentication follows the same pattern as /summarize.
+    Runs entirely locally — no LLM call, no external requests.
+    """
+    cleanup_expired_sessions()
+    session_id = str(data.session_id)
+
+    with sessions_lock:
+        session = _touch_session_unlocked(session_id)
+        if not session:
+            raise HTTPException(
+                status_code=404,
+                detail="Session expired or invalid. Please re-upload your PDFs.",
+            )
+        _require_session_secret(session, data.session_secret)
+        if "lock" not in session:
+            session["lock"] = threading.Lock()
+        session_lock = session["lock"]
+
+        # Lazy-load vectorstore if not in memory
+        if not session.get("vectorstore"):
+            try:
+                session["vectorstore"] = FAISS.load_local(
+                    str(FAISS_DIR / session_id),
+                    get_embedding_model(),
+                    allow_dangerous_deserialization=True,
+                )
+            except Exception as exc:
+                logger.error("Failed to lazy load vectorstore: %s", exc)
+                raise HTTPException(
+                    status_code=500, detail="Failed to load session index."
+                )
+
+        vectorstore = session["vectorstore"]
+        uploaded_documents = list(session.get("documents", []))
+
+    if not uploaded_documents:
+        raise HTTPException(
+            status_code=422,
+            detail="This session has no uploaded documents. Upload a PDF before running analysis.",
+        )
+
+    # Resolve the target document
+    document_id = data.document_id
+    if document_id:
+        target_doc = next(
+            (d for d in uploaded_documents if d.get("document_id") == document_id),
+            None,
+        )
+        if target_doc is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"document_id '{document_id}' not found in this session.",
+            )
+    else:
+        target_doc = uploaded_documents[0]
+        document_id = target_doc.get("document_id")
+
+    document_filename = target_doc.get("filename", "document")
+
+    # Retrieve all indexed chunks for this document
+    with session_lock:
+        all_indexed = collect_index_documents(vectorstore)
+
+    doc_chunks = documents_for_upload(all_indexed, document_id)
+
+    # Edge case: scanned / image-based PDF — very little text extracted
+    total_chars = sum(len(c.page_content) for c in doc_chunks)
+    if total_chars < 200:
+        return {
+            "document": document_filename,
+            "document_id": document_id,
+            "concept_count": 0,
+            "concepts": [],
+            "scanned": False,
+            "short_document": False,
+            "message": (
+                "This PDF appears to contain no extractable text (it may be a scanned "
+                "image). Knowledge gap analysis requires readable text content."
+            ),
+        }
+
+    # Determine unique page count for the short-document notice
+    unique_pages = {c.metadata.get("page") for c in doc_chunks if c.metadata.get("page") is not None}
+    is_short = len(unique_pages) < 5
+
+
+
+    concepts = detect_knowledge_gaps(doc_chunks)
+
+    return {
+        "document": document_filename,
+        "document_id": document_id,
+        "concept_count": len(concepts),
+        "concepts": concepts,
+        "scanned": True,
+        "short_document": is_short,
+    }
+
 
 def generate_flashcards_from_text(indexed_docs, count):
     text_content = ""
@@ -3306,7 +3720,7 @@ def generate_flashcards(data: FlashcardGenerateRequest):
         
         if not session.get("vectorstore"):
             try:
-                session["vectorstore"] = FAISS.load_local(str(FAISS_DIR / session_id), get_embedding_model(), allow_dangerous_deserialization=True)
+                session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
             except Exception as e:
                 logger.error(f"Failed to lazy load vectorstore: {e}")
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
@@ -3371,6 +3785,7 @@ def update_flashcard_progress(data: FlashcardProgressRequest):
         _dirty_sessions.add(session_id)
         
     return {"status": "success", "flashcards": flashcards}
+
 
 if __name__ == "__main__":
     is_production = os.getenv("ENVIRONMENT", "development").lower() == "production"

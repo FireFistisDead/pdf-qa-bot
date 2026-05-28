@@ -73,7 +73,11 @@ flowchart LR
 
 > **Security note:** The FastAPI RAG service (`:5000`) is meant to be an **internal** dependency of the Express gateway (`:4000`).
 > Do not expose it publicly — otherwise attackers can bypass gateway rate limiting by calling RAG endpoints directly.
-> For defense-in-depth, set `INTERNAL_RAG_TOKEN` so the RAG service rejects requests missing `X-Internal-Token`.
+> `INTERNAL_RAG_TOKEN` is required so the RAG service rejects requests missing `X-Internal-Token`.
+
+### Upgrade Notes
+
+Existing deployments and local environments must set `INTERNAL_RAG_TOKEN` before starting the Express API or RAG service. Generate a strong shared secret, put the same value in both environments, and restart both services. The RAG service fails closed when this value is missing.
 
 ### Default ports
 
@@ -309,7 +313,7 @@ Environment variables are read from `rag-service/.env` (create from `.env.exampl
 | `OPENAI_API_KEY` | *(empty)* | Reserved; not used by the current local HF pipeline |
 | `HOST` | `127.0.0.1` | Documented for optional deployment tuning |
 | `PORT` | `5000` | Documented RAG port (uvicorn CLI flag takes precedence in dev) |
-| `INTERNAL_RAG_TOKEN` | *(empty)* | Optional shared secret: when set, RAG endpoints require `X-Internal-Token` |
+| `INTERNAL_RAG_TOKEN` | *(required)* | Shared secret required by protected RAG endpoints. Requests must include the same value in `X-Internal-Token` |
 | `PDF_PARSE_TIMEOUT_SECONDS` | `20` | Hard timeout for PDF parsing/extraction (mitigates DoS-grade PDFs) |
 | `MAX_PDF_PAGES` | `200` | Reject PDFs with too many pages |
 | `MAX_PDF_EXTRACT_CHARS` | `400000` | Cap extracted text before chunking |

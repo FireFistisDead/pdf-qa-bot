@@ -10,19 +10,13 @@ const crypto = require("crypto");
 const { rateLimit } = require("express-rate-limit");
 const slowDown = require("express-slow-down");
 const helmet = require("helmet");
-const {
-  askSchema,
-  summarizeSchema,
-  sessionsLookupSchema,
-  generateFlashcardsSchema,
-  updateFlashcardProgressSchema,
-} = require("./validators/schemas");
+const { askSchema, summarizeSchema, knowledgeGapsSchema, sessionsLookupSchema } = require("./validators/schemas");
 const { clientIpFromRequest } = require("./security/ip");
 const { createRedisClient } = require("./security/redis");
 const authRoutes = require("./src/routes/authRoutes");
 
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
-const INTERNAL_RAG_TOKEN = process.env.INTERNAL_RAG_TOKEN || "";
+const getInternalRagToken = () => (process.env.INTERNAL_RAG_TOKEN || "").trim();
 const PORT = process.env.PORT || 4000;
 
 const app = express();
@@ -289,9 +283,9 @@ const inferenceLimiter = rateLimit({
   },
 });
 
-// Apply the ban guard and global limiter to every single route.
-app.use(banGuard);
+// Apply global limiter before ban guard so DB-backed ban checks are rate-limited.
 app.use(globalLimiter);
+app.use(banGuard);
 app.use("/api/auth", authRoutes);
 
 // ─── File Size Limits ──────────────────────────────────────────────────────────
@@ -480,8 +474,19 @@ const extractServiceDetails = (err, fallbackMessage = "Upstream service request 
   );
 };
 
-const ragAuthHeaders = () =>
-  INTERNAL_RAG_TOKEN ? { "X-Internal-Token": INTERNAL_RAG_TOKEN } : {};
+const requireInternalRagToken = () => {
+  if (!getInternalRagToken()) {
+    throw new Error("INTERNAL_RAG_TOKEN must be configured for RAG service requests.");
+  }
+};
+
+const ragAuthHeaders = () => {
+  const token = getInternalRagToken();
+  if (!token) {
+    throw new Error("INTERNAL_RAG_TOKEN must be configured for RAG service requests.");
+  }
+  return { "X-Internal-Token": token };
+};
 
 const normalizeSessionSecret = (value) =>
   typeof value === "string" ? value.trim() || null : null;
@@ -846,7 +851,11 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
     const ragResponse = await axios.post(
       `${RAG_SERVICE_URL}/ask/stream`,
       { question, session_id, session_secret, mode },
-      { responseType: "stream", timeout: 120000 }
+      {
+        headers: ragAuthHeaders(),
+        responseType: "stream",
+        timeout: 120000,
+      }
     );
 
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -906,8 +915,8 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
   }
 });
 
-app.post("/sessions/flashcards", inferenceSlowDown, inferenceLimiter, async (req, res) => {
-  const validation = generateFlashcardsSchema.safeParse(req.body);
+app.post("/knowledge-gaps", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+  const validation = knowledgeGapsSchema.safeParse(req.body);
 
   if (!validation.success) {
     return res.status(400).json({
@@ -918,49 +927,19 @@ app.post("/sessions/flashcards", inferenceSlowDown, inferenceLimiter, async (req
 
   try {
     const response = await axios.post(
-      `${RAG_SERVICE_URL}/sessions/flashcards/generate`,
+      `${RAG_SERVICE_URL}/knowledge-gaps`,
       validation.data,
-      { headers: ragAuthHeaders(), timeout: 90000 }
+      { headers: ragAuthHeaders() },
     );
-
+    // Pass the response through as-is — no gateway-layer transformation.
     return res.json(response.data);
   } catch (err) {
     const statusCode = err.response?.status || 500;
-    const details = extractServiceDetails(err, "Failed to generate flashcards");
-    console.error("Flashcards generation failed:", details);
+    const details = extractServiceDetails(err, "Error mapping knowledge gaps");
+    console.error("Knowledge gap mapping failed:", details);
 
     return res.status(statusCode).json({
-      error: typeof details === "string" ? details : "Failed to generate flashcards",
-      details: isDevelopment ? details : "Internal processing error",
-    });
-  }
-});
-
-app.post("/sessions/flashcards/progress", async (req, res) => {
-  const validation = updateFlashcardProgressSchema.safeParse(req.body);
-
-  if (!validation.success) {
-    return res.status(400).json({
-      error: "Validation failed",
-      details: validation.error.flatten(),
-    });
-  }
-
-  try {
-    const response = await axios.post(
-      `${RAG_SERVICE_URL}/sessions/flashcards/update-progress`,
-      validation.data,
-      { headers: ragAuthHeaders() }
-    );
-
-    return res.json(response.data);
-  } catch (err) {
-    const statusCode = err.response?.status || 500;
-    const details = extractServiceDetails(err, "Failed to update flashcard progress");
-    console.error("Flashcard progress update failed:", details);
-
-    return res.status(statusCode).json({
-      error: typeof details === "string" ? details : "Failed to update flashcard progress",
+      error: typeof details === "string" ? details : "Error mapping knowledge gaps",
       details: isDevelopment ? details : "Internal processing error",
     });
   }
@@ -1034,6 +1013,8 @@ app.use((err, req, res, next) => {
 
 if (require.main === module) {
   (async () => {
+    requireInternalRagToken();
+
     if (redisConnectPromise) {
       console.log("[redis] connecting for distributed rate limiting...");
       await redisConnectPromise;
@@ -1056,4 +1037,11 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, askSchema, summarizeSchema, extractServiceDetails };
+module.exports = {
+  app,
+  askSchema,
+  summarizeSchema,
+  extractServiceDetails,
+  ragAuthHeaders,
+  requireInternalRagToken,
+};
