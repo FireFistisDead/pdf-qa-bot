@@ -2710,7 +2710,9 @@ def ask_question(data: Question):
                         "cached_at": now_ts(),
                         "scored_candidates": scored_candidates,
                     }
-
+    except Exception:
+        logger.exception("Similarity search failed session_id=%s", session_id)
+        raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
     best_score = scored_candidates[0][1] if scored_candidates else None
     if not passes_evidence_gate(question, docs, best_score, intent):
         logger.info(
