@@ -13,9 +13,11 @@ import DarkModeIcon from "@mui/icons-material/DarkMode";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../contexts/AuthContext";
 import { supabase } from "../../services/supabaseClient";
+import { motion } from "framer-motion";
+import { FiSearch, FiCommand } from "react-icons/fi";
 import logo from "./Nav_logo.png";
 
-const Navbar = ({ darkMode, setDarkMode }) => {
+const Navbar = ({ darkMode, setDarkMode, onSearchToggle }) => {
   const navigate = useNavigate();
   const { user } = useAuth();
   return (
@@ -23,45 +25,42 @@ const Navbar = ({ darkMode, setDarkMode }) => {
       position="static"
       elevation={0}
       sx={{
-        background: darkMode ? "#0B0B0F" : "#ffffff",
-        borderBottom: darkMode
-          ? "1px solid rgba(255,255,255,0.08)"
-          : "1px solid rgba(0,0,0,0.08)",
+        background: darkMode ? "var(--bg-secondary)" : "#ffffff",
+        borderBottom: "1px solid var(--border-color)",
         px: 2,
-        py: 1,
+        py: 0.5,
       }}
     >
       <Toolbar sx={{ display: "flex", justifyContent: "space-between" }}>
-        
         <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
-          
           <Avatar
             src={logo}
             alt="Logo"
-            onClick={() => navigate('/')}
+            onClick={() => navigate("/")}
             sx={{
-              width: 48,
-              height: 48,
+              width: 40,
+              height: 40,
               bgcolor: "transparent",
               cursor: "pointer",
             }}
           />
-
           <Box>
             <Typography
-              variant="h5"
+              variant="h6"
               sx={{
                 fontWeight: 700,
-                color: darkMode ? "#fff" : "#111",
+                color: darkMode ? "var(--text-primary)" : "#111",
+                fontSize: "1.1rem",
+                letterSpacing: "-0.01em",
               }}
             >
               PDF Intelligence
             </Typography>
-
             <Typography
-              variant="body2"
+              variant="caption"
               sx={{
-                color: darkMode ? "#A1A1AA" : "#666",
+                color: darkMode ? "var(--text-tertiary)" : "#666",
+                fontSize: "0.7rem",
               }}
             >
               AI-Powered Document Assistant
@@ -69,92 +68,148 @@ const Navbar = ({ darkMode, setDarkMode }) => {
           </Box>
         </Box>
 
-        <Box sx={{ display: "flex", gap: 2, alignItems: "center" }}>
+        <Box sx={{ display: "flex", gap: 1.5, alignItems: "center" }}>
+          {/* Search button */}
+          <motion.button
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+            onClick={onSearchToggle}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "8px 14px",
+              borderRadius: "var(--radius-md)",
+              border: "1px solid var(--border-color)",
+              background: darkMode ? "var(--bg-tertiary)" : "#f3f4f6",
+              color: darkMode ? "var(--text-tertiary)" : "#666",
+              cursor: "pointer",
+              fontSize: 13,
+              fontFamily: "var(--font-sans)",
+              transition: "border-color var(--transition-fast)",
+            }}
+          >
+            <FiSearch size={14} />
+            <span>Search</span>
+            <kbd
+              style={{
+                padding: "2px 6px",
+                borderRadius: 4,
+                background: darkMode ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
+                fontSize: 10,
+                fontWeight: 600,
+                fontFamily: "var(--font-sans)",
+                marginLeft: 4,
+              }}
+            >
+              <FiCommand size={10} style={{ display: "inline", verticalAlign: "middle" }} />K
+            </kbd>
+          </motion.button>
 
           {user ? (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <button
-                onClick={() => navigate('/dashboard')}
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "10px",
+              }}
+            >
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={() => navigate("/dashboard")}
                 style={{
                   padding: "8px 16px",
-                  borderRadius: "10px",
-                  border: "none",
-                  background: "#eee",
-                  color: "#333",
+                  borderRadius: "var(--radius-md)",
+                  border: "1px solid var(--border-color)",
+                  background: "transparent",
+                  color: darkMode ? "var(--text-secondary)" : "#333",
                   cursor: "pointer",
                   fontWeight: 600,
+                  fontSize: 12,
+                  fontFamily: "var(--font-sans)",
+                  transition: "all var(--transition-fast)",
                 }}
               >
                 Dashboard
-              </button>
-              <button 
+              </motion.button>
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
                 onClick={() => supabase.auth.signOut()}
+                title={user.email || "Sign Out"}
                 style={{
-                  background: '#7C4DFF',
-                  color: '#fff',
-                  border: 'none',
-                  borderRadius: '50%',
-                  width: '36px',
-                  height: '36px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontWeight: 'bold',
-                  fontFamily: 'monospace',
-                  cursor: 'pointer',
+                  width: 34,
+                  height: 34,
+                  borderRadius: "50%",
+                  border: "1px solid var(--border-color)",
+                  background: "var(--accent-gradient)",
+                  color: "#fff",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontWeight: 700,
+                  fontSize: 13,
+                  fontFamily: "var(--font-sans)",
                 }}
-                title="Sign Out"
               >
-                {user.email ? user.email.charAt(0).toUpperCase() : 'U'}
-              </button>
+                {user.email ? user.email.charAt(0).toUpperCase() : "U"}
+              </motion.button>
             </div>
           ) : (
-            <>
-              <button
-                onClick={() => navigate('/signin')}
+            <div style={{ display: "flex", gap: 8 }}>
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={() => navigate("/signin")}
                 style={{
                   padding: "8px 16px",
-                  borderRadius: "10px",
-                  border: "none",
+                  borderRadius: "var(--radius-md)",
+                  border: "1px solid var(--border-color)",
+                  background: "transparent",
+                  color: darkMode ? "var(--text-primary)" : "#111",
                   cursor: "pointer",
                   fontWeight: 600,
-                  background: 'transparent',
-                  color: darkMode ? "#fff" : "#111",
+                  fontSize: 12,
+                  fontFamily: "var(--font-sans)",
                 }}
               >
                 Login
-              </button>
-
-              <button
-                onClick={() => navigate('/signup')}
+              </motion.button>
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={() => navigate("/signup")}
                 style={{
                   padding: "8px 16px",
-                  borderRadius: "10px",
+                  borderRadius: "var(--radius-md)",
                   border: "none",
-                  background: "#7C4DFF",
+                  background: "var(--accent-gradient)",
                   color: "#fff",
                   cursor: "pointer",
                   fontWeight: 600,
+                  fontSize: 12,
+                  fontFamily: "var(--font-sans)",
                 }}
               >
                 Signup
-              </button>
-            </>
+              </motion.button>
+            </div>
           )}
 
           <IconButton
             onClick={() => setDarkMode(!darkMode)}
             sx={{
-              color: darkMode ? "#fff" : "#111",
-              border: darkMode
-                ? "1px solid rgba(255,255,255,0.1)"
-                : "1px solid rgba(0,0,0,0.1)",
-              borderRadius: "12px",
+              color: darkMode ? "var(--text-primary)" : "#111",
+              border: "1px solid var(--border-color)",
+              borderRadius: "var(--radius-md)",
+              width: 36,
+              height: 36,
             }}
           >
             {darkMode ? <LightModeIcon /> : <DarkModeIcon />}
           </IconButton>
-
         </Box>
       </Toolbar>
     </AppBar>

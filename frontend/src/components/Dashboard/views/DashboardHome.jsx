@@ -2,6 +2,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../../contexts/AuthContext';
 import { useDashboardData } from '../../../hooks/useDashboardData';
+import { StatsCard, StatsSkeleton } from '../../ui/';
+import { motion } from 'framer-motion';
+import { FiFileText, FiMessageSquare, FiDatabase, FiClock } from 'react-icons/fi';
 import '../Dashboard.css';
 
 /* ── Animated counter hook ── */
@@ -139,31 +142,46 @@ const DashboardHome = () => {
         </div>
       </section>
 
-      {/* CRAZY STATS GRID */}
-      {isLoading ? <SkeletonDataBar /> : (
-        <section className="stats-grid-crazy animate-on-load" style={{animationDelay: '0.1s'}}>
-          <div className="stat-card-crazy">
-            <div className="stat-val-crazy">{docs}<span className="neon-text">+</span></div>
-            <div className="stat-lbl-crazy">DOCUMENTS ANALYZED</div>
-            <div className="stat-bg-shape s1"/>
-          </div>
-          <div className="stat-card-crazy">
-            <div className="stat-val-crazy">{queries}<span className="neon-text">+</span></div>
-            <div className="stat-lbl-crazy">AI QUERIES EXECUTED</div>
-            <div className="stat-bg-shape s2"/>
-          </div>
-          <div className="stat-card-crazy active-stat">
-            <div className="stat-val-crazy">{kbs}</div>
-            <div className="stat-lbl-crazy">ACTIVE KNOWLEDGE BASES</div>
-            <div className="stat-bg-shape s3"/>
-            <div className="stat-scan-line"/>
-          </div>
-          <div className="stat-card-crazy">
-            <div className="stat-val-crazy">{mins}<span className="neon-text">m</span></div>
-            <div className="stat-lbl-crazy">ESTIMATED TIME SAVED</div>
-            <div className="stat-bg-shape s4"/>
-          </div>
-        </section>
+      {/* MODERN STATS GRID */}
+      {isLoading ? <StatsSkeleton /> : (
+        <motion.section
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.1 }}
+          className="animate-on-load"
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+            gap: 16,
+            padding: "0 24px",
+            marginBottom: 32,
+          }}
+        >
+          <StatsCard
+            label="Documents Analyzed"
+            value={`${docs}+`}
+            icon={<FiFileText />}
+            gradient="purple"
+          />
+          <StatsCard
+            label="AI Queries Executed"
+            value={`${queries}+`}
+            icon={<FiMessageSquare />}
+            gradient="cyan"
+          />
+          <StatsCard
+            label="Active Knowledge Bases"
+            value={kbs}
+            icon={<FiDatabase />}
+            gradient="green"
+          />
+          <StatsCard
+            label="Estimated Time Saved"
+            value={`${mins}m`}
+            icon={<FiClock />}
+            gradient="amber"
+          />
+        </motion.section>
       )}
 
       {/* CRAZY PANELS */}

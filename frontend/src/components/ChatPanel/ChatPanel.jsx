@@ -1,19 +1,34 @@
-import React, { useEffect, useRef, useState } from "react";
-import { Card, Button, Form, Spinner } from "react-bootstrap";
-import SmartToyIcon from "@mui/icons-material/SmartToy";
+import React, { useEffect, useRef, useState, useCallback } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  FiSend,
+  FiTrash2,
+  FiFileText,
+  FiZap,
+  FiBookOpen,
+  FiMessageSquare,
+  FiChevronDown,
+} from "react-icons/fi";
 import toast from "react-hot-toast";
 
 import MessageBubble from "./MessageBubble";
 import ExportMenu from "./ExportMenu";
 import KnowledgeGapMap from "./KnowledgeGapMap";
-import { askQuestionApi, askQuestionStreamApi, extractApiErrorMessage, summarizePdfApi, mapKnowledgeGapsApi } from "../../services/api";
+import {
+  askQuestionApi,
+  askQuestionStreamApi,
+  extractApiErrorMessage,
+  summarizePdfApi,
+  mapKnowledgeGapsApi,
+} from "../../services/api";
+import TypingIndicator from "../ui/TypingIndicator";
 
 const MODE_OPTIONS = [
-  { value: "default",  label: "Standard",  tooltip: "Balanced answers grounded in your document. Best for general-purpose reading." },
-  { value: "tutor",    label: "Tutor",     tooltip: "Full answer + one thoughtful follow-up question to push your understanding further." },
-  { value: "socratic", label: "Socratic",  tooltip: "Guides you to the answer through 2–3 questions. Never reveals the answer directly." },
-  { value: "eli5",     label: "Simple",    tooltip: "Plain language, everyday analogies, no jargon. Best for dense academic or legal documents." },
-  { value: "concise",  label: "Concise",   tooltip: "1–2 sentence answer, 60-word maximum. Best for quick fact-checking." },
+  { value: "default", label: "Standard", icon: "✨", tooltip: "Balanced answers grounded in your document." },
+  { value: "tutor", label: "Tutor", icon: "📚", tooltip: "Answer + follow-up question to deepen understanding." },
+  { value: "socratic", label: "Socratic", icon: "💭", tooltip: "Guides you through questions to find answers." },
+  { value: "eli5", label: "Simple", icon: "🔤", tooltip: "Plain language, everyday analogies." },
+  { value: "concise", label: "Concise", icon: "🎯", tooltip: "1-2 sentence answer, 60-word max." },
 ];
 
 const ChatPanel = ({
@@ -36,556 +51,712 @@ const ChatPanel = ({
   const [summarizing, setSummarizing] = useState(false);
   const [mappingGaps, setMappingGaps] = useState(false);
   const [mode, setMode] = useState(() => {
-    const saved = localStorage.getItem("pdfqa_preferred_mode");
-    return MODE_OPTIONS.some(opt => opt.value === saved) ? saved : "default";
+    try {
+      const saved = localStorage.getItem("pdfqa_preferred_mode");
+      return MODE_OPTIONS.some((opt) => opt.value === saved) ? saved : "default";
+    } catch {
+      return "default";
+    }
   });
   const messagesEndRef = useRef(null);
+  const inputRef = useRef(null);
+  const chatContainerRef = useRef(null);
 
-  const handleModeChange = (newMode) => {
+  const handleModeChange = useCallback((newMode) => {
     setMode(newMode);
-    localStorage.setItem("pdfqa_preferred_mode", newMode);
-  };
+    try {
+      localStorage.setItem("pdfqa_preferred_mode", newMode);
+    } catch {}
+  }, []);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({
-      behavior: "smooth",
-    });
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [currentChat, asking]);
-const askQuestion = async () => {
-  if (!question.trim()) {
-    toast.error("Please enter a question before submitting.");
-    return;
-  }
-  if (!selectedPdf || !currentPdfSessionId || !currentPdfSessionSecret) {
-    toast.error("Please upload and select a PDF document first.");
-    return;
-  }
 
-  const trimmedQuestion = question;
-  setAsking(true);
-  setQuestion("");
-  onAppendMessage({ role: "user", text: trimmedQuestion });
-  onAppendMessage({ role: "bot", text: "", streaming: true, sources: [], mode });
-
-  try {
-    await askQuestionStreamApi(trimmedQuestion, currentPdfSessionId, currentPdfSessionSecret, mode, (partialText) => {
-      onUpdateLastBotMessage(partialText, true);
-    });
-    onUpdateLastBotMessage(null, false);
-  } catch (streamErr) {
-    console.warn("Streaming failed, falling back to /ask:", streamErr.message);
-    try {
-      const data = await askQuestionApi(trimmedQuestion, currentPdfSessionId, currentPdfSessionSecret, mode);
-      onUpdateLastBotMessage(data.answer, false, data.sources || [], data.mode);
-    } catch (e) {
-      let errorMessage = "Error getting answer. Please try again.";
-      if (e.code === "ECONNABORTED") {
-        errorMessage = "Request timed out. Please try a simpler question.";
-      } else if (!e.response) {
-        errorMessage = "Network error. Please check if the backend server is running.";
-      } else if (e.response?.status === 404) {
-        errorMessage = "Session not found. Please upload the PDF again.";
-      } else if (e.response?.status === 500) {
-        errorMessage = "Server error. Please try again later.";
-      } else {
-        errorMessage = extractApiErrorMessage(e, errorMessage);
-      }
-      toast.error(errorMessage);
-      onUpdateLastBotMessage(errorMessage, false);
+  const askQuestion = useCallback(async () => {
+    if (!question.trim()) {
+      toast.error("Please enter a question.");
+      return;
     }
-  }
-  setAsking(false);
-};
-
-  const summarizePDF = async () => {
     if (!selectedPdf || !currentPdfSessionId || !currentPdfSessionSecret) {
-      toast.error("Please upload and select a PDF document first.");
+      toast.error("Please upload and select a PDF first.");
       return;
     }
 
-    setSummarizing(true);
-    const loadingToast = toast.loading("Summarizing PDF...");
+    const trimmedQuestion = question;
+    setAsking(true);
+    setQuestion("");
+
+    const timestamp = new Date().toISOString();
+    onAppendMessage({ role: "user", text: trimmedQuestion, timestamp });
+    onAppendMessage({
+      role: "bot",
+      text: "",
+      streaming: true,
+      sources: [],
+      mode,
+      timestamp: new Date().toISOString(),
+    });
 
     try {
-      const data = await summarizePdfApi(currentPdfName, currentPdfSessionId, currentPdfSessionSecret);
-      onAppendMessage({ role: "bot", text: data.summary });
-      toast.success("PDF summarized successfully!", {
-        id: loadingToast,
-      });
-    } catch (e) {
-      let errorMessage = "Error summarizing PDF. Please try again.";
+      await askQuestionStreamApi(
+        trimmedQuestion,
+        currentPdfSessionId,
+        currentPdfSessionSecret,
+        mode,
+        (partialText) => {
+          onUpdateLastBotMessage(partialText, true);
+        }
+      );
+      onUpdateLastBotMessage(null, false);
+    } catch (streamErr) {
+      console.warn("Streaming failed, falling back to /ask:", streamErr.message);
+      try {
+        const data = await askQuestionApi(
+          trimmedQuestion,
+          currentPdfSessionId,
+          currentPdfSessionSecret,
+          mode
+        );
+        onUpdateLastBotMessage(
+          data.answer,
+          false,
+          data.sources || [],
+          data.mode
+        );
+      } catch (e) {
+        let errorMessage = "Error getting answer. Please try again.";
+        if (e.code === "ECONNABORTED") {
+          errorMessage = "Request timed out.";
+        } else if (!e.response) {
+          errorMessage = "Network error. Check if the backend is running.";
+        } else if (e.response?.status === 404) {
+          errorMessage = "Session not found. Please upload the PDF again.";
+        } else if (e.response?.status === 500) {
+          errorMessage = "Server error. Please try again later.";
+        } else {
+          errorMessage = extractApiErrorMessage(e, errorMessage);
+        }
+        toast.error(errorMessage);
+        onUpdateLastBotMessage(errorMessage, false);
+      }
+    }
+    setAsking(false);
+  }, [question, selectedPdf, currentPdfSessionId, currentPdfSessionSecret, mode, onAppendMessage, onUpdateLastBotMessage]);
 
+  const summarizePDF = useCallback(async () => {
+    if (!selectedPdf || !currentPdfSessionId || !currentPdfSessionSecret) {
+      toast.error("Please upload and select a PDF first.");
+      return;
+    }
+    setSummarizing(true);
+    const loadingToast = toast.loading("Summarizing PDF...");
+    try {
+      const data = await summarizePdfApi(
+        currentPdfName,
+        currentPdfSessionId,
+        currentPdfSessionSecret
+      );
+      onAppendMessage({
+        role: "bot",
+        text: data.summary,
+        timestamp: new Date().toISOString(),
+        mode: "default",
+      });
+      toast.success("Summarized successfully!", { id: loadingToast });
+    } catch (e) {
+      let errorMessage = "Error summarizing PDF.";
       if (e.code === "ECONNABORTED") {
-        errorMessage =
-          "Summarization timed out. The document might be too large. Please try again.";
+        errorMessage = "Summarization timed out.";
       } else if (!e.response) {
-        errorMessage =
-          "Network error. Please check if the backend server is running.";
-      } else if (e.response?.status === 404) {
-        errorMessage = "Session not found. Please upload the PDF again.";
-      } else if (e.response?.status === 500) {
-        errorMessage = "Server error. Please try again later.";
+        errorMessage = "Network error.";
       } else {
         errorMessage = extractApiErrorMessage(e, errorMessage);
       }
-
-      toast.error(errorMessage, {
-        id: loadingToast,
-      });
+      toast.error(errorMessage, { id: loadingToast });
       onAppendMessage({ role: "bot", text: errorMessage });
     }
     setSummarizing(false);
-  };
+  }, [selectedPdf, currentPdfSessionId, currentPdfSessionSecret, currentPdfName, onAppendMessage]);
 
-  const mapKnowledgeGaps = async () => {
+  const mapKnowledgeGaps = useCallback(async () => {
     if (!selectedPdf || !currentPdfSessionId || !currentPdfSessionSecret) {
-      toast.error("Please upload and select a PDF document first.");
+      toast.error("Please upload and select a PDF first.");
       return;
     }
     setMappingGaps(true);
-    const loadingToast = toast.loading("Analysing knowledge prerequisites…");
+    const loadingToast = toast.loading("Analysing knowledge prerequisites...");
     try {
       const data = await mapKnowledgeGapsApi(
         currentPdfSessionId,
         currentPdfSessionSecret,
-        currentDocumentId || null,
+        currentDocumentId || null
       );
       onKnowledgeGapResult?.(data);
       toast.success("Knowledge gap map ready!", { id: loadingToast });
     } catch (e) {
-      let errorMessage = "Error mapping knowledge gaps. Please try again.";
+      let errorMessage = "Error mapping knowledge gaps.";
       if (e.code === "ECONNABORTED") {
-        errorMessage = "Request timed out. Please try again.";
+        errorMessage = "Request timed out.";
       } else if (!e.response) {
-        errorMessage = "Network error. Please check if the backend is running.";
-      } else if (e.response?.status === 422) {
-        errorMessage = extractApiErrorMessage(e, errorMessage);
-      } else if (e.response?.status === 404) {
-        errorMessage = "Session not found. Please re-upload the PDF.";
+        errorMessage = "Network error.";
       } else {
         errorMessage = extractApiErrorMessage(e, errorMessage);
       }
       toast.error(errorMessage, { id: loadingToast });
     }
     setMappingGaps(false);
-  };
+  }, [selectedPdf, currentPdfSessionId, currentPdfSessionSecret, currentDocumentId, onKnowledgeGapResult]);
+
+  const handleKeyDown = useCallback((e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      askQuestion();
+    }
+  }, [askQuestion]);
+
+  const handleRegenerate = useCallback(() => {
+    const lastUserMsg = [...currentChat].reverse().find((m) => m.role === "user");
+    if (lastUserMsg) {
+      setQuestion(lastUserMsg.text);
+      toast("You can re-ask your question", { icon: "🔄" });
+      inputRef.current?.focus();
+    }
+  }, [currentChat]);
+
+  const hasActiveDoc = !!selectedPdf && !!currentPdfSessionId;
+  const isEmpty = currentChat.length === 0;
 
   return (
-    <Card
-      className={`glass-card ${
-        darkMode ? "bg-dark text-light border-secondary" : ""
-      }`}
+    <motion.div
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.3 }}
       style={{
-        borderRadius: "24px",
-        minHeight: "650px",
-        border: darkMode
-          ? "1px solid rgba(255,255,255,0.08)"
-          : "1px solid rgba(0,0,0,0.08)",
+        display: "flex",
+        flexDirection: "column",
+        height: "100%",
+        minHeight: 600,
+        background: "var(--bg-card)",
+        border: "1px solid var(--border-color)",
+        borderRadius: "var(--radius-xl)",
+        backdropFilter: "blur(12px)",
+        overflow: "hidden",
+        position: "relative",
       }}
     >
-      <Card.Body className="d-flex flex-column">
-        {/* HEADER */}
-        <div
-          className="d-flex justify-content-between align-items-center mb-4 pb-3"
-          style={{
-            borderBottom: darkMode
-              ? "1px solid rgba(255,255,255,0.06)"
-              : "1px solid rgba(0,0,0,0.06)",
-          }}
-        >
+      {/* Header */}
+      <div
+        style={{
+          padding: "16px 20px",
+          borderBottom: "1px solid var(--border-color)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          flexShrink: 0,
+          background: darkMode ? "rgba(15,23,42,0.2)" : "rgba(255,255,255,0.3)",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div
+            style={{
+              width: 36,
+              height: 36,
+              borderRadius: "var(--radius-md)",
+              background: "var(--accent-gradient)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "#fff",
+              fontSize: 16,
+              boxShadow: "0 4px 12px rgba(99,102,241,0.25)",
+            }}
+          >
+            <FiMessageSquare />
+          </div>
           <div>
-            <div className="d-flex align-items-center gap-2">
-              <h5 className="mb-0">AI Assistant</h5>
-
-              <div
-                style={{
-                  width: "8px",
-                  height: "8px",
-                  borderRadius: "50%",
-                  background: "#22C55E",
-                }}
-              />
-            </div>
-
-            <small
+            <div
               style={{
-                color: darkMode ? "#A1A1AA" : "#666",
+                fontWeight: 600,
+                fontSize: 14,
+                color: "var(--text-primary)",
               }}
             >
-              Ready to assist with your document
-            </small>
-          </div>
-          <div className="d-flex gap-2">
-            <Button
-              id="btn-summarize"
-              variant="warning"
-              size="sm"
-              onClick={summarizePDF}
-              disabled={summarizing || !selectedPdf}
+              AI Assistant
+            </div>
+            <div
+              style={{
+                fontSize: 11,
+                color: "var(--text-tertiary)",
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+              }}
             >
-              {summarizing ? (
-                <Spinner animation="border" size="sm" />
-              ) : (
-                "Summarize"
-              )}
-            </Button>
-
-            <Button
-              id="btn-knowledge-gaps"
-              variant="outline-info"
-              size="sm"
-              onClick={mapKnowledgeGaps}
-              disabled={mappingGaps || !selectedPdf}
-              title={`Map prerequisite concepts${currentPdfName ? ` in ${currentPdfName}` : ""}`}
-              style={{ whiteSpace: "nowrap" }}
-            >
-              {mappingGaps ? (
-                <><Spinner animation="border" size="sm" /> Analysing…</>
-              ) : knowledgeGapResult ? (
-                "🔄 Re-run Gap Map"
-              ) : (
-                "📚 Map Knowledge Gaps"
-              )}
-            </Button>
-
-            <ExportMenu currentChat={currentChat} selectedPdfName={currentPdfName} />
-            <Button
-            variant="danger"
-            size="sm"
-            onClick={handleClearChat}>
-            Clear Chat
-            </Button>
+              <span
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: "50%",
+                  background: hasActiveDoc ? "var(--success)" : "var(--warning)",
+                  display: "inline-block",
+                }}
+              />
+              {hasActiveDoc ? `Ready • ${currentPdfName || "PDF loaded"}` : "No document selected"}
+            </div>
           </div>
         </div>
 
-        {/* KNOWLEDGE GAP MAP — rendered above chat, not as a chat message */}
-        {knowledgeGapResult && (
-          <KnowledgeGapMap
-            result={knowledgeGapResult}
-            darkMode={darkMode}
-            onOpenSource={onOpenSource}
-            onDismiss={() => onKnowledgeGapResult?.(null)}
-          />
-        )}
-
-        {/* CHAT AREA */}
-        <div
-          style={{
-            flex: 1,
-            overflowY: "auto",
-            marginBottom: 20,
-            paddingRight: "6px",
-          }}
-        >
-          {currentChat.length > 0 ? (
-            <>
-              <div className="d-flex justify-content-start mb-4">
-                <div
-                  className={`p-3 ${darkMode ? "text-light" : "text-dark"}`}
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <motion.button
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.97 }}
+            onClick={summarizePDF}
+            disabled={summarizing || !hasActiveDoc}
+            title="Summarize PDF"
+            aria-label="Summarize PDF"
+            style={{
+              padding: "8px 14px",
+              borderRadius: "var(--radius-sm)",
+              border: "1px solid var(--border-color)",
+              background: summarizing ? "var(--bg-elevated)" : "transparent",
+              color: "var(--text-secondary)",
+              cursor: summarizing || !hasActiveDoc ? "not-allowed" : "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              fontSize: 12,
+              fontWeight: 500,
+              opacity: summarizing || !hasActiveDoc ? 0.5 : 1,
+              transition: "all var(--transition-fast)",
+              fontFamily: "var(--font-sans)",
+            }}
+          >
+            {summarizing ? (
+              <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span
                   style={{
-                    maxWidth: "85%",
-                    borderRadius: "20px 20px 20px 6px",
-
-                    background: darkMode
-                      ? "rgba(255,255,255,0.05)"
-                      : "#F8FAFC",
-
-                    border: darkMode
-                      ? "1px solid rgba(255,255,255,0.06)"
-                      : "1px solid rgba(0,0,0,0.06)",
-
-                    lineHeight: 1.8,
-                    fontSize: "15px",
+                    width: 12,
+                    height: 12,
+                    borderRadius: "50%",
+                    border: "2px solid var(--accent)",
+                    borderTopColor: "transparent",
+                    animation: "spin 0.6s linear infinite",
+                    display: "inline-block",
                   }}
-                >
-                  <div className="d-flex align-items-center gap-2 mb-2">
-                    <SmartToyIcon
-                      sx={{
-                        fontSize: 20,
-                        color: "#8B5CF6",
-                      }}
-                    />
+                />
+                Analyzing...
+              </span>
+            ) : (
+              <>
+                <FiFileText size={13} />
+                <span className="hide-on-mobile">Summarize</span>
+              </>
+            )}
+          </motion.button>
 
-                    <strong>PDF Intelligence</strong>
-                  </div>
+          <motion.button
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.97 }}
+            onClick={mapKnowledgeGaps}
+            disabled={mappingGaps || !hasActiveDoc}
+            title="Map knowledge prerequisites"
+            aria-label="Map knowledge gaps"
+            style={{
+              padding: "8px 14px",
+              borderRadius: "var(--radius-sm)",
+              border: "1px solid var(--border-color)",
+              background: mappingGaps ? "var(--bg-elevated)" : "transparent",
+              color: "var(--text-secondary)",
+              cursor: mappingGaps || !hasActiveDoc ? "not-allowed" : "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              fontSize: 12,
+              fontWeight: 500,
+              opacity: mappingGaps || !hasActiveDoc ? 0.5 : 1,
+              transition: "all var(--transition-fast)",
+              fontFamily: "var(--font-sans)",
+            }}
+          >
+            {mappingGaps ? (
+              <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span
+                  style={{
+                    width: 12,
+                    height: 12,
+                    borderRadius: "50%",
+                    border: "2px solid var(--accent-tertiary)",
+                    borderTopColor: "transparent",
+                    animation: "spin 0.6s linear infinite",
+                    display: "inline-block",
+                  }}
+                />
+                Analyzing...
+              </span>
+            ) : (
+              <>
+                <FiBookOpen size={13} />
+                <span className="hide-on-mobile">Gaps</span>
+              </>
+            )}
+          </motion.button>
 
-                  <div>
-                    Hi! I am your document assistant.
-                    <br />
-                    <br />
-                    Upload a PDF and ask me anything about it. I can:
-                    <ul style={{ marginTop: "10px" }}>
-                      <li>Summarize complex sections</li>
-                      <li>Find important information</li>
-                      <li>Explain technical concepts</li>
-                    </ul>
-                  </div>
-                </div>
-              </div>
+          <ExportMenu currentChat={currentChat} selectedPdfName={currentPdfName} />
+
+          <motion.button
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.97 }}
+            onClick={handleClearChat}
+            disabled={isEmpty}
+            title="Clear chat"
+            aria-label="Clear chat history"
+            style={{
+              padding: 8,
+              borderRadius: "var(--radius-sm)",
+              border: "1px solid var(--border-color)",
+              background: "transparent",
+              color: "var(--text-tertiary)",
+              cursor: isEmpty ? "not-allowed" : "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              opacity: isEmpty ? 0.4 : 1,
+              transition: "all var(--transition-fast)",
+            }}
+          >
+            <FiTrash2 size={14} />
+          </motion.button>
+        </div>
+      </div>
+
+      {/* Knowledge Gap Map */}
+      <AnimatePresence>
+        {knowledgeGapResult && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.3 }}
+            style={{ overflow: "hidden", borderBottom: "1px solid var(--border-color)" }}
+          >
+            <KnowledgeGapMap
+              result={knowledgeGapResult}
+              darkMode={darkMode}
+              onOpenSource={onOpenSource}
+              onDismiss={() => onKnowledgeGapResult?.(null)}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Chat Messages */}
+      <div
+        ref={chatContainerRef}
+        style={{
+          flex: 1,
+          overflowY: "auto",
+          padding: "16px 20px",
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        {isEmpty ? (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4 }}
+            style={{
+              flex: 1,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              textAlign: "center",
+              padding: "40px 20px",
+            }}
+          >
+            <motion.div
+              animate={{ scale: [1, 1.05, 1] }}
+              transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
+              style={{
+                width: 80,
+                height: 80,
+                borderRadius: 24,
+                background: "var(--accent-gradient)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "#fff",
+                fontSize: 32,
+                marginBottom: 24,
+                boxShadow: "0 16px 48px rgba(99,102,241,0.15)",
+              }}
+            >
+              <FiMessageSquare />
+            </motion.div>
+            <h3
+              style={{
+                fontWeight: 700,
+                fontSize: 22,
+                color: "var(--text-primary)",
+                marginBottom: 8,
+                letterSpacing: "-0.02em",
+              }}
+            >
+              AI Document Assistant
+            </h3>
+            <p
+              style={{
+                maxWidth: 360,
+                color: "var(--text-tertiary)",
+                fontSize: 14,
+                lineHeight: 1.7,
+                marginBottom: 0,
+              }}
+            >
+              Upload a PDF and ask intelligent questions about its contents.
+              Generate summaries, explore insights, and interact naturally.
+            </p>
+            {!hasActiveDoc && (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.2 }}
+                style={{
+                  marginTop: 24,
+                  padding: "14px 18px",
+                  borderRadius: "var(--radius-md)",
+                  background: "rgba(245,158,11,0.08)",
+                  border: "1px solid rgba(245,158,11,0.15)",
+                  fontSize: 13,
+                  color: "var(--warning)",
+                  fontWeight: 500,
+                }}
+              >
+                Please upload a PDF to begin chatting.
+              </motion.div>
+            )}
+          </motion.div>
+        ) : (
+          <>
+            <AnimatePresence mode="popLayout">
               {currentChat.map((msg, i) => (
                 <MessageBubble
-                  key={i}
+                  key={`${msg.timestamp || i}-${i}`}
                   msg={msg}
                   darkMode={darkMode}
                   onOpenSource={onOpenSource}
+                  onRegenerate={
+                    msg.role === "bot" && !msg.streaming
+                      ? handleRegenerate
+                      : undefined
+                  }
+                  isLast={i === currentChat.length - 1}
                 />
               ))}
-
-              {asking && (
-                <div className="d-flex justify-content-start mb-3 chat-message">
-                  <div
-                    className={`p-3 ${darkMode ? "text-light" : "text-dark"}`}
-                    style={{
-                      maxWidth: "220px",
-                      borderRadius: "20px 20px 20px 6px",
-
-                      background: darkMode
-                        ? "rgba(255,255,255,0.06)"
-                        : "#F3F4F6",
-
-                      border: darkMode
-                        ? "1px solid rgba(255,255,255,0.06)"
-                        : "1px solid rgba(0,0,0,0.06)",
-
-                      backdropFilter: "blur(12px)",
-                    }}
-                  >
-                    <div className="d-flex align-items-center gap-2">
-                      <SmartToyIcon
-                        sx={{
-                          fontSize: 20,
-                          color: "#8B5CF6",
-                        }}
-                      />
-
-                      <div className="d-flex align-items-center gap-1">
-                        <span className="typing-dot"></span>
-                        <span className="typing-dot"></span>
-                        <span className="typing-dot"></span>
-                      </div>
-
-                      <span
-                        style={{
-                          fontSize: "14px",
-                          opacity: 0.85,
-                        }}
-                      >
-                        AI is analyzing document...
-                      </span>
-                    </div>
-                  </div>
+            </AnimatePresence>
+            {asking && (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.2 }}
+                style={{
+                  display: "flex",
+                  gap: 10,
+                  alignItems: "center",
+                  padding: "12px 0",
+                  color: "var(--text-tertiary)",
+                  fontSize: 13,
+                }}
+                role="status"
+                aria-label="AI is responding"
+              >
+                <div
+                  style={{
+                    width: 28,
+                    height: 28,
+                    borderRadius: "50%",
+                    background: "var(--bg-tertiary)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color: "var(--accent)",
+                    fontSize: 12,
+                  }}
+                >
+                  <FiZap />
                 </div>
-              )}
-            </>
-          ) : (
-            <div
-              className="d-flex flex-column justify-content-center align-items-center text-center"
+                <TypingIndicator />
+                <span style={{ marginLeft: 4 }}>AI is analyzing document...</span>
+              </motion.div>
+            )}
+          </>
+        )}
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* Mode Selector + Input */}
+      <div
+        style={{
+          borderTop: "1px solid var(--border-color)",
+          padding: "10px 16px 14px",
+          flexShrink: 0,
+          background: darkMode ? "rgba(15,23,42,0.15)" : "rgba(255,255,255,0.2)",
+        }}
+      >
+        {/* Mode selector */}
+        <div
+          style={{
+            display: "flex",
+            gap: 4,
+            marginBottom: 8,
+            flexWrap: "wrap",
+          }}
+        >
+          {MODE_OPTIONS.map((opt) => (
+            <motion.button
+              key={opt.value}
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.97 }}
+              onClick={() => handleModeChange(opt.value)}
+              title={opt.tooltip}
+              aria-label={`Switch to ${opt.label} mode`}
+              aria-pressed={mode === opt.value}
               style={{
-                minHeight: "520px",
-                padding: "40px",
+                padding: "4px 10px",
+                borderRadius: 20,
+                border:
+                  mode === opt.value
+                    ? "1.5px solid var(--accent)"
+                    : "1px solid var(--border-color)",
+                background:
+                  mode === opt.value
+                    ? "rgba(99,102,241,0.1)"
+                    : "transparent",
+                color:
+                  mode === opt.value
+                    ? "var(--accent)"
+                    : "var(--text-tertiary)",
+                fontSize: 11,
+                fontWeight: mode === opt.value ? 600 : 400,
+                cursor: "pointer",
+                transition: "all var(--transition-fast)",
+                fontFamily: "var(--font-sans)",
+                display: "flex",
+                alignItems: "center",
+                gap: 3,
               }}
             >
-              <div
-                style={{
-                  width: "88px",
-                  height: "88px",
-                  borderRadius: "24px",
-                  background: darkMode
-                    ? "rgba(124,77,255,0.12)"
-                    : "rgba(124,77,255,0.08)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  marginBottom: "24px",
-                }}
-              >
-                <SmartToyIcon
-                  sx={{
-                    fontSize: 48,
-                    color: "#8B5CF6",
-                  }}
-                />
-              </div>
-
-              <h3
-                style={{
-                  fontWeight: 700,
-                  marginBottom: "12px",
-                  fontSize: "38px",
-                  letterSpacing: "-0.5px",
-                }}
-              >
-                Your AI Document Assistant
-              </h3>
-
-              <p
-                style={{
-                  maxWidth: "360px",
-                  color: darkMode ? "#A1A1AA" : "#666",
-                  lineHeight: 1.7,
-                  marginBottom: 0,
-                }}
-              >
-                Upload a document and ask intelligent questions about its
-                contents. Generate summaries, explore insights, and interact
-                naturally with your PDF files.
-              </p>
-              <div
-                style={{
-                  marginTop: "28px",
-                  width: "100%",
-                  maxWidth: "520px",
-
-                  padding: "18px 20px",
-
-                  borderRadius: "22px",
-
-                  background: darkMode
-                    ? "rgba(245,158,11,0.12)"
-                    : "rgba(245,158,11,0.08)",
-
-                  border: darkMode
-                    ? "1px solid rgba(245,158,11,0.22)"
-                    : "1px solid rgba(245,158,11,0.18)",
-
-                  textAlign: "left",
-                }}
-              >
-                <div
-                  style={{
-                    fontWeight: 700,
-                    marginBottom: "4px",
-                    color: "#F59E0B",
-                  }}
-                >
-                  Waiting for document
-                </div>
-
-                <div
-                  style={{
-                    fontSize: "14px",
-                    color: darkMode ? "#D1D5DB" : "#92400E",
-                    lineHeight: 1.6,
-                  }}
-                >
-                  Please upload a PDF document first to begin the conversation.
-                </div>
-              </div>
-            </div>
-          )}
+              <span>{opt.icon}</span>
+              <span>{opt.label}</span>
+            </motion.button>
+          ))}
         </div>
-        <div ref={messagesEndRef} />
-        {/* MODE SELECTOR */}
-        <div style={{ marginBottom: "10px" }}>
-          <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
-            {MODE_OPTIONS.map((opt) => (
-              <button
-                key={opt.value}
-                id={`mode-btn-${opt.value}`}
-                title={opt.tooltip}
-                onClick={() => handleModeChange(opt.value)}
-                style={{
-                  padding: "4px 12px",
-                  borderRadius: "20px",
-                  border: mode === opt.value
-                    ? "1.5px solid #8B5CF6"
-                    : darkMode ? "1px solid rgba(255,255,255,0.15)" : "1px solid rgba(0,0,0,0.12)",
-                  background: mode === opt.value
-                    ? "rgba(139,92,246,0.15)"
-                    : "transparent",
-                  color: mode === opt.value
-                    ? "#8B5CF6"
-                    : darkMode ? "#A1A1AA" : "#666",
-                  fontSize: "12px",
-                  fontWeight: mode === opt.value ? 600 : 400,
-                  cursor: "pointer",
-                  transition: "all 0.15s ease",
-                }}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-          <div style={{ fontSize: "11px", color: darkMode ? "#6B7280" : "#9CA3AF", marginTop: "4px" }}>
-            {MODE_OPTIONS.find(o => o.value === mode)?.tooltip}
-          </div>
-        </div>
-        {/* INPUT */}
+
+        {/* Input area */}
         <div
           style={{
             display: "flex",
             alignItems: "center",
-            gap: "12px",
-
-            padding: "10px 12px",
-
-            borderRadius: "18px",
-
+            gap: 8,
+            padding: "4px 6px 4px 16px",
+            borderRadius: "var(--radius-lg)",
             background: darkMode
-              ? "rgba(255,255,255,0.07)"
-              : "#F8FAFC",
-
-            border: darkMode
-              ? "1px solid rgba(255,255,255,0.08)"
-              : "1px solid rgba(0,0,0,0.06)",
-
-            backdropFilter: "blur(12px)",
+              ? "rgba(30, 41, 59, 0.6)"
+              : "rgba(241, 245, 249, 0.8)",
+            border: "1px solid var(--border-color)",
+            transition: "border-color var(--transition-fast), box-shadow var(--transition-fast)",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.borderColor = "var(--accent)";
+            e.currentTarget.style.boxShadow = "0 0 0 3px rgba(99,102,241,0.08)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.borderColor = "var(--border-color)";
+            e.currentTarget.style.boxShadow = "none";
           }}
         >
-          <Form.Control
-            className={darkMode ? "custom-chat-input" : "light-placeholder"}
+          <input
+            ref={inputRef}
             type="text"
-            placeholder="Ask a question about your PDF..."
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
+            onKeyDown={handleKeyDown}
             disabled={asking}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                askQuestion();
-              }
-            }}
+            placeholder={
+              hasActiveDoc
+                ? "Ask a question about your PDF..."
+                : "Upload a document to get started..."
+            }
+            aria-label="Ask a question"
             style={{
+              flex: 1,
               border: "none",
               background: "transparent",
-              boxShadow: "none",
-              color: darkMode ? "#fff" : "#111",
-              caretColor: darkMode ? "#fff" : "#111",
-              fontSize: "15px",
-              opacity: 1,
-              WebkitTextFillColor: darkMode ? "#fff" : "#111",
+              color: "var(--text-primary)",
+              fontSize: 14,
+              outline: "none",
+              padding: "10px 0",
+              fontFamily: "var(--font-sans)",
             }}
           />
 
-          <Button
-            variant="primary"
+          <motion.button
+            whileHover={!asking && question.trim() && hasActiveDoc ? { scale: 1.05 } : {}}
+            whileTap={!asking && question.trim() && hasActiveDoc ? { scale: 0.93 } : {}}
             onClick={askQuestion}
-            disabled={asking || !question.trim() || !selectedPdf}
+            disabled={asking || !question.trim() || !hasActiveDoc}
+            aria-label="Send message"
             style={{
-              width: "48px",
-              height: "48px",
-              borderRadius: "14px",
+              width: 42,
+              height: 42,
+              borderRadius: "var(--radius-md)",
               border: "none",
-
-              background: "linear-gradient(135deg, #8B5CF6, #7C4DFF)",
-
+              background:
+                asking || !question.trim() || !hasActiveDoc
+                  ? "var(--bg-elevated)"
+                  : "var(--accent-gradient)",
+              color:
+                asking || !question.trim() || !hasActiveDoc
+                  ? "var(--text-tertiary)"
+                  : "#fff",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-
+              cursor:
+                asking || !question.trim() || !hasActiveDoc
+                  ? "not-allowed"
+                  : "pointer",
               flexShrink: 0,
-
-              boxShadow: "0 8px 24px rgba(124,77,255,0.25)",
+              boxShadow:
+                asking || !question.trim() || !hasActiveDoc
+                  ? "none"
+                  : "0 8px 24px rgba(99,102,241,0.25)",
+              transition: "all var(--transition-fast)",
+              fontSize: 17,
             }}
           >
-            {asking ? <Spinner animation="border" size="sm" /> : "➜"}
-          </Button>
+            {asking ? (
+              <span
+                style={{
+                  width: 16,
+                  height: 16,
+                  borderRadius: "50%",
+                  border: "2px solid currentColor",
+                  borderTopColor: "transparent",
+                  animation: "spin 0.6s linear infinite",
+                  display: "block",
+                }}
+              />
+            ) : (
+              <FiSend />
+            )}
+          </motion.button>
         </div>
-      </Card.Body>
-    </Card>
+      </div>
+    </motion.div>
   );
 };
 
 export default ChatPanel;
-
-// Accessibility improvements applied

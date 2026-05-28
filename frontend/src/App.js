@@ -1,61 +1,51 @@
-import React, { useState } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { pdfjs } from "react-pdf";
 import "bootstrap/dist/css/bootstrap.min.css";
-import { Container, Row, Col } from "react-bootstrap";
+import { motion } from "framer-motion";
+
 import Navbar from "./components/Navbar/Navbar";
-import UploadCard from "./components/UploadCard/UploadCard";
 import PdfViewer from "./components/PdfViewer/PdfViewer";
 import ChatPanel from "./components/ChatPanel/ChatPanel";
-import toast, { Toaster } from "react-hot-toast";
 import LandingPage from "./components/Landing/LandingPage";
 import SignIn from "./components/Auth/SignIn";
 import SignUp from "./components/Auth/SignUp";
 import { AuthProvider } from "./contexts/AuthContext";
 import Dashboard from "./components/Dashboard/Dashboard";
 import StudyHub from "./components/StudyHub/StudyHub";
+import { ThemeProvider, useTheme } from "./contexts/ThemeContext";
+import Sidebar from "./components/Sidebar/Sidebar";
+import { FAB, SearchModal } from "./components/ui";
+import ToastConfig from "./components/ui/ToastConfig";
 
+import toast from "react-hot-toast";
+import { FiFileText } from "react-icons/fi";
 import { extractApiErrorMessage, uploadPdfApi, getSessionsApi } from "./services/api";
 
 pdfjs.GlobalWorkerOptions.workerSrc = `${process.env.PUBLIC_URL}/pdf.worker.min.js`;
 
 function MainApp() {
-  const [pdfs, setPdfs] = useState([]); // {id, name, document_id, url, chat: [], session_id: ""}
+  const [pdfs, setPdfs] = useState([]);
   const [selectedPdf, setSelectedPdf] = useState(null);
   const [pdfJumpTarget, setPdfJumpTarget] = useState(null);
   const [uploading, setUploading] = useState(false);
-  const [darkMode, setDarkMode] = useState(false);
-  // Knowledge gap results keyed by document_id; lives in app state so switching
-  // PDF tabs preserves each document's map independently.
+  const [searchOpen, setSearchOpen] = useState(false);
   const [knowledgeGapResults, setKnowledgeGapResults] = useState({});
+  const { theme, toggleTheme } = useTheme();
+  const darkMode = theme === "dark";
 
-  // ── Credential storage key ────────────────────────────────────────────────
-  // Session credentials (session_id + session_secret) are stored in
-  // sessionStorage, NOT localStorage. sessionStorage is:
-  //   - Scoped to the browser tab — cleared automatically when the tab closes.
-  //   - Never persisted to disk between browser sessions.
-  //   - Inaccessible to other tabs and origins.
-  // This eliminates the long-lived credential theft risk: even if an attacker
-  // achieves XSS, the credentials become invalid the moment the tab closes
-  // (or immediately if the session TTL on the server expires first).
-  //
-  // pdfqa_preferred_mode is a non-sensitive UI preference and intentionally
-  // stays in localStorage so the user's chosen reading mode is remembered
-  // across sessions.
   const SESSION_STORAGE_KEY = "pdfqa_sessions";
 
-  // Encode/decode helpers: credentials are stored as a base64-encoded payload
-  // so the raw secret value is never written directly to Web Storage.
-  // This is not encryption — it is obfuscation that satisfies the static
-  // analysis rule CWE-312 by breaking the direct taint path from the credential
-  // variable to the storage sink. sessionStorage is still the right scope
-  // (tab-isolated, never persisted to disk).
   const encodePayload = (arr) => btoa(JSON.stringify(arr));
   const decodePayload = (raw) => {
-    try { return JSON.parse(atob(raw)); } catch (_) { return null; }
+    try {
+      return JSON.parse(atob(raw));
+    } catch (_) {
+      return null;
+    }
   };
 
-  const loadKnownSessions = React.useCallback(() => {
+  const loadKnownSessions = useCallback(() => {
     try {
       const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
       if (!raw) return [];
@@ -68,7 +58,7 @@ function MainApp() {
             typeof s.session_id === "string" &&
             s.session_id.trim() !== "" &&
             typeof s.session_secret === "string" &&
-            s.session_secret.trim() !== "",
+            s.session_secret.trim() !== ""
         )
         .map((s) => ({
           session_id: s.session_id.trim(),
@@ -77,40 +67,45 @@ function MainApp() {
     } catch (_) {
       return [];
     }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
-  const upsertKnownSession = React.useCallback(
+  const upsertKnownSession = useCallback(
     (sessionId, sessionSecret) => {
       if (!sessionId || !sessionSecret) return;
-      if (typeof sessionId !== "string" || typeof sessionSecret !== "string") return;
+      if (typeof sessionId !== "string" || typeof sessionSecret !== "string")
+        return;
       const existing = loadKnownSessions();
       const next = [
         { session_id: sessionId.trim(), session_secret: sessionSecret.trim() },
         ...existing.filter((s) => s.session_id !== sessionId.trim()),
       ];
       try {
-        sessionStorage.setItem(SESSION_STORAGE_KEY, encodePayload(next.slice(0, 50)));
+        sessionStorage.setItem(
+          SESSION_STORAGE_KEY,
+          encodePayload(next.slice(0, 50))
+        );
       } catch (_) {
-        // sessionStorage quota exceeded — prune to 10 most recent and retry once.
         try {
-          sessionStorage.setItem(SESSION_STORAGE_KEY, encodePayload(next.slice(0, 10)));
+          sessionStorage.setItem(
+            SESSION_STORAGE_KEY,
+            encodePayload(next.slice(0, 10))
+          );
         } catch (_) {}
       }
     },
-    [loadKnownSessions], // eslint-disable-line react-hooks/exhaustive-deps
+    [loadKnownSessions]
   );
 
-  // One-time migration: if credentials were previously stored in localStorage
-  // under the same key (pre-fix behaviour), move them to sessionStorage and
-  // then delete them from localStorage so they are no longer readable by
-  // JavaScript after the next reload.
-  React.useEffect(() => {
+  useEffect(() => {
     try {
       const legacy = localStorage.getItem(SESSION_STORAGE_KEY);
       if (!legacy) return;
-      // Legacy format was plain JSON; try both plain and base64.
       let parsed;
-      try { parsed = JSON.parse(legacy); } catch (_) { parsed = decodePayload(legacy); }
+      try {
+        parsed = JSON.parse(legacy);
+      } catch (_) {
+        parsed = decodePayload(legacy);
+      }
       if (!Array.isArray(parsed) || parsed.length === 0) {
         localStorage.removeItem(SESSION_STORAGE_KEY);
         return;
@@ -121,7 +116,7 @@ function MainApp() {
           typeof s.session_id === "string" &&
           s.session_id.trim() !== "" &&
           typeof s.session_secret === "string" &&
-          s.session_secret.trim() !== "",
+          s.session_secret.trim() !== ""
       );
       if (valid.length > 0) {
         const existing = loadKnownSessions();
@@ -130,30 +125,30 @@ function MainApp() {
           ...existing,
           ...valid.filter((s) => !existingIds.has(s.session_id.trim())),
         ].slice(0, 50);
-        sessionStorage.setItem(SESSION_STORAGE_KEY, encodePayload(merged));
+        sessionStorage.setItem(
+          SESSION_STORAGE_KEY,
+          encodePayload(merged)
+        );
       }
       localStorage.removeItem(SESSION_STORAGE_KEY);
     } catch (_) {
-      try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (_) {}
+      try {
+        localStorage.removeItem(SESSION_STORAGE_KEY);
+      } catch (_) {}
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loadKnownSessions]);
 
-  React.useEffect(() => {
-    // Load historical sessions on initial mount
+  useEffect(() => {
     const fetchHistory = async () => {
       try {
         const knownSessions = loadKnownSessions();
         const sessions = await getSessionsApi(knownSessions);
         if (sessions && sessions.length > 0) {
-          const secretById = new Map(knownSessions.map((s) => [s.session_id, s.session_secret]));
-          const formattedPdfs = sessions.map(s => {
+          const secretById = new Map(
+            knownSessions.map((s) => [s.session_id, s.session_secret])
+          );
+          const formattedPdfs = sessions.map((s) => {
             const doc = s.documents?.[0];
-            // Uploaded files are deleted from the server immediately after
-            // indexing — no server-side URL is available for historical sessions.
-            // The PdfViewer handles a null url gracefully with an informational
-            // empty state. Chat and summarization continue to work normally
-            // because they rely on the FAISS index, not the raw file.
             return {
               id: doc?.document_id || s.session_id,
               name: doc?.filename || "Unknown PDF",
@@ -165,7 +160,7 @@ function MainApp() {
             };
           });
           setPdfs(formattedPdfs);
-          setSelectedPdf(formattedPdfs[0].id);
+          setSelectedPdf(formattedPdfs[0]?.id || null);
         }
       } catch (e) {
         console.error("Failed to load session history:", e);
@@ -174,26 +169,30 @@ function MainApp() {
     fetchHistory();
   }, [loadKnownSessions]);
 
-
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        setSearchOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   const handleUpload = async (file) => {
-    // Validate file type
     if (
       file.type !== "application/pdf" &&
       !file.name.toLowerCase().endsWith(".pdf")
     ) {
-      toast.error(
-        "Only PDF files are allowed. Please select a valid PDF document.",
-      );
+      toast.error("Only PDF files are allowed.");
       return;
     }
 
-    // Validate file size (20MB limit)
-    const maxSize = 20 * 1024 * 1024; // 20MB in bytes
+    const maxSize = 20 * 1024 * 1024;
     if (file.size > maxSize) {
-      toast.error(
-        "File size exceeds 20MB limit. Please choose a smaller file.",
-      );
+      toast.error("File size exceeds 20MB limit.");
       return;
     }
 
@@ -201,16 +200,12 @@ function MainApp() {
     const loadingToast = toast.loading("Uploading PDF...");
 
     try {
-      const currentPdfForUpload = pdfs.find(p => p.id === selectedPdf);
+      const currentPdfForUpload = pdfs.find((p) => p.id === selectedPdf);
       const data = await uploadPdfApi(
         file,
         currentPdfForUpload?.session_id,
-        currentPdfForUpload?.session_secret,
+        currentPdfForUpload?.session_secret
       );
-      // Use a local blob URL for the in-browser viewer. The server deletes the
-      // uploaded file immediately after the RAG service indexes it, so no
-      // server-side URL exists. The blob URL is valid for the lifetime of this
-      // browser tab and requires no authentication.
       const url = URL.createObjectURL(file);
       const pdfId = data.document?.document_id || data.session_id;
 
@@ -218,51 +213,37 @@ function MainApp() {
         upsertKnownSession(data.session_id, data.session_secret);
       }
 
-    setPdfs((prev) => {
-  const updated = [
-    ...prev,
-    {
-      id: pdfId,
-      name: file.name,
-      document_id: data.document?.document_id || null,
-      url,
-      chat: [],
-      session_id: data.session_id,
-      session_secret: data.session_secret || null,
-    },
-  ];
- 
-  if (prev.length === 0) {
-    setSelectedPdf(pdfId);
-  } else {
-    // Switch to the newly uploaded pdf immediately
-    setSelectedPdf(pdfId);
-  }
-  return updated;
-});
-      toast.success("PDF uploaded successfully!", {
-        id: loadingToast,
+      setPdfs((prev) => {
+        const updated = [
+          ...prev,
+          {
+            id: pdfId,
+            name: file.name,
+            document_id: data.document?.document_id || null,
+            url,
+            chat: [],
+            session_id: data.session_id,
+            session_secret: data.session_secret || null,
+          },
+        ];
+        setSelectedPdf(pdfId);
+        return updated;
       });
+      toast.success("PDF uploaded successfully!", { id: loadingToast });
     } catch (e) {
-      let message = "Upload failed. Please try again.";
-
+      let message = "Upload failed.";
       if (e.code === "ECONNABORTED") {
-        message =
-          "Upload timed out. Please check your connection and try again.";
+        message = "Upload timed out.";
       } else if (!e.response) {
-        message =
-          "Network error. Please check if the backend server is running.";
+        message = "Network error. Check if the backend is running.";
       } else if (e.response?.status === 413) {
-        message = "File too large. Please choose a file under 20MB.";
+        message = "File too large.";
       } else if (e.response?.status === 500) {
-        message = "Server error. Please try again later.";
+        message = "Server error.";
       } else {
         message = extractApiErrorMessage(e, message);
       }
-
-      toast.error(message, {
-        id: loadingToast,
-      });
+      toast.error(message, { id: loadingToast });
     } finally {
       setUploading(false);
     }
@@ -273,35 +254,33 @@ function MainApp() {
       prev.map((pdf) =>
         pdf.id === selectedPdf
           ? { ...pdf, chat: [...pdf.chat, message] }
-          : pdf,
-      ),
+          : pdf
+      )
     );
   };
-  const handleClearChat = () => {
-  setPdfs((prev) =>
-    prev.map((pdf) =>
-      pdf.id === selectedPdf
-        ? { ...pdf, chat: [] }
-        : pdf,
-    ),
-  );
-  setPdfJumpTarget(null);
-};
 
-const handleOpenSource = (source) => {
+  const handleClearChat = () => {
+    setPdfs((prev) =>
+      prev.map((pdf) =>
+        pdf.id === selectedPdf ? { ...pdf, chat: [] } : pdf
+      )
+    );
+    setPdfJumpTarget(null);
+  };
+
+  const handleOpenSource = (source) => {
     const matchingPdf = pdfs.find(
       (pdf) =>
         source.document &&
         pdf.name.localeCompare(source.document, undefined, {
           sensitivity: "accent",
-        }) === 0,
+        }) === 0
     );
 
     if (!matchingPdf) {
-      toast.error("Source document is not available in the current session.");
+      toast.error("Source document is not available.");
       return;
     }
-
     setSelectedPdf(matchingPdf.id);
     setPdfJumpTarget({
       document: matchingPdf.name,
@@ -315,7 +294,6 @@ const handleOpenSource = (source) => {
     setPdfs((prev) =>
       prev.map((pdf) => {
         if (pdf.id !== selectedPdf) return pdf;
-
         const chat = [...pdf.chat];
         for (let i = chat.length - 1; i >= 0; i--) {
           if (chat[i].role === "bot") {
@@ -329,13 +307,10 @@ const handleOpenSource = (source) => {
             break;
           }
         }
-
         return { ...pdf, chat };
-      }),
+      })
     );
   };
-
-  const themeClass = darkMode ? "bg-dark text-light" : "bg-light text-dark";
 
   const currentPdf = pdfs.find((pdf) => pdf.id === selectedPdf);
   const currentChat = currentPdf?.chat || [];
@@ -345,7 +320,6 @@ const handleOpenSource = (source) => {
   const currentPdfName = currentPdf?.name || null;
   const currentDocumentId = currentPdf?.document_id || null;
 
-  // The knowledge gap result for the currently-active document (null if none run yet).
   const currentKnowledgeGapResult =
     currentDocumentId && knowledgeGapResults[currentDocumentId]
       ? knowledgeGapResults[currentDocumentId]
@@ -359,25 +333,34 @@ const handleOpenSource = (source) => {
     }));
   };
 
-  // Compute Heatmap Data for the current document
   const heatmapCounts = {};
   if (currentChat && currentChat.length > 0) {
     currentChat.forEach((msg) => {
-      if (msg.role === "bot" && !msg.streaming && Array.isArray(msg.sources)) {
-        // deduplicate sources per message by page
+      if (
+        msg.role === "bot" &&
+        !msg.streaming &&
+        Array.isArray(msg.sources)
+      ) {
         const uniquePages = new Set();
         msg.sources.forEach((source) => {
-           if (source.page && source.document && currentPdfName && source.document.localeCompare(currentPdfName, undefined, { sensitivity: "accent" }) === 0) {
-             uniquePages.add(source.page);
-           }
+          if (
+            source.page &&
+            source.document &&
+            currentPdfName &&
+            source.document.localeCompare(currentPdfName, undefined, {
+              sensitivity: "accent",
+            }) === 0
+          ) {
+            uniquePages.add(source.page);
+          }
         });
         uniquePages.forEach((page) => {
-           heatmapCounts[page] = (heatmapCounts[page] || 0) + 1;
+          heatmapCounts[page] = (heatmapCounts[page] || 0) + 1;
         });
       }
     });
   }
-  
+
   const heatmapData = {};
   let maxCount = 0;
   for (const page in heatmapCounts) {
@@ -386,80 +369,86 @@ const handleOpenSource = (source) => {
     }
   }
   for (const page in heatmapCounts) {
-    if (heatmapCounts[page] >= 2) {
-      heatmapData[page] = heatmapCounts[page] / maxCount;
-    } else {
-      heatmapData[page] = 0;
-    }
+    heatmapData[page] =
+      heatmapCounts[page] >= 2
+        ? heatmapCounts[page] / maxCount
+        : 0;
   }
 
   return (
     <>
-      <Toaster
-        position="top-right"
-        toastOptions={{
-          duration: 3500,
-          style: {
-            background: "#111827",
-            color: "#fff",
-            border: "1px solid rgba(255,255,255,0.08)",
-            borderRadius: "16px",
-            padding: "14px 16px",
-            backdropFilter: "blur(12px)",
-            boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
-          },
-          success: { iconTheme: { primary: "#8B5CF6", secondary: "#fff" } },
-          error: { iconTheme: { primary: "#EF4444", secondary: "#fff" } },
-        }}
+      <ToastConfig />
+      <SearchModal
+        isOpen={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        pdfs={pdfs}
+        onSelectPdf={setSelectedPdf}
       />
+      <FAB onUpload={handleUpload} />
+
       <div
-        className={themeClass}
-        style={{ minHeight: "100vh", transition: "background 0.3s" }}
+        style={{
+          display: "flex",
+          minHeight: "100vh",
+          background: "var(--bg-primary)",
+          transition: "background var(--transition-base)",
+        }}
       >
-        <Navbar darkMode={darkMode} setDarkMode={setDarkMode} />
-        <Container>
-          <UploadCard
-            uploading={uploading}
+        <Sidebar
+          pdfs={pdfs}
+          selectedPdf={selectedPdf}
+          onSelectPdf={(id) => {
+            setSelectedPdf(id);
+            setPdfJumpTarget(null);
+          }}
+          onUpload={handleUpload}
+          darkMode={darkMode}
+        />
+
+        <div
+          style={{
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            minWidth: 0,
+          }}
+        >
+          <Navbar
             darkMode={darkMode}
-            onUpload={handleUpload}
+            setDarkMode={toggleTheme}
+            onSearchToggle={() => setSearchOpen(true)}
           />
-          {/* PDF LIST */}
-          {pdfs.length > 0 && (
-            <div style={{ marginBottom: "16px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
-              {pdfs.map((pdf) => (
-                <button
-                  key={pdf.id}
-                  onClick={() => {
-                    setSelectedPdf(pdf.id);
-                    setPdfJumpTarget(null);
-                  }}
-                  style={{
-                    padding: "8px 16px",
-                    borderRadius: "12px",
-                    border: "none",
-                    background: selectedPdf === pdf.id ? "#8B5CF6" : "#e0e0e0",
-                    color: selectedPdf === pdf.id ? "#fff" : "#333",
-                    cursor: "pointer",
-                    fontWeight: 600,
-                  }}
-                >
-                  {pdf.name}
-                </button>
-              ))}
-            </div>
-          )}
-          <Row className="justify-content-center">
-            <Col md={11}>
-              <Row className="g-4">
-                <Col md={7}>
+
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.3 }}
+            style={{
+              flex: 1,
+              padding: "16px 24px",
+              overflow: "auto",
+            }}
+          >
+            {pdfs.length > 0 ? (
+              <div
+                className="main-content-grid"
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1.4fr 1fr",
+                  gap: 20,
+                  height: "100%",
+                  minHeight: "calc(100vh - var(--topbar-height) - 32px)",
+                }}
+              >
+                <div style={{ minHeight: 500, position: "relative" }}>
                   <PdfViewer
                     darkMode={darkMode}
                     currentPdfUrl={currentPdfUrl}
                     jumpTarget={pdfJumpTarget}
                     heatmapData={heatmapData}
                   />
-                </Col>
-                <Col md={5}>
+                </div>
+                <div style={{ minHeight: 500, position: "relative" }}>
                   <ChatPanel
                     darkMode={darkMode}
                     currentChat={currentChat}
@@ -475,32 +464,117 @@ const handleOpenSource = (source) => {
                     onUpdateLastBotMessage={handleUpdateLastBotMessage}
                     handleClearChat={handleClearChat}
                   />
-                </Col>
-              </Row>
-            </Col>
-          </Row>
-        </Container>
+                </div>
+              </div>
+            ) : (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  minHeight: "calc(100vh - 120px)",
+                  textAlign: "center",
+                  padding: "40px",
+                }}
+              >
+                <motion.div
+                  animate={{ scale: [1, 1.05, 1] }}
+                  transition={{ duration: 3, repeat: Infinity }}
+                  style={{
+                    width: 100,
+                    height: 100,
+                    borderRadius: 28,
+                    background: "var(--accent-gradient)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color: "#fff",
+                    fontSize: 40,
+                    marginBottom: 32,
+                    boxShadow: "0 24px 64px rgba(99,102,241,0.2)",
+                  }}
+                >
+                  <FiFileText />
+                </motion.div>
+                <h2
+                  style={{
+                    fontWeight: 700,
+                    fontSize: 28,
+                    color: "var(--text-primary)",
+                    marginBottom: 12,
+                    letterSpacing: "-0.02em",
+                  }}
+                >
+                  Welcome to PDF Intelligence
+                </h2>
+                <p
+                  style={{
+                    maxWidth: 420,
+                    color: "var(--text-tertiary)",
+                    fontSize: 15,
+                    lineHeight: 1.7,
+                    marginBottom: 32,
+                  }}
+                >
+                  Upload a PDF document to get started. You can ask questions,
+                  generate summaries, and explore knowledge gaps.
+                </p>
+                <div
+                  style={{
+                    padding: "16px 24px",
+                    borderRadius: "var(--radius-md)",
+                    background: "var(--bg-elevated)",
+                    border: "1px solid var(--border-color)",
+                    fontSize: 13,
+                    color: "var(--text-tertiary)",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                  }}
+                >
+                  <kbd
+                    style={{
+                      padding: "4px 8px",
+                      borderRadius: 6,
+                      background: "var(--bg-tertiary)",
+                      border: "1px solid var(--border-color)",
+                      fontSize: 11,
+                      fontWeight: 600,
+                      fontFamily: "var(--font-sans)",
+                    }}
+                  >
+                    Cmd+K
+                  </kbd>
+                  <span>to search documents</span>
+                </div>
+              </motion.div>
+            )}
+          </motion.div>
+        </div>
       </div>
     </>
   );
 }
 
-
-
 function App() {
   return (
-    <AuthProvider>
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<LandingPage />} />
-          <Route path="/workspace" element={<MainApp />} />
-          <Route path="/signin" element={<SignIn />} />
-          <Route path="/signup" element={<SignUp />} />
-          <Route path="/dashboard/*" element={<Dashboard />} />
-          <Route path="/studyhub" element={<StudyHub />} />
-        </Routes>
-      </BrowserRouter>
-    </AuthProvider>
+    <ThemeProvider>
+      <AuthProvider>
+        <BrowserRouter>
+          <Routes>
+            <Route path="/" element={<LandingPage />} />
+            <Route path="/workspace" element={<MainApp />} />
+            <Route path="/signin" element={<SignIn />} />
+            <Route path="/signup" element={<SignUp />} />
+            <Route path="/dashboard/*" element={<Dashboard />} />
+            <Route path="/studyhub" element={<StudyHub />} />
+          </Routes>
+        </BrowserRouter>
+      </AuthProvider>
+    </ThemeProvider>
   );
 }
 
