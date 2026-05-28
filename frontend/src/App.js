@@ -289,13 +289,15 @@ function MainApp() {
 };
 
 const handleOpenSource = (source) => {
-    const matchingPdf = pdfs.find(
-      (pdf) =>
-        source.document &&
+    const matchingPdf = pdfs.find((pdf) => {
+      if (source?.document_id && pdf.document_id === source.document_id) return true;
+      return (
+        source?.document &&
         pdf.name.localeCompare(source.document, undefined, {
           sensitivity: "accent",
-        }) === 0,
-    );
+        }) === 0
+      );
+    });
 
     if (!matchingPdf) {
       toast.error("Source document is not available in the current session.");
