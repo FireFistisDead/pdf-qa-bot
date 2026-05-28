@@ -1,7 +1,4 @@
-/**
- * ragService.js
- * All calls to the Node.js API Gateway (port 4000) for RAG operations.
- */
+import { supabase } from './supabaseClient';
 
 const RAG_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:4000';
 
@@ -22,9 +19,16 @@ export const processDocument = async (url, filename, opts = {}) => {
     body.session_secret = opts.session_secret;
   }
 
+  // Get current user's Supabase token to authenticate with the Node.js gateway
+  const { data: { session } } = await supabase.auth.getSession();
+  const headers = { 'Content-Type': 'application/json' };
+  if (session?.access_token) {
+    headers['Authorization'] = `Bearer ${session.access_token}`;
+  }
+
   const res = await fetch(`${RAG_BASE_URL}/process-from-url`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(body),
   });
 

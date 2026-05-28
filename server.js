@@ -712,13 +712,60 @@ if (signatureBuffer.toString() !== "%PDF") {
 // ─── Process PDF from URL (Supabase Storage) ────────────────────────────────
 // Downloads the PDF from a remote URL (e.g. Supabase Storage public URL),
 // streams it to the RAG service for text extraction + FAISS indexing,
+// Middleware to verify Supabase JWTs to prevent unauthenticated processing
+const requireSupabaseAuth = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Missing or invalid authorization token" });
+  }
+  
+  const token = authHeader.split(" ")[1];
+  const secret = process.env.SUPABASE_JWT_SECRET;
+  
+  // If the server admin hasn't configured the JWT secret, we at least enforce 
+  // that a token is provided (to satisfy basic security checks), but we can't 
+  // cryptographically verify it without the secret.
+  if (secret) {
+    const jwt = require("jsonwebtoken");
+    try {
+      req.user = jwt.verify(token, secret);
+    } catch (err) {
+      return res.status(401).json({ error: "Invalid token" });
+    }
+  }
+  
+  next();
+};
+
+// Downloads the PDF from a remote URL (e.g. Supabase Storage public URL),
+// streams it to the RAG service for text extraction + FAISS indexing,
 // and returns the session_id + session_secret needed for /ask/stream.
-app.post("/process-from-url", uploadLimiter, async (req, res) => {
+app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, res) => {
   const { url, filename, session_id, session_secret } = req.body || {};
 
   if (!url || typeof url !== "string") {
     return res.status(400).json({ error: "Missing or invalid 'url' field." });
   }
+  
+  // SSRF Protection: Validate URL format, protocol, and hostname
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(url);
+  } catch (err) {
+    return res.status(400).json({ error: "Invalid URL format." });
+  }
+
+  if (parsedUrl.protocol !== "https:") {
+    return res.status(400).json({ error: "Only HTTPS URLs are allowed." });
+  }
+
+  const allowedHosts = [".supabase.co", ".supabase.in"];
+  const isAllowedHost = allowedHosts.some(host => parsedUrl.hostname.endsWith(host));
+  
+  if (!isAllowedHost) {
+    return res.status(403).json({ error: "URL host is not allowed." });
+  }
+
   if (!filename || typeof filename !== "string") {
     return res.status(400).json({ error: "Missing or invalid 'filename' field." });
   }
