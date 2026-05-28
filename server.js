@@ -904,14 +904,25 @@ app.use((req, res, next) => {
 });
 
 app.use((err, req, res, next) => {
-  if (err) {
-    console.error("Upload failed:", err.message);
-    return res.status(400).json({
-      error: err.message || "Invalid upload request.",
-    });
+  if (!err) {
+    return next();
   }
 
-  next();
+  const statusCode =
+    Number.isInteger(err.statusCode) ? err.statusCode :
+    Number.isInteger(err.status) ? err.status :
+    500;
+
+  const message =
+    statusCode >= 500
+      ? "Internal server error."
+      : err.message || "Request failed.";
+
+  console.error("Unhandled Express error:", err.message);
+
+  return res.status(statusCode).json({
+    error: message,
+  });
 });
 
 if (require.main === module) {
