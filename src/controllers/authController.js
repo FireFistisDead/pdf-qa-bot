@@ -69,13 +69,7 @@ exports.signup = async (req, res) => {
 
     saveUsers(users);
 
-    const token = jwt.sign(
-      { email },
-      SECRET,
-      {
-        expiresIn: "7d",
-      }
-    );
+    const token = jwt.sign({ email }, SECRET, { expiresIn: "7d" });
 
     res.status(201).json({
       token,
@@ -122,13 +116,7 @@ exports.login = async (req, res) => {
       });
     }
 
-    const token = jwt.sign(
-      { email: user.email },
-      SECRET,
-      {
-        expiresIn: "7d",
-      }
-    );
+    const token = jwt.sign({ email: user.email }, SECRET, { expiresIn: "7d" });
 
     res.json({
       token,
