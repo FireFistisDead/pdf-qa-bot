@@ -190,7 +190,7 @@ sessions = load_sessions()
 # per-session session_meta.json file. Protected by sessions_lock.
 # The background flush thread drains this set on each wake cycle.
 _dirty_sessions: set = set()
-
+_dirty_registry_sessions: set = set()
 processing_progress = {}
 def update_processing_progress(session_id, stage, progress):
     payload = {
@@ -458,6 +458,9 @@ RETRIEVAL_CACHE_LIMIT = int(os.getenv("RETRIEVAL_CACHE_LIMIT", "25"))
 RETRIEVAL_CACHE_TTL_SECONDS = int(
     os.getenv("RETRIEVAL_CACHE_TTL_SECONDS", "1800")
 )
+SESSION_TOUCH_PERSIST_INTERVAL_SECONDS = int(
+    os.getenv("SESSION_TOUCH_PERSIST_INTERVAL_SECONDS", "300")
+)
 
 # ── Semantic Chunking Config ─────────────────────────────────────────────────
 SEMANTIC_CHUNK_SOFT_MAX = int(os.getenv("SEMANTIC_CHUNK_SOFT_MAX", "1200"))
@@ -529,7 +532,7 @@ def cleanup_retrieval_cache(retrieval_cache):
 
         cached_at = value.get("cached_at")
 
-        if not cached_at:
+        if not isinstance(cached_at, (int, float)):
             expired_keys.append(key)
             continue
 
@@ -550,10 +553,28 @@ def cleanup_retrieval_cache(retrieval_cache):
 
 
 def ensure_retrieval_cache(session: dict) -> OrderedDict:
-    retrieval_cache = session.setdefault("retrieval_cache", OrderedDict())
+
+    retrieval_cache = session.get("retrieval_cache")
+
     if not isinstance(retrieval_cache, OrderedDict):
-        retrieval_cache = OrderedDict(retrieval_cache)
+
+        normalized_cache = OrderedDict()
+
+        if isinstance(retrieval_cache, dict):
+
+            for key, value in retrieval_cache.items():
+
+                if (
+                    isinstance(value, dict)
+                    and "scored_candidates" in value
+                ):
+                    normalized_cache[key] = value
+
+        retrieval_cache = normalized_cache
         session["retrieval_cache"] = retrieval_cache
+
+    cleanup_retrieval_cache(retrieval_cache)
+
     return retrieval_cache
 
 
@@ -867,8 +888,19 @@ def _touch_session_unlocked(session_id: str):
         remove_persisted_session(session_id, session_dir)
         logger.info("Session expired session_id=%s", session_id)
         return None
-    meta["last_accessed"] = now_ts()
-    persist_session_registry_entry(session_id, meta)
+    current_time = now_ts()
+
+    meta["last_accessed"] = current_time
+
+    last_persisted = meta.get("last_persisted_access", 0)
+
+    if (
+        current_time - last_persisted
+        >= SESSION_TOUCH_PERSIST_INTERVAL_SECONDS
+    ):
+        meta["last_persisted_access"] = current_time
+        _dirty_registry_sessions.add(session_id)
+
     return meta
 
 
@@ -985,6 +1017,43 @@ def _flush_dirty_sessions() -> None:
         _write_session_meta_file(session_id, data)
     if dirty:
         logger.debug("Flushed metadata for %d dirty session(s)", len(dirty))
+        registry_updates = {}
+
+        with sessions_lock:
+            dirty_registry = set(_dirty_registry_sessions)
+            _dirty_registry_sessions.clear()
+
+            for session_id in dirty_registry:
+                meta = sessions.get(session_id)
+
+                if not meta:
+                    continue
+
+                registry_updates[session_id] = {
+                    "created_at": meta.get("created_at"),
+                    "last_accessed": meta.get("last_accessed"),
+                    "expires_at": session_expires_at(
+                        meta.get("last_accessed", now_ts())
+                    ),
+                    "documents": list(meta.get("documents", [])),
+                    "session_dir": meta.get("session_dir"),
+                    "session_secret": meta.get("session_secret"),
+                }
+
+        if registry_updates:
+
+            with session_registry_lock():
+
+                registry = read_session_registry_unlocked()
+
+                registry.update(registry_updates)
+
+                write_session_registry_unlocked(registry)
+
+            logger.debug(
+                "Flushed registry metadata for %d session(s)",
+                len(registry_updates),
+            )
 
 
 def _background_flush_loop() -> None:
@@ -2660,9 +2729,15 @@ def ask_question(data: Question):
         retrieval_cache = ensure_retrieval_cache(session)
 
         cleanup_retrieval_cache(retrieval_cache)
-        # Cache hit
+
         cache_key = f"{mode}:{normalized_query}"
-        if cache_key in retrieval_cache:
+
+        cached_value = retrieval_cache.get(cache_key)
+
+        if (
+            isinstance(cached_value, dict)
+            and "scored_candidates" in cached_value
+        ):
 
             logger.info(
                 "Retrieval cache hit session_id=%s cache_key=%s",
@@ -2670,9 +2745,7 @@ def ask_question(data: Question):
                 cache_key,
             )
 
-            scored_candidates = retrieval_cache[
-                cache_key
-            ]
+            scored_candidates = cached_value["scored_candidates"]
 
             cache_hit = True
 
@@ -2702,7 +2775,10 @@ def ask_question(data: Question):
                         if len(retrieval_cache) >= RETRIEVAL_CACHE_LIMIT:
                             oldest_key = next(iter(retrieval_cache))
                             del retrieval_cache[oldest_key]
-                        retrieval_cache[cache_key] = scored_candidates
+                        retrieval_cache[cache_key] = {
+                            "cached_at": now_ts(),
+                            "scored_candidates": scored_candidates,
+                        }
 
     except Exception:
         logger.exception("Similarity search failed session_id=%s", session_id)
