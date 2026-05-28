@@ -21,15 +21,21 @@ const saveUsers = (users) => {
   fs.writeFileSync(usersFile, JSON.stringify(users, null, 2));
 };
 
+const normalizeEmail = (email) => {
+  return email ? String(email).trim().toLowerCase() : email;
+};
+
 exports.signup = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    let { email, password } = req.body;
 
     if (!email || !password) {
       return res.status(400).json({
         message: "Email and password are required",
       });
     }
+    
+    email = normalizeEmail(email);
 
     const validation = validatePassword(password);
 
@@ -84,12 +90,14 @@ exports.signup = async (req, res) => {
 
 exports.login = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    let { email, password } = req.body;
     if (!email || !password) {
       return res.status(400).json({
         message: "Email and password are required",
       });
     }
+    
+    email = normalizeEmail(email);
 
     const users = getUsers();
 
