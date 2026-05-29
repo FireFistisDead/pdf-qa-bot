@@ -144,7 +144,7 @@ const ChatView = () => {
   };
 
   return (
-    <div className="dash-hero-extreme" style={{ height: 'calc(100vh - 60px)', display: 'flex', flexDirection: 'column', padding: 0 }}>
+    <div className="dash-body" style={{ height: 'calc(100vh - 60px)', display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden', padding: 0 }}>
       <div className="chat-header-bar">
         <div className="chat-header-left">
           <div className="crazy-logo-box" style={{ width: 24, height: 24, fontSize: 10 }}>AI</div>
@@ -164,7 +164,7 @@ const ChatView = () => {
             <option value="" disabled>Select a document stream...</option>
             {documents.map(doc => (
               <option key={doc.id} value={doc.id}>
-                {doc.filename}
+                {doc.name}
               </option>
             ))}
           </select>
@@ -183,7 +183,7 @@ const ChatView = () => {
                <div className="status-dot-blink" style={{background: 'var(--accent)'}}/>
                LINK ESTABLISHED
              </div>
-             <p className="hero-sub-crazy" style={{marginTop: '20px'}}>Ready to process inquiries regarding {activeDoc.filename}</p>
+             <p className="hero-sub-crazy" style={{marginTop: '20px'}}>Ready to process inquiries regarding {activeDoc.name}</p>
            </div>
         ) : (
           <>
