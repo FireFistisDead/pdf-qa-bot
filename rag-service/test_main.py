@@ -101,13 +101,21 @@ def test_internal_token_valid_accepts_exact_match():
     assert internal_token_valid("secret", "secret") is True
 
 
-def test_require_internal_rag_token_configured_fails_fast_when_unset(monkeypatch):
+def test_require_internal_token_config_fails_when_unset(monkeypatch):
     import main as main_module
 
     monkeypatch.setattr(main_module, "INTERNAL_RAG_TOKEN", "")
 
     with pytest.raises(RuntimeError, match="INTERNAL_RAG_TOKEN"):
         require_internal_rag_token_configured()
+
+
+def test_internal_token_validation_passes_when_configured(monkeypatch):
+    import main as main_module
+
+    monkeypatch.setattr(main_module, "INTERNAL_RAG_TOKEN", "configured-secret")
+
+    assert require_internal_rag_token_configured() is None
 
 
 def test_internal_auth_middleware_protects_validate_session_write():
@@ -118,6 +126,20 @@ def test_internal_auth_middleware_protects_validate_session_write():
     try:
         client = TestClient(app)
         response = client.post("/validate-session-write")
+        assert response.status_code == 403
+        assert response.json()["error"] == "Forbidden"
+    finally:
+        main_module.INTERNAL_RAG_TOKEN = original_token
+
+
+def test_internal_auth_middleware_protects_trailing_slash_paths():
+    import main as main_module
+
+    original_token = main_module.INTERNAL_RAG_TOKEN
+    main_module.INTERNAL_RAG_TOKEN = "test-secret"
+    try:
+        client = TestClient(app)
+        response = client.post("/process-pdf/")
         assert response.status_code == 403
         assert response.json()["error"] == "Forbidden"
     finally:
@@ -670,9 +692,8 @@ def test_ask_stream_passes_middleware_with_correct_token():
     finally:
         main_module.INTERNAL_RAG_TOKEN = original
 
-
-def test_ask_stream_rejected_when_no_token_configured():
-    """When INTERNAL_RAG_TOKEN is empty, /ask/stream must fail closed."""
+def test_ask_stream_rejected_when_token_is_cleared_after_startup():
+    """Protected endpoints fail closed if token config becomes unavailable."""
     import main as main_module
 
     original = main_module.INTERNAL_RAG_TOKEN
@@ -687,8 +708,8 @@ def test_ask_stream_rejected_when_no_token_configured():
                 "session_secret": "irrelevant",
             },
         )
-        # No token configured → middleware is inactive → route handler ran.
-        # Expect 404 (no session) or 422 (validation), never 403 (auth block).
+        # Fail-closed behavior: when INTERNAL_RAG_TOKEN is unset, the
+        # middleware should still block protected requests with 403.
         assert response.status_code == 403, (
             "Middleware must block protected requests when INTERNAL_RAG_TOKEN is unset. "
             f"Got {response.status_code}"
@@ -703,11 +724,9 @@ def test_protected_paths_set_includes_ask_stream():
     This test directly inspects the middleware source to verify the set is correct,
     providing a fast feedback loop even when integration tests are not run.
     """
-    import inspect
     import main as main_module
 
-    source = inspect.getsource(main_module.internal_auth_middleware)
-    assert '"/ask/stream"' in source, (
+    assert "/ask/stream" in main_module.PROTECTED_RAG_PATHS, (
         "/ask/stream is missing from protected_paths in internal_auth_middleware. "
         "This is the root cause of issue #233."
     )
@@ -720,11 +739,9 @@ def test_ask_subtree_prefix_guard_is_present():
     /ask/v2/stream) are automatically protected without requiring a manual
     update to the exact-match set — closing the class of bug that caused #233.
     """
-    import inspect
     import main as main_module
 
-    source = inspect.getsource(main_module.internal_auth_middleware)
-    assert '"/ask/"' in source, (
+    assert "/ask/" in main_module.PROTECTED_RAG_PREFIXES, (
         "The /ask/ prefix is missing from the protected_prefixes tuple. "
         "Without it, any new sub-route under /ask/ could bypass auth."
     )

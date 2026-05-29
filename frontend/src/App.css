@@ -181,3 +181,39 @@ body {
   box-shadow: 0 4px 12px rgba(0,0,0,0.1);
   border-color: rgba(139,92,246,0.4) !important;
 }
+
+.save-answer-button:hover,
+.saved-note-open:hover {
+  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+}
+
+.save-answer-button:focus-visible,
+.saved-note-open:focus-visible,
+.saved-note-item button:focus-visible {
+  outline: 2px solid #8B5CF6;
+  outline-offset: 3px;
+}
+
+.saved-notes-list {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(139,92,246,0.55) transparent;
+}
+
+.saved-notes-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.saved-notes-list::-webkit-scrollbar-thumb {
+  background: rgba(139,92,246,0.45);
+  border-radius: 999px;
+}
+
+@media (max-width: 767px) {
+  .saved-notes-card {
+    margin-top: 16px;
+  }
+
+  .saved-notes-list {
+    max-height: 220px !important;
+  }
+}

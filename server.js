@@ -1035,30 +1035,30 @@ app.use((req, res, next) => {
 });
 
 app.use((err, req, res, next) => {
-  if (err instanceof multer.MulterError) {
-    const statusCode = err.code === "LIMIT_FILE_SIZE" ? 413 : 400;
-    const message =
-      err.code === "LIMIT_FILE_SIZE"
-        ? "File too large. Please choose a PDF under 20MB."
-        : "File upload error";
-
-    return res.status(statusCode).json({
-      error: message,
-      details: err.message,
-    });
+  if (!err) {
+    return next();
   }
 
-  if (err) {
-    console.error("Upload failed:", err.message);
-    return res.status(400).json({
-      error: err.message || "Invalid upload request.",
-    });
-  }
+  const statusCode =
+    Number.isInteger(err.statusCode) ? err.statusCode :
+    Number.isInteger(err.status) ? err.status :
+    500;
 
-  next();
+  const message =
+    statusCode >= 500
+      ? "Internal server error."
+      : err.message || "Request failed.";
+
+  console.error("Unhandled Express error:", err.message);
+
+  return res.status(statusCode).json({
+    error: message,
+  });
 });
 
 if (require.main === module) {
+  requireInternalRagToken();
+
   (async () => {
     requireInternalRagToken();
 

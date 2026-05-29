@@ -2,6 +2,8 @@ import React from "react";
 
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import BookmarkBorderIcon from "@mui/icons-material/BookmarkBorder";
+import BookmarkIcon from "@mui/icons-material/Bookmark";
 
 // Strict allowlist for AI-generated markdown content.
 //
@@ -46,13 +48,22 @@ const MODE_BADGE = {
   concise:  { label: "Concise",   bg: "rgba(249,115,22,0.15)", color: "#F97316" },
 };
 
-const MessageBubble = ({ msg, darkMode, onOpenSource }) => {
+const MessageBubble = ({
+  msg,
+  darkMode,
+  onOpenSource,
+  isBookmarked = false,
+  onToggleBookmark,
+  highlighted = false,
+  registerMessageRef,
+}) => {
 
   const getSourceLabel = (source) => source.document || "Source Document";
   const hasOpenablePage = (source) => Boolean(source.page && source.document);
 
   return (
     <div
+      ref={registerMessageRef}
       className={`d-flex ${
         msg.role === "user" ? "justify-content-end" : "justify-content-start"
       } mb-3 chat-message`}
@@ -91,6 +102,9 @@ const MessageBubble = ({ msg, darkMode, onOpenSource }) => {
           lineHeight: 1.7,
           fontSize: "15px",
           padding: "14px 16px",
+          outline: highlighted ? "2px solid #8B5CF6" : "none",
+          outlineOffset: highlighted ? "3px" : "0",
+          transition: "outline-color 0.2s ease, outline-offset 0.2s ease",
         }}
       >
         {msg.role === "bot" ? (
@@ -127,6 +141,53 @@ const MessageBubble = ({ msg, darkMode, onOpenSource }) => {
             </div>
           );
         })()}
+
+        {msg.role === "bot" && !msg.streaming && (
+          <div
+            style={{
+              marginTop: "12px",
+              display: "flex",
+              justifyContent: "flex-start",
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => onToggleBookmark?.(msg)}
+              aria-pressed={isBookmarked}
+              aria-label={isBookmarked ? "Remove saved answer" : "Save answer"}
+              title={isBookmarked ? "Remove saved answer" : "Save answer"}
+              className="save-answer-button"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                padding: "6px 10px",
+                borderRadius: "12px",
+                border: isBookmarked
+                  ? "1px solid rgba(245,158,11,0.45)"
+                  : darkMode
+                  ? "1px solid rgba(255,255,255,0.12)"
+                  : "1px solid rgba(0,0,0,0.1)",
+                background: isBookmarked
+                  ? "rgba(245,158,11,0.12)"
+                  : darkMode
+                  ? "rgba(255,255,255,0.05)"
+                  : "rgba(255,255,255,0.7)",
+                color: isBookmarked ? "#D97706" : darkMode ? "#D1D5DB" : "#4B5563",
+                fontSize: "12px",
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              {isBookmarked ? (
+                <BookmarkIcon sx={{ fontSize: 16 }} />
+              ) : (
+                <BookmarkBorderIcon sx={{ fontSize: 16 }} />
+              )}
+              {isBookmarked ? "Saved" : "Save Answer"}
+            </button>
+          </div>
+        )}
 
         {msg.role === "bot" && !msg.streaming && msg.sources?.length > 0 && (() => {
           // deduplicate sources by document and page
