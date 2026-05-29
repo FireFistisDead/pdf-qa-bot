@@ -1,8 +1,9 @@
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse,FileResponse
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field, field_validator
 from pathlib import Path
+from fastapi import UploadFile, File, Form
 from uuid import UUID
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -10,6 +11,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from dotenv import load_dotenv
 from rank_bm25 import BM25Okapi
+from fpdf import FPDF
 import numpy as np
 import os
 import uuid
@@ -587,6 +589,18 @@ def build_combined_insights(grouped_documents):
         insights.append("The uploaded documents cover distinct but related areas of the session context.")
 
     return insights[:3]
+def get_answer_from_session(session_id: str):
+    with sessions_lock:
+        session = sessions.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        # If you stored answers in the session, return them
+        if "last_answer" in session and "last_sources" in session:
+            return session["last_answer"], session["last_sources"]
+
+        # Otherwise, you may need to regenerate or return a placeholder
+        return "No answer available for export.", []
 
 
 def build_session_summary(uploaded_documents, indexed_documents):
@@ -924,52 +938,48 @@ class SummarizeRequest(BaseModel):
     session_id: UUID
 
 
+from fastapi import UploadFile, File, Form
+
 @app.post("/process-pdf")
-def process_pdf(data: PDFPath):
+async def process_pdf(
+    file: UploadFile = File(...),
+    session_id: str = Form(None),
+    filename: str = Form(None)
+):
     cleanup_expired_sessions()
+
+    # 1. Save the uploaded file
+    safe_name = sanitize_upload_filename(file.filename)
+    file_path = get_trusted_upload_path(safe_name)
+    with open(file_path, "wb") as f:
+        f.write(await file.read())
+
+    # 2. Validate PDF and wrap in Path
     try:
-        safe_name = sanitize_upload_filename(data.filePath)
-        trusted_path = get_trusted_upload_path(safe_name)
-        upload_path = validate_uploaded_pdf(trusted_path)
+        upload_path = Path(validate_uploaded_pdf(file_path))   # ✅ wrap in Path
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    file_path = str(upload_path)
-    requested_session_id = (data.session_id or "").strip() or None
-    filename = data.filename or upload_path.name or "uploaded.pdf"
-
+    filename = filename or upload_path.name or "uploaded.pdf"  # ✅ now .name works
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF documents are supported.")
 
-    if requested_session_id and not validate_existing_session(requested_session_id):
-        raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-
-    logger.info(
-        "Processing PDF filename=%s existing_session=%s",
-        filename,
-        bool(requested_session_id),
-    )
-
+    # 3. Load and split PDF
     try:
-        loader = PyPDFLoader(file_path)
+        loader = PyPDFLoader(str(upload_path))
         docs = loader.load()
-    except Exception as exc:
-        logger.warning("Failed to load PDF filename=%s error=%s", filename, exc)
+    except Exception:
         raise HTTPException(status_code=400, detail="Unable to read this PDF. It may be corrupted or encrypted.")
 
     if not docs:
         raise HTTPException(status_code=400, detail="No readable pages were found in the PDF.")
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=100
-    )
-
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     chunks = splitter.split_documents(docs)
-
     if not chunks:
-        raise HTTPException(status_code=400, detail="No text chunks generated from the PDF. Please check your file.")
+        raise HTTPException(status_code=400, detail="No text chunks generated from the PDF.")
 
+    # 4. Build FAISS index
     document_id = str(uuid.uuid4())
     now = now_ts()
     uploaded_document = {
@@ -978,48 +988,26 @@ def process_pdf(data: PDFPath):
         "uploaded_at": now,
         "chunk_count": len(chunks),
     }
-
-    for chunk_index, chunk in enumerate(chunks):
-        chunk.metadata.update(
-            {
-                "document_id": document_id,
-                "filename": filename,
-                "chunk_index": chunk_index,
-                "uploaded_at": now,
-            }
-        )
+    for i, chunk in enumerate(chunks):
+        chunk.metadata.update({
+            "document_id": document_id,
+            "filename": filename,
+            "chunk_index": i,
+            "uploaded_at": now,
+        })
 
     try:
         new_vectorstore = FAISS.from_documents(chunks, embedding_model)
-    except Exception as exc:
-        logger.exception("Failed to create vectorstore filename=%s", filename)
+    except Exception:
         raise HTTPException(status_code=500, detail="Failed to index the uploaded PDF.")
 
+    # 5. Handle sessions
     with sessions_lock:
-        if requested_session_id:
-            session = _touch_session_unlocked(requested_session_id)
-            if not session:
-                raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-            try:
-                session["vectorstore"].merge_from(new_vectorstore)
-            except Exception:
-                logger.exception(
-                    "Failed to merge vectorstore session_id=%s filename=%s",
-                    requested_session_id,
-                    filename,
-                )
-                raise HTTPException(status_code=500, detail="Failed to merge the uploaded PDF into this session.")
-
+        if session_id and validate_existing_session(session_id):
+            session = _touch_session_unlocked(session_id)
+            session["vectorstore"].merge_from(new_vectorstore)
             session.setdefault("documents", []).append(uploaded_document)
             session["last_accessed"] = now
-            session_id = requested_session_id
-            logger.info(
-                "Merged PDF into session session_id=%s filename=%s documents=%s chunks=%s",
-                session_id,
-                filename,
-                len(session["documents"]),
-                len(chunks),
-            )
         else:
             _enforce_max_sessions_unlocked()
             session_id = str(uuid.uuid4())
@@ -1029,12 +1017,6 @@ def process_pdf(data: PDFPath):
                 "created_at": now,
                 "last_accessed": now,
             }
-            logger.info(
-                "Created session session_id=%s filename=%s chunks=%s",
-                session_id,
-                filename,
-                len(chunks),
-            )
 
         documents = list(sessions[session_id].get("documents", []))
 
@@ -1078,8 +1060,7 @@ def ask_question(data: Question):
     if not docs:
         return {"answer": "No relevant context found."}
 
-    # Extract unique 1-indexed page numbers from retrieved chunk metadata.
-    # PyPDFLoader stores pages as 0-based integers in doc.metadata["page"].
+    # Extract unique 1-indexed page numbers
     pages = sorted(set(
         doc.metadata["page"] + 1
         for doc in docs
@@ -1089,34 +1070,56 @@ def ask_question(data: Question):
     context = format_context(docs, max_chars=6500)
     retrieved_sources = sorted({document_display_name(doc) for doc in docs})
     grounded_answer = build_answer_from_documents(question, docs, intent)
+
     if grounded_answer:
-        logger.info(
-            "Returning grounded answer session_id=%s intent=%s retrieved_chunks=%s sources=%s",
-            session_id,
-            intent,
-            len(docs),
-            retrieved_sources,
+        answer = grounded_answer
+    else:
+        prompt = (
+            "You are a careful assistant answering questions over one or more uploaded PDF documents. "
+            "Use only the provided context. The context may include excerpts from multiple PDFs. "
+            "When the question asks for a relationship, comparison, or synthesis, connect the relevant facts across documents. "
+            "If the context does not contain enough information, say that briefly and do not invent details.\n\n"
+            f"Context:\n{context}\n\n"
+            f"Question: {question}\n"
+            "Answer:"
         )
-        return {"answer": grounded_answer, "sources": pages}
+        answer = generate_response(prompt, max_new_tokens=256)
 
-    prompt = (
-        "You are a careful assistant answering questions over one or more uploaded PDF documents. "
-        "Use only the provided context. The context may include excerpts from multiple PDFs. "
-        "When the question asks for a relationship, comparison, or synthesis, connect the relevant facts across documents. "
-        "If the context does not contain enough information, say that briefly and do not invent details.\n\n"
-        f"Context:\n{context}\n\n"
-        f"Question: {question}\n"
-        "Answer:"
-    )
+    # ✅ Store answer and sources in the session for export
+    with sessions_lock:
+        session = sessions.get(session_id)
+        if session:
+            session["last_answer"] = answer
+            session["last_sources"] = pages
 
-    logger.info(
-        "Executing query session_id=%s retrieved_chunks=%s sources=%s",
-        session_id,
-        len(docs),
-        retrieved_sources,
-    )
-    answer = generate_response(prompt, max_new_tokens=256)
     return {"answer": answer, "sources": pages}
+
+@app.post("/export")
+def export_answer(session_id: str, format: str = "pdf"):
+    # Retrieve stored answer + sources
+    answer, sources = get_answer_from_session(session_id)
+    sources_str = [f"Page {s}" for s in sources]
+
+    if format == "pdf":
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", size=12)
+        pdf.multi_cell(0, 10, f"Answer:\n{answer}\n\nSources:\n" + "\n".join(sources_str))
+        
+        filename = f"export_{session_id}.pdf"
+        pdf.output(filename)
+        return FileResponse(filename, media_type="application/pdf", filename=filename)
+
+    elif format == "markdown":
+        md_content = f"**Answer:**\n{answer}\n\n**Sources:**\n" + "\n".join(sources_str)
+        return {"content": md_content}
+
+    elif format == "html":
+        html_content = (
+            f"<h2>Answer</h2><p>{answer}</p>"
+            f"<h3>Sources</h3><ul>" + "".join([f"<li>{s}</li>" for s in sources_str]) + "</ul>"
+        )
+        return {"content": html_content}
 
 
 @app.post("/summarize")

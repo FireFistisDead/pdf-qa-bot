@@ -19,14 +19,27 @@ const ExportMenu = ({ currentChat, selectedPdfName }) => {
   };
 
   return (
-    <Button
-      variant="outline-secondary"
-      size="sm"
-      onClick={() => exportChat("pdf")}
-      disabled={!selectedPdfName || !currentChat || currentChat.length === 0}
-    >
-      Export
-    </Button>
+    <div className="d-flex gap-2">
+      {/* Export as PDF */}
+      <Button
+        variant="outline-secondary"
+        size="sm"
+        onClick={() => exportChat("pdf")}
+        disabled={!selectedPdfName || !currentChat || currentChat.length === 0}
+      >
+        Export as PDF
+      </Button>
+
+      {/* Export as CSV */}
+      <Button
+        variant="outline-secondary"
+        size="sm"
+        onClick={() => exportChat("csv")}
+        disabled={!selectedPdfName || !currentChat || currentChat.length === 0}
+      >
+        Export as CSV
+      </Button>
+    </div>
   );
 };
 

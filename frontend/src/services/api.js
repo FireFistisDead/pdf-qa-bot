@@ -1,6 +1,6 @@
 import axios from "axios";
 
-const API_BASE = process.env.REACT_APP_API_URL || "";
+const API_BASE = process.env.REACT_APP_API_URL || "http://localhost:5000";
 
 export const extractApiErrorMessage = (error, fallbackMessage) => {
   return (
@@ -21,7 +21,7 @@ export const uploadPdfApi = async (file) => {
   const formData = new FormData();
   formData.append("file", file);
 
-  const res = await axios.post(`${API_BASE}/upload`, formData, {
+  const res = await axios.post(`${API_BASE}/process-pdf`, formData, {
     timeout: 30000, // 30 second timeout
   });
   return res.data;
@@ -58,5 +58,15 @@ export const summarizePdfApi = async (pdfName, sessionId) => {
       timeout: 60000, // 60 second timeout for summarization
     }
   );
+  return res.data;
+};
+
+/**
+ * Exports the answer with sources in chosen format.
+ * @param {string} sessionId
+ * @param {string} format - "pdf" | "markdown" | "html"
+ */
+export const exportAnswerApi = async (sessionId, format) => {
+  const res = await axios.post(`${API_BASE}/export`, { session_id: sessionId, format });
   return res.data;
 };
