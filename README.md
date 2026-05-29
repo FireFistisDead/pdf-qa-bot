@@ -79,6 +79,8 @@ flowchart LR
 
 Existing deployments and local environments must set `INTERNAL_RAG_TOKEN` before starting the Express API or RAG service. Generate a strong shared secret, put the same value in both environments, and restart both services. The RAG service fails closed when this value is missing.
 
+The Express authentication flow also requires `JWT_SECRET` for both token signing and verification. Use one strong random value across the auth controller and middleware; do not hardcode or reuse a default secret.
+
 ### Default ports
 
 | Service | Folder | Port | URL |
