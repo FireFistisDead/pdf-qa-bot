@@ -2725,31 +2725,28 @@ def ask_question(data: Question):
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
 
-        # Session-level retrieval cache
+        # Session-level retrieval cache (ensure proper type and expiry cleanup)
         retrieval_cache = ensure_retrieval_cache(session)
-
         cleanup_retrieval_cache(retrieval_cache)
 
         cache_key = f"{mode}:{normalized_query}"
-
         cached_value = retrieval_cache.get(cache_key)
-
-        if (
-            isinstance(cached_value, dict)
-            and "scored_candidates" in cached_value
-        ):
-
+        cache_hit = False
+        if isinstance(cached_value, dict) and "scored_candidates" in cached_value:
             logger.info(
                 "Retrieval cache hit session_id=%s cache_key=%s",
                 session_id,
                 cache_key,
             )
-
             scored_candidates = cached_value["scored_candidates"]
-
             cache_hit = True
-
-        else:
+        elif cached_value is not None:
+            logger.info(
+                "Retrieval cache invalidated session_id=%s cache_key=%s",
+                session_id,
+                cache_key,
+            )
+            retrieval_cache.pop(cache_key, None)
             cache_hit = False
 
     try:
@@ -2768,31 +2765,23 @@ def ask_question(data: Question):
                     ASK_RETRIEVAL_CANDIDATES,
                 )
 
-                with sessions_lock:
-                    session = sessions.get(session_id)
-                    if session:
-                        retrieval_cache = ensure_retrieval_cache(session)
-                        if len(retrieval_cache) >= RETRIEVAL_CACHE_LIMIT:
-                            oldest_key = next(iter(retrieval_cache))
-                            del retrieval_cache[oldest_key]
-                        retrieval_cache[cache_key] = {
-                            "cached_at": now_ts(),
-                            "scored_candidates": scored_candidates,
-                        }
 
+
+        if not cache_hit:
+            with sessions_lock:
+                session = sessions.get(session_id)
+                if session:
+                    rc = ensure_retrieval_cache(session)
+                    if len(rc) >= RETRIEVAL_CACHE_LIMIT:
+                        oldest_key = next(iter(rc))
+                        del rc[oldest_key]
+                    rc[cache_key] = {
+                        "cached_at": now_ts(),
+                        "scored_candidates": scored_candidates,
+                    }
     except Exception:
         logger.exception("Similarity search failed session_id=%s", session_id)
         raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
-
-    docs = (
-        representative_documents_by_source(indexed_documents)
-        if intent == "overview"
-        else diversify_retrieved_documents(
-            scored_candidates,
-            question
-        )
-    )
-
     best_score = scored_candidates[0][1] if scored_candidates else None
     if not passes_evidence_gate(question, docs, best_score, intent):
         logger.info(
@@ -3150,11 +3139,13 @@ def ask_question_stream(data: Question):
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
 
+        # Session-level retrieval cache for streaming path
         retrieval_cache = ensure_retrieval_cache(session)
         with session_lock:
             cleanup_retrieval_cache(retrieval_cache)
             cache_key = f"{mode}:{normalized_query}"
             cached_value = retrieval_cache.get(cache_key)
+            cache_hit = False
             if isinstance(cached_value, dict) and "scored_candidates" in cached_value:
                 logger.info(
                     "Stream retrieval cache hit session_id=%s cache_key=%s",
@@ -3171,8 +3162,6 @@ def ask_question_stream(data: Question):
                 )
                 retrieval_cache.pop(cache_key, None)
                 cache_hit = False
-            else:
-                cache_hit = False
 
     try:
         with session_lock:
@@ -3188,17 +3177,19 @@ def ask_question_stream(data: Question):
                     question,
                     ASK_RETRIEVAL_CANDIDATES,
                 )
-                with sessions_lock:
-                    current_session = sessions.get(session_id)
-                    if current_session:
-                        rc = ensure_retrieval_cache(current_session)
-                        if len(rc) >= RETRIEVAL_CACHE_LIMIT:
-                            oldest = next(iter(rc))
-                            del rc[oldest]
-                        rc[cache_key] = {
-                            "cached_at": now_ts(),
-                            "scored_candidates": scored_candidates,
-                        }
+
+        if not cache_hit:
+            with sessions_lock:
+                current_session = sessions.get(session_id)
+                if current_session:
+                    rc = ensure_retrieval_cache(current_session)
+                    if len(rc) >= RETRIEVAL_CACHE_LIMIT:
+                        oldest = next(iter(rc))
+                        del rc[oldest]
+                    rc[cache_key] = {
+                        "cached_at": now_ts(),
+                        "scored_candidates": scored_candidates,
+                    }
     except Exception:
         logger.exception("Stream similarity search failed session_id=%s", session_id)
         raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
