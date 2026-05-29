@@ -780,6 +780,13 @@ def _recover_session_unlocked(session_id: str):
         "created_at": float(entry.get("created_at", last_accessed) or last_accessed),
         "last_accessed": last_accessed,
     }
+
+    try:
+        indexed_documents = collect_index_documents(vectorstore)
+        _migrate_session_document_ids(meta, indexed_documents)
+    except Exception:
+        logger.exception("Failed to migrate legacy document_ids session_id=%s", session_id)
+
     sessions[session_id] = meta
     logger.info("Recovered persisted session session_id=%s", session_id)
     return meta
@@ -1650,9 +1657,30 @@ def build_session_summary(uploaded_documents, indexed_documents):
     document_summaries = []
     grouped_for_insights = {}
     for uploaded_document in uploaded_documents:
-        document_chunks = documents_for_upload(indexed_documents, uploaded_document["document_id"])
+        document_id = uploaded_document.get("document_id")
+        filename = uploaded_document.get("filename")
+        document_chunks = documents_for_upload(indexed_documents, document_id)
+        if not document_chunks and filename:
+            legacy_candidates = [
+                doc for doc in indexed_documents
+                if doc.metadata.get("filename") == filename
+            ]
+            legacy_ids = {
+                doc.metadata.get("document_id")
+                for doc in legacy_candidates
+                if doc.metadata.get("document_id")
+            }
+            if legacy_ids:
+                logger.warning(
+                    "Orphaned document_id detected in session summary filename=%s uploaded_document_id=%s candidate_ids=%s",
+                    filename,
+                    document_id,
+                    sorted(legacy_ids),
+                )
+            if len(legacy_ids) == 1:
+                document_chunks = legacy_candidates
         document_chunks = unique_documents(document_chunks)
-        filename = uploaded_document["filename"]
+        filename = filename or "Unknown Document"
         grouped_for_insights[filename] = document_chunks
         bullets = build_document_summary_bullets(document_chunks)
         document_summaries.append(f"## {filename}\n\n{markdown_bullets(bullets)}")
@@ -1660,6 +1688,55 @@ def build_session_summary(uploaded_documents, indexed_documents):
     if combined_insights:
         document_summaries.append(f"## Combined Insights\n\n{markdown_bullets(combined_insights)}")
     return "\n\n".join(document_summaries)
+
+
+def _migrate_session_document_ids(meta: dict, indexed_documents: list) -> bool:
+    """Best-effort fix for sessions created when process_pdf regenerated document_id.
+
+    If a stored uploaded_document.document_id has no matching indexed chunks, but
+    the filename matches exactly one chunk-level document_id, update the stored
+    id to restore per-document lineage (summary, citations, frontend source jump).
+    """
+    uploaded_documents = meta.get("documents") or []
+    if not uploaded_documents or not indexed_documents:
+        return False
+
+    changed = False
+    by_filename = {}
+    for doc in indexed_documents:
+        fname = doc.metadata.get("filename")
+        if not fname:
+            continue
+        by_filename.setdefault(fname, []).append(doc)
+
+    for uploaded_document in uploaded_documents:
+        stored_id = uploaded_document.get("document_id")
+        fname = uploaded_document.get("filename")
+        if not stored_id or not fname:
+            continue
+        if any(doc.metadata.get("document_id") == stored_id for doc in indexed_documents):
+            continue
+
+        candidates = by_filename.get(fname) or []
+        candidate_ids = {
+            doc.metadata.get("document_id")
+            for doc in candidates
+            if doc.metadata.get("document_id")
+        }
+        if len(candidate_ids) != 1:
+            continue
+
+        new_id = next(iter(candidate_ids))
+        uploaded_document["document_id"] = new_id
+        changed = True
+        logger.warning(
+            "Migrated legacy uploaded document_id filename=%s old_id=%s new_id=%s",
+            fname,
+            stored_id,
+            new_id,
+        )
+
+    return changed
 
 
 def representative_documents_by_source(documents, per_document_limit=2, max_documents=ASK_MAX_CONTEXT_CHUNKS):
@@ -2456,7 +2533,6 @@ def process_pdf(
             detail=f"PDF is too large to index. A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks.",
         )
 
-    document_id = str(uuid.uuid4())
     processing_session_id = requested_session_id
     created_placeholder_session = False
 
