@@ -497,3 +497,12 @@ We’d love to hear from you — whether you’re setting up the project for the
 ## License
 
 See repository license files and package metadata where applicable. Third-party models are subject to their respective Hugging Face model cards and licenses.
+## RAG internal authentication
+
+`INTERNAL_RAG_TOKEN` is required for the FastAPI RAG service. The Node.js
+gateway must send the same value in the `X-Internal-Token` header when calling
+protected RAG endpoints such as `/process-pdf`, `/ask`, and `/summarize`.
+Protected routes also include `/ask/stream` and `/validate-session-write`.
+
+If `INTERNAL_RAG_TOKEN` is unset or empty, the RAG service fails startup with a
+configuration error instead of allowing unauthenticated direct access.

@@ -207,6 +207,19 @@ def update_processing_progress(session_id, stage, progress):
             meta["processing_progress"] = payload
 
 INTERNAL_RAG_TOKEN = os.getenv("INTERNAL_RAG_TOKEN", "").strip()
+PROTECTED_RAG_PATHS = {
+    "/process-pdf",
+    "/ask",
+    "/ask/stream",
+    "/summarize",
+    "/knowledge-gaps",
+    "/validate-session-write",
+    "/sessions/lookup",
+}
+PROTECTED_RAG_PREFIXES = (
+    "/ask/",
+    "/processing-status/",
+)
 
 
 def internal_token_valid(provided: str | None, expected: str) -> bool:
@@ -361,35 +374,21 @@ async def internal_auth_middleware(request: Request, call_next):
       2. Prefix set — covers entire sub-trees so that any future sub-route (e.g.
          /ask/v2/stream) is automatically protected without requiring a code change here.
     """
-    protected_paths = {
-        "/process-pdf",
-        "/ask",
-        "/ask/stream",
-        "/summarize",
-        "/knowledge-gaps",
-        "/validate-session-write",
-        "/sessions/lookup",
-    }
 
-    # Prefix-based guard: any sub-path under these trees is also protected.
-    # This ensures that adding a new streaming variant or versioned route can
-    # never silently bypass auth because a developer forgot to update the set above.
-    protected_prefixes = (
-        "/ask/",
-        "/processing-status/",
-    )
-
-    path = request.url.path
+    raw_path = request.url.path
+    # Normalize one trailing slash (except root) so /process-pdf and /process-pdf/
+    # are protected identically.
+    path = raw_path if raw_path == "/" else raw_path.rstrip("/")
 
     if (
-        path in protected_paths
-        or any(path.startswith(prefix) for prefix in protected_prefixes)
+        path in PROTECTED_RAG_PATHS
+        or any(path.startswith(prefix) for prefix in PROTECTED_RAG_PREFIXES)
     ):
         provided = request.headers.get("X-Internal-Token")
         if not internal_token_valid(provided, INTERNAL_RAG_TOKEN):
             logger.warning(
                 "Internal auth rejected path=%s ip=%s",
-                path,
+                raw_path,
                 request.client.host if request.client else "unknown",
             )
             return standard_error_response(403, "Forbidden")

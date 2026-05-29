@@ -1057,6 +1057,8 @@ app.use((err, req, res, next) => {
 });
 
 if (require.main === module) {
+  requireInternalRagToken();
+
   (async () => {
     requireInternalRagToken();
 
