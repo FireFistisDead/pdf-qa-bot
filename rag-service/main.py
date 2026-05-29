@@ -2618,6 +2618,12 @@ def process_pdf(
                 session = _touch_session_unlocked(requested_session_id)
                 if not session:
                     raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+                # Re-validate quotas inside the merge lock to prevent TOCTOU
+                if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
+                    raise HTTPException(status_code=400, detail="Maximum number of documents per session reached.")
+                current_chunks = sum(doc.get("chunk_count", 0) for doc in session.get("documents", []))
+                if current_chunks + len(chunks) > MAX_CHUNKS_PER_SESSION:
+                    raise HTTPException(status_code=400, detail="Maximum number of chunks per session exceeded.")
                 ensure_retrieval_cache(session)
                 if "lock" not in session:
                     session["lock"] = threading.Lock()
