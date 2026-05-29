@@ -7,6 +7,7 @@ import Navbar from "./components/Navbar/Navbar";
 import UploadCard from "./components/UploadCard/UploadCard";
 import PdfViewer from "./components/PdfViewer/PdfViewer";
 import ChatPanel from "./components/ChatPanel/ChatPanel";
+import SavedNotes from "./components/ChatPanel/SavedNotes";
 import toast, { Toaster } from "react-hot-toast";
 import LandingPage from "./components/Landing/LandingPage";
 import SignIn from "./components/Auth/SignIn";
@@ -16,8 +17,16 @@ import Dashboard from "./components/Dashboard/Dashboard";
 import StudyHub from "./components/StudyHub/StudyHub";
 
 import { extractApiErrorMessage, uploadPdfApi, getSessionsApi } from "./services/api";
+import {
+  createStableMessageId,
+  hashString,
+  loadSavedNotes,
+  persistSavedNotes,
+} from "./utils/savedNotes";
 
 pdfjs.GlobalWorkerOptions.workerSrc = `${process.env.PUBLIC_URL}/pdf.worker.min.js`;
+
+const EMPTY_CHAT = [];
 
 function MainApp() {
   const [pdfs, setPdfs] = useState([]); // {id, name, document_id, url, chat: [], session_id: ""}
@@ -26,6 +35,12 @@ function MainApp() {
   const [uploading, setUploading] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
   const [rightPanelTab, setRightPanelTab] = useState("chat");
+  const [savedNotes, setSavedNotes] = useState(() => loadSavedNotes());
+  const [highlightedMessageId, setHighlightedMessageId] = useState(null);
+  const messageRefs = React.useRef(new Map());
+  // Knowledge gap results keyed by document_id; lives in app state so switching
+  // PDF tabs preserves each document's map independently.
+  const [knowledgeGapResults, setKnowledgeGapResults] = useState({});
 
   // ── Credential storage key ────────────────────────────────────────────────
   // Session credentials (session_id + session_secret) are stored in
@@ -52,6 +67,49 @@ function MainApp() {
   const decodePayload = (raw) => {
     try { return JSON.parse(atob(raw)); } catch (_) { return null; }
   };
+
+  const normalizeChatHistory = React.useCallback((chat, sessionId, pdfId) => {
+    if (!Array.isArray(chat)) return [];
+
+    const messages = [];
+    chat.forEach((entry, entryIndex) => {
+      if (entry?.role) {
+        messages.push(entry);
+        return;
+      }
+
+      if (typeof entry?.question === "string" && entry.question.trim()) {
+        messages.push({
+          role: "user",
+          text: entry.question,
+          historyIndex: entryIndex,
+        });
+      }
+
+      if (typeof entry?.answer === "string") {
+        messages.push({
+          role: "bot",
+          text: entry.answer,
+          question: entry.question || "",
+          sources: Array.isArray(entry.sources) ? entry.sources : [],
+          mode: entry.mode,
+          historyIndex: entryIndex,
+        });
+      }
+    });
+
+    return messages.map((message, index) => ({
+      ...message,
+      id: message.id || createStableMessageId({
+        sessionId,
+        pdfId,
+        role: message.role,
+        index,
+        question: message.question,
+        text: message.text,
+      }),
+    }));
+  }, []);
 
   const loadKnownSessions = React.useCallback(() => {
     try {
@@ -157,7 +215,11 @@ function MainApp() {
               name: doc?.filename || "Unknown PDF",
               document_id: doc?.document_id || null,
               url: null,
-              chat: s.chat || [],
+              chat: normalizeChatHistory(
+                s.chat || [],
+                s.session_id,
+                doc?.document_id || s.session_id,
+              ),
               session_id: s.session_id,
               session_secret: secretById.get(s.session_id) || null,
             };
@@ -170,7 +232,11 @@ function MainApp() {
       }
     };
     fetchHistory();
-  }, [loadKnownSessions]);
+  }, [loadKnownSessions, normalizeChatHistory]);
+
+  React.useEffect(() => {
+    persistSavedNotes(savedNotes);
+  }, [savedNotes]);
 
 
 
@@ -270,7 +336,27 @@ function MainApp() {
     setPdfs((prev) =>
       prev.map((pdf) =>
         pdf.id === selectedPdf
-          ? { ...pdf, chat: [...pdf.chat, message] }
+          ? {
+              ...pdf,
+              chat: [
+                ...pdf.chat,
+                {
+                  ...message,
+                  ...(!message.streaming
+                    ? {
+                        id: message.id || createStableMessageId({
+                          sessionId: pdf.session_id,
+                          pdfId: pdf.id,
+                          role: message.role,
+                          index: pdf.chat.length,
+                          question: message.question,
+                          text: message.text,
+                        }),
+                      }
+                    : {}),
+                },
+              ],
+            }
           : pdf,
       ),
     );
@@ -336,16 +422,147 @@ const handleOpenSource = (source) => {
   const themeClass = darkMode ? "bg-dark text-light" : "bg-light text-dark";
 
   const currentPdf = pdfs.find((pdf) => pdf.id === selectedPdf);
-  const currentChat = currentPdf?.chat || [];
+  const currentChat = currentPdf?.chat || EMPTY_CHAT;
   const currentPdfUrl = currentPdf?.url || null;
   const currentPdfSessionId = currentPdf?.session_id || null;
   const currentPdfSessionSecret = currentPdf?.session_secret || null;
   const currentPdfName = currentPdf?.name || null;
+  const currentChatWithIds = React.useMemo(
+    () =>
+      currentChat.map((message, index) => ({
+        ...message,
+        id: message.id || createStableMessageId({
+          sessionId: currentPdfSessionId,
+          pdfId: selectedPdf,
+          role: message.role,
+          index,
+          question: message.question,
+          text: message.streaming ? "" : message.text,
+        }),
+      })),
+    [currentChat, currentPdfSessionId, selectedPdf],
+  );
+  const savedMessageIds = React.useMemo(
+    () => new Set(savedNotes.map((note) => note.messageId)),
+    [savedNotes],
+  );
+  const allMessageLocations = React.useMemo(() => {
+    const locations = new Map();
+    pdfs.forEach((pdf) => {
+      (pdf.chat || []).forEach((message, index) => {
+        const messageId = message.id || createStableMessageId({
+          sessionId: pdf.session_id,
+          pdfId: pdf.id,
+          role: message.role,
+          index,
+          question: message.question,
+          text: message.streaming ? "" : message.text,
+        });
+        locations.set(messageId, { pdfId: pdf.id });
+      });
+    });
+    return locations;
+  }, [pdfs]);
+  const availableMessageIds = React.useMemo(
+    () => new Set(allMessageLocations.keys()),
+    [allMessageLocations],
+  );
+
+  const handleRegisterMessageRef = React.useCallback((messageId, node) => {
+    if (!messageId) return;
+    if (node) {
+      messageRefs.current.set(messageId, node);
+    } else {
+      messageRefs.current.delete(messageId);
+    }
+  }, []);
+
+  const handleRemoveSavedNote = React.useCallback((messageId) => {
+    setSavedNotes((prev) => prev.filter((note) => note.messageId !== messageId));
+  }, []);
+
+  const handleOpenSavedNote = React.useCallback((note) => {
+    const location = allMessageLocations.get(note.messageId);
+    if (location?.pdfId && location.pdfId !== selectedPdf) {
+      setSelectedPdf(location.pdfId);
+      setPdfJumpTarget(null);
+    }
+    setRightPanelTab("chat");
+
+    window.setTimeout(() => {
+      const target = messageRefs.current.get(note.messageId);
+      if (!target) {
+        toast.error("Original message is unavailable in the current chat.");
+        return;
+      }
+
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      setHighlightedMessageId(note.messageId);
+      window.setTimeout(() => setHighlightedMessageId(null), 1600);
+    }, 100);
+  }, [allMessageLocations, selectedPdf]);
+
+  const handleToggleBookmark = React.useCallback((message) => {
+    if (!message?.id || message.role !== "bot" || message.streaming) return;
+
+    setSavedNotes((prev) => {
+      if (prev.some((note) => note.messageId === message.id)) {
+        return prev.filter((note) => note.messageId !== message.id);
+      }
+
+      const messageIndex = currentChatWithIds.findIndex((item) => item.id === message.id);
+      const previousQuestion =
+        message.question ||
+        [...currentChatWithIds.slice(0, messageIndex)]
+          .reverse()
+          .find((item) => item.role === "user")?.text ||
+        "";
+      const firstSource = Array.isArray(message.sources)
+        ? message.sources.find((source) => source?.document || source?.page)
+        : null;
+
+      return [
+        {
+          id: `note_${hashString(message.id)}`,
+          messageId: message.id,
+          question: previousQuestion,
+          answer: message.text || "",
+          createdAt: new Date().toISOString(),
+          pdfId: selectedPdf,
+          sessionId: currentPdfSessionId,
+          ...(firstSource
+            ? {
+                source: {
+                  document: firstSource.document,
+                  page: firstSource.page,
+                },
+              }
+            : {}),
+        },
+        ...prev,
+      ];
+    });
+  }, [currentChatWithIds, currentPdfSessionId, selectedPdf]);
+  const currentDocumentId = currentPdf?.document_id || null;
+
+  // The knowledge gap result for the currently-active document (null if none run yet).
+  const currentKnowledgeGapResult =
+    currentDocumentId && knowledgeGapResults[currentDocumentId]
+      ? knowledgeGapResults[currentDocumentId]
+      : null;
+
+  const handleKnowledgeGapResult = (result) => {
+    if (!currentDocumentId) return;
+    setKnowledgeGapResults((prev) => ({
+      ...prev,
+      [currentDocumentId]: result,
+    }));
+  };
 
   // Compute Heatmap Data for the current document
   const heatmapCounts = {};
-  if (currentChat && currentChat.length > 0) {
-    currentChat.forEach((msg) => {
+  if (currentChatWithIds && currentChatWithIds.length > 0) {
+    currentChatWithIds.forEach((msg) => {
       if (msg.role === "bot" && !msg.streaming && Array.isArray(msg.sources)) {
         // deduplicate sources per message by page
         const uniquePages = new Set();
@@ -483,18 +700,34 @@ const handleOpenSource = (source) => {
                   </div>
 
                   {rightPanelTab === "chat" ? (
-                    <ChatPanel
-                      darkMode={darkMode}
-                      currentChat={currentChat}
-                      selectedPdf={selectedPdf}
-                      currentPdfName={currentPdfName}
-                      currentPdfSessionId={currentPdfSessionId}
-                      currentPdfSessionSecret={currentPdfSessionSecret}
-                      onAppendMessage={handleAppendMessage}
-                      onOpenSource={handleOpenSource}
-                      onUpdateLastBotMessage={handleUpdateLastBotMessage}
-                      handleClearChat={handleClearChat}
-                    />
+                    <>
+                      <SavedNotes
+                        darkMode={darkMode}
+                        notes={savedNotes}
+                        availableMessageIds={availableMessageIds}
+                        onOpenNote={handleOpenSavedNote}
+                        onRemoveNote={handleRemoveSavedNote}
+                      />
+                      <ChatPanel
+                        darkMode={darkMode}
+                        currentChat={currentChatWithIds}
+                        selectedPdf={selectedPdf}
+                        currentPdfName={currentPdfName}
+                        currentPdfSessionId={currentPdfSessionId}
+                        currentPdfSessionSecret={currentPdfSessionSecret}
+                        currentDocumentId={currentDocumentId}
+                        knowledgeGapResult={currentKnowledgeGapResult}
+                        onKnowledgeGapResult={handleKnowledgeGapResult}
+                        onAppendMessage={handleAppendMessage}
+                        onOpenSource={handleOpenSource}
+                        onUpdateLastBotMessage={handleUpdateLastBotMessage}
+                        handleClearChat={handleClearChat}
+                        savedMessageIds={savedMessageIds}
+                        onToggleBookmark={handleToggleBookmark}
+                        highlightedMessageId={highlightedMessageId}
+                        onRegisterMessageRef={handleRegisterMessageRef}
+                      />
+                    </>
                   ) : (
                     <StudyHub
                       darkMode={darkMode}
@@ -528,6 +761,7 @@ function App() {
           <Route path="/signin" element={<SignIn />} />
           <Route path="/signup" element={<SignUp />} />
           <Route path="/dashboard/*" element={<Dashboard />} />
+          <Route path="/studyhub" element={<StudyHub />} />
         </Routes>
       </BrowserRouter>
     </AuthProvider>

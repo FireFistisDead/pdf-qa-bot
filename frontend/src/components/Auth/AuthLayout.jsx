@@ -13,7 +13,7 @@ const AuthLayout = ({ children }) => {
           <a href="/" className="auth-logo">
             <div className="auth-logo-icon">D</div> DOCUMIND
           </a>
-          
+
           {children}
 
           <div className="auth-footer">
@@ -27,7 +27,7 @@ const AuthLayout = ({ children }) => {
         {/* Glows and Decor to make it less plain */}
         <div className="hero-glow-core" style={{ opacity: 0.5 }}></div>
         <div className="hero-glow-accent" style={{ opacity: 0.3 }}></div>
-        
+
         <div className="decor-group">
           <div className="decor-cross c1"></div>
           <div className="decor-cross c2"></div>
@@ -39,7 +39,7 @@ const AuthLayout = ({ children }) => {
 
         <div className="auth-scene-container">
           <div className="scene-3d auth-scene-3d">
-            
+
             {/* Box 1: The Secure Node */}
             <div className="glass-panel panel-pdf" style={{ width: '300px', height: '360px' }}>
               <div className="panel-header">
@@ -51,7 +51,7 @@ const AuthLayout = ({ children }) => {
               <div className="panel-body">
                 <h3 className="doc-title text-hover-effect" style={{ color: 'var(--accent)' }}>SECURE_MODE: ON</h3>
                 <p className="doc-text" style={{ fontSize: '13px', lineHeight: '1.6' }}>
-                  <span className="highlight-lime text-hover-effect">All neural nodes</span> are operating strictly within local constraints. 
+                  <span className="highlight-lime text-hover-effect">All neural nodes</span> are operating strictly within local constraints.
                   Zero external API calls detected.
                 </p>
                 <div className="doc-skeleton">

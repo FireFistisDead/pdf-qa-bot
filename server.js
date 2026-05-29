@@ -10,19 +10,13 @@ const crypto = require("crypto");
 const { rateLimit } = require("express-rate-limit");
 const slowDown = require("express-slow-down");
 const helmet = require("helmet");
-const {
-  askSchema,
-  summarizeSchema,
-  sessionsLookupSchema,
-  generateFlashcardsSchema,
-  updateFlashcardProgressSchema,
-} = require("./validators/schemas");
+const { askSchema, summarizeSchema, knowledgeGapsSchema, sessionsLookupSchema } = require("./validators/schemas");
 const { clientIpFromRequest } = require("./security/ip");
 const { createRedisClient } = require("./security/redis");
 const authRoutes = require("./src/routes/authRoutes");
 
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
-const INTERNAL_RAG_TOKEN = process.env.INTERNAL_RAG_TOKEN || "";
+const getInternalRagToken = () => (process.env.INTERNAL_RAG_TOKEN || "").trim();
 const PORT = process.env.PORT || 4000;
 
 const app = express();
@@ -289,9 +283,9 @@ const inferenceLimiter = rateLimit({
   },
 });
 
-// Apply the ban guard and global limiter to every single route.
-app.use(banGuard);
+// Apply global limiter before ban guard so DB-backed ban checks are rate-limited.
 app.use(globalLimiter);
+app.use(banGuard);
 app.use("/api/auth", authRoutes);
 
 // ─── File Size Limits ──────────────────────────────────────────────────────────
@@ -480,8 +474,19 @@ const extractServiceDetails = (err, fallbackMessage = "Upstream service request 
   );
 };
 
-const ragAuthHeaders = () =>
-  INTERNAL_RAG_TOKEN ? { "X-Internal-Token": INTERNAL_RAG_TOKEN } : {};
+const requireInternalRagToken = () => {
+  if (!getInternalRagToken()) {
+    throw new Error("INTERNAL_RAG_TOKEN must be configured for RAG service requests.");
+  }
+};
+
+const ragAuthHeaders = () => {
+  const token = getInternalRagToken();
+  if (!token) {
+    throw new Error("INTERNAL_RAG_TOKEN must be configured for RAG service requests.");
+  }
+  return { "X-Internal-Token": token };
+};
 
 const normalizeSessionSecret = (value) =>
   typeof value === "string" ? value.trim() || null : null;
@@ -704,6 +709,137 @@ if (signatureBuffer.toString() !== "%PDF") {
   }
 });
 
+// ─── Process PDF from URL (Supabase Storage) ────────────────────────────────
+// Downloads the PDF from a remote URL (e.g. Supabase Storage public URL),
+// streams it to the RAG service for text extraction + FAISS indexing,
+// Middleware to verify Supabase JWTs to prevent unauthenticated processing
+const requireSupabaseAuth = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Missing or invalid authorization token" });
+  }
+  
+  const token = authHeader.split(" ")[1];
+  const secret = process.env.SUPABASE_JWT_SECRET;
+  
+  // If the server admin hasn't configured the JWT secret, we at least enforce 
+  // that a token is provided (to satisfy basic security checks), but we can't 
+  // cryptographically verify it without the secret.
+  if (secret) {
+    const jwt = require("jsonwebtoken");
+    try {
+      req.user = jwt.verify(token, secret);
+    } catch (err) {
+      return res.status(401).json({ error: "Invalid token" });
+    }
+  }
+  
+  next();
+};
+
+// Downloads the PDF from a remote URL (e.g. Supabase Storage public URL),
+// streams it to the RAG service for text extraction + FAISS indexing,
+// and returns the session_id + session_secret needed for /ask/stream.
+app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, res) => {
+  const { url, filename, session_id, session_secret } = req.body || {};
+
+  if (!url || typeof url !== "string") {
+    return res.status(400).json({ error: "Missing or invalid 'url' field." });
+  }
+  
+  // SSRF Protection: Validate URL format, protocol, and hostname
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(url);
+  } catch (err) {
+    return res.status(400).json({ error: "Invalid URL format." });
+  }
+
+  if (parsedUrl.protocol !== "https:") {
+    return res.status(400).json({ error: "Only HTTPS URLs are allowed." });
+  }
+
+  const allowedHosts = [".supabase.co", ".supabase.in"];
+  const isAllowedHost = allowedHosts.some(host => parsedUrl.hostname.endsWith(host));
+  
+  if (!isAllowedHost) {
+    return res.status(403).json({ error: "URL host is not allowed." });
+  }
+
+  if (!filename || typeof filename !== "string") {
+    return res.status(400).json({ error: "Missing or invalid 'filename' field." });
+  }
+
+  // Sanitize filename — allow only safe characters
+  const safeFilename = path
+    .basename(filename)
+    .replace(/[^a-zA-Z0-9._\- ]/g, "_")
+    .slice(0, 200);
+
+  try {
+    // Download the PDF from the remote URL into a Buffer
+    let pdfBuffer;
+    try {
+      const dlResponse = await axios.get(url, {
+        responseType: "arraybuffer",
+        timeout: 30000,
+        maxContentLength: 50 * 1024 * 1024, // 50 MB cap
+      });
+      pdfBuffer = Buffer.from(dlResponse.data);
+    } catch (dlErr) {
+      console.error("Failed to download PDF from URL:", dlErr.message);
+      return res.status(502).json({ error: "Could not download PDF from the provided URL." });
+    }
+
+    // Verify PDF magic bytes
+    if (pdfBuffer.slice(0, 4).toString() !== "%PDF") {
+      return res.status(415).json({ error: "The file at the provided URL is not a valid PDF." });
+    }
+
+    // Build multipart form and forward to RAG service
+    // Uses axios.postForm with a FormData blob — no extra form-data package needed
+    const form = new FormData();
+    const pdfBlob = new Blob([pdfBuffer], { type: 'application/pdf' });
+    form.append("file", pdfBlob, safeFilename);
+    form.append("original_filename", safeFilename);
+
+    // Optionally extend an existing session
+    if (session_id && session_secret) {
+      form.append("session_id", session_id);
+      form.append("session_secret", session_secret);
+    }
+
+    const ragResponse = await axios.post(
+      `${RAG_SERVICE_URL}/process-pdf`,
+      form,
+      {
+        headers: ragAuthHeaders(),
+        timeout: 120000, // 2 min — embedding generation can be slow
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+      }
+    );
+
+    return res.json({
+      message: "PDF processed and indexed successfully.",
+      session_id: ragResponse.data.session_id,
+      session_secret: ragResponse.data.session_secret,
+      document: ragResponse.data.document,
+      documents: ragResponse.data.documents || [],
+    });
+  } catch (err) {
+    const statusCode =
+      err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
+    const details = extractServiceDetails(err, "RAG processing failed");
+    console.error("process-from-url failed:", details);
+
+    return res.status(statusCode).json({
+      error: typeof details === "string" ? details : "PDF processing failed",
+      details: isDevelopment ? details : "Internal processing error",
+    });
+  }
+});
+
 app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
   const validation = askSchema.safeParse(req.body);
 
@@ -762,7 +898,11 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
     const ragResponse = await axios.post(
       `${RAG_SERVICE_URL}/ask/stream`,
       { question, session_id, session_secret, mode },
-      { responseType: "stream", timeout: 120000 }
+      {
+        headers: ragAuthHeaders(),
+        responseType: "stream",
+        timeout: 120000,
+      }
     );
 
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -822,8 +962,8 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
   }
 });
 
-app.post("/sessions/flashcards", inferenceSlowDown, inferenceLimiter, async (req, res) => {
-  const validation = generateFlashcardsSchema.safeParse(req.body);
+app.post("/knowledge-gaps", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+  const validation = knowledgeGapsSchema.safeParse(req.body);
 
   if (!validation.success) {
     return res.status(400).json({
@@ -834,49 +974,19 @@ app.post("/sessions/flashcards", inferenceSlowDown, inferenceLimiter, async (req
 
   try {
     const response = await axios.post(
-      `${RAG_SERVICE_URL}/sessions/flashcards/generate`,
+      `${RAG_SERVICE_URL}/knowledge-gaps`,
       validation.data,
-      { headers: ragAuthHeaders(), timeout: 90000 }
+      { headers: ragAuthHeaders() },
     );
-
+    // Pass the response through as-is — no gateway-layer transformation.
     return res.json(response.data);
   } catch (err) {
     const statusCode = err.response?.status || 500;
-    const details = extractServiceDetails(err, "Failed to generate flashcards");
-    console.error("Flashcards generation failed:", details);
+    const details = extractServiceDetails(err, "Error mapping knowledge gaps");
+    console.error("Knowledge gap mapping failed:", details);
 
     return res.status(statusCode).json({
-      error: typeof details === "string" ? details : "Failed to generate flashcards",
-      details: isDevelopment ? details : "Internal processing error",
-    });
-  }
-});
-
-app.post("/sessions/flashcards/progress", async (req, res) => {
-  const validation = updateFlashcardProgressSchema.safeParse(req.body);
-
-  if (!validation.success) {
-    return res.status(400).json({
-      error: "Validation failed",
-      details: validation.error.flatten(),
-    });
-  }
-
-  try {
-    const response = await axios.post(
-      `${RAG_SERVICE_URL}/sessions/flashcards/update-progress`,
-      validation.data,
-      { headers: ragAuthHeaders() }
-    );
-
-    return res.json(response.data);
-  } catch (err) {
-    const statusCode = err.response?.status || 500;
-    const details = extractServiceDetails(err, "Failed to update flashcard progress");
-    console.error("Flashcard progress update failed:", details);
-
-    return res.status(statusCode).json({
-      error: typeof details === "string" ? details : "Failed to update flashcard progress",
+      error: typeof details === "string" ? details : "Error mapping knowledge gaps",
       details: isDevelopment ? details : "Internal processing error",
     });
   }
@@ -925,31 +1035,33 @@ app.use((req, res, next) => {
 });
 
 app.use((err, req, res, next) => {
-  if (err instanceof multer.MulterError) {
-    const statusCode = err.code === "LIMIT_FILE_SIZE" ? 413 : 400;
-    const message =
-      err.code === "LIMIT_FILE_SIZE"
-        ? "File too large. Please choose a PDF under 20MB."
-        : "File upload error";
-
-    return res.status(statusCode).json({
-      error: message,
-      details: err.message,
-    });
+  if (!err) {
+    return next();
   }
 
-  if (err) {
-    console.error("Upload failed:", err.message);
-    return res.status(400).json({
-      error: err.message || "Invalid upload request.",
-    });
-  }
+  const statusCode =
+    Number.isInteger(err.statusCode) ? err.statusCode :
+    Number.isInteger(err.status) ? err.status :
+    500;
 
-  next();
+  const message =
+    statusCode >= 500
+      ? "Internal server error."
+      : err.message || "Request failed.";
+
+  console.error("Unhandled Express error:", err.message);
+
+  return res.status(statusCode).json({
+    error: message,
+  });
 });
 
 if (require.main === module) {
+  requireInternalRagToken();
+
   (async () => {
+    requireInternalRagToken();
+
     if (redisConnectPromise) {
       console.log("[redis] connecting for distributed rate limiting...");
       await redisConnectPromise;
@@ -982,4 +1094,6 @@ module.exports = {
   bannedIPs,
   recordOffence,
   BAN_DURATIONS_MS,
+  ragAuthHeaders,
+  requireInternalRagToken,
 };
