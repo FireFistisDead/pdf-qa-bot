@@ -33,3 +33,8 @@ venv/
 
 .env
 uploads/
+# Ignore exported PDFs
+rag-service/export_*.pdf
+
+# Ignore FAISS index files
+rag-service/faiss_store/

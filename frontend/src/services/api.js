@@ -67,6 +67,6 @@ export const summarizePdfApi = async (pdfName, sessionId) => {
  * @param {string} format - "pdf" | "markdown" | "html"
  */
 export const exportAnswerApi = async (sessionId, format) => {
-  const res = await axios.post(`${API_BASE}/export`, { session_id: sessionId, format });
+  const res = await axios.post(`${API_BASE}/export`, { session_id: sessionId, format },{ responseType: format === "pdf" ? "blob" : "json", timeout: 30000 });
   return res.data;
 };

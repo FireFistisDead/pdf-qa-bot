@@ -12,6 +12,7 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from dotenv import load_dotenv
 from rank_bm25 import BM25Okapi
 from fpdf import FPDF
+import tempfile
 import numpy as np
 import os
 import uuid
@@ -239,8 +240,7 @@ def _enforce_max_sessions_unlocked():
 def validate_existing_session(session_id: str):
     if not session_id:
         return None
-    with sessions_lock:
-        return _touch_session_unlocked(session_id)
+    return _touch_session_unlocked(session_id)
 
 
 def get_session_documents(session_id: str):
@@ -1093,34 +1093,40 @@ def ask_question(data: Question):
             session["last_sources"] = pages
 
     return {"answer": answer, "sources": pages}
+class ExportRequest(BaseModel):
+    session_id: str
+    format: str = "pdf"
 
 @app.post("/export")
-def export_answer(session_id: str, format: str = "pdf"):
+def export_answer(req: ExportRequest):
     # Retrieve stored answer + sources
-    answer, sources = get_answer_from_session(session_id)
+    answer, sources = get_answer_from_session(req.session_id)
     sources_str = [f"Page {s}" for s in sources]
 
-    if format == "pdf":
+    if req.format == "pdf":
         pdf = FPDF()
         pdf.add_page()
-        pdf.set_font("Arial", size=12)
+        pdf.set_font("Helvetica", size=12)  # safer built-in font
         pdf.multi_cell(0, 10, f"Answer:\n{answer}\n\nSources:\n" + "\n".join(sources_str))
-        
-        filename = f"export_{session_id}.pdf"
-        pdf.output(filename)
-        return FileResponse(filename, media_type="application/pdf", filename=filename)
 
-    elif format == "markdown":
+        # use a temp file to avoid leaks
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            pdf.output(tmp.name)
+            return FileResponse(tmp.name, media_type="application/pdf", filename=f"export_{req.session_id}.pdf")
+
+    elif req.format == "markdown":
         md_content = f"**Answer:**\n{answer}\n\n**Sources:**\n" + "\n".join(sources_str)
         return {"content": md_content}
 
-    elif format == "html":
+    elif req.format == "html":
         html_content = (
             f"<h2>Answer</h2><p>{answer}</p>"
             f"<h3>Sources</h3><ul>" + "".join([f"<li>{s}</li>" for s in sources_str]) + "</ul>"
         )
         return {"content": html_content}
 
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported export format")
 
 @app.post("/summarize")
 def summarize_pdf(data: SummarizeRequest):
