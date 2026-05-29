@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../../services/supabaseClient';
 import { useAuth } from '../../../contexts/AuthContext';
 import { processDocument, getProcessingStatus } from '../../../services/ragService';
+import './DocumentsView.css';
 
 const DocumentsView = () => {
   const { user } = useAuth();

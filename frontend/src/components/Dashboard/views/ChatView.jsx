@@ -49,16 +49,22 @@ const ChatView = () => {
     if (!activeDoc) { setMessages([]); return; }
     const load = async () => {
       try {
-        const { data, error } = await supabase
-          .from('chat_messages')
-          .select('*')
-          .eq('document_id', activeDoc.id)
-          .order('created_at', { ascending: true });
-        if (error) throw error;
-        setMessages(data || []);
-        setMsgCount((data || []).length);
+        const { getSessionsApi } = require('../../../services/api');
+        const sessions = await getSessionsApi([{ session_id: activeDoc.session_id, session_secret: activeDoc.session_secret }]);
+        if (sessions && sessions.length > 0) {
+          const chat = sessions[0].chat || [];
+          const formatted = chat.map(m => ({
+            role: m.role === 'bot' ? 'assistant' : m.role,
+            content: m.text,
+            created_at: new Date().toISOString()
+          }));
+          setMessages(formatted);
+          setMsgCount(formatted.length);
+        } else {
+          setMessages([]);
+        }
       } catch (err) {
-        toast.error('Failed to load chat history');
+        console.error("Failed to load messages:", err);
       }
     };
     load();
@@ -66,7 +72,7 @@ const ChatView = () => {
 
   useEffect(() => {
     // Use 'auto' instead of 'smooth' during streaming to prevent animation jitter/glitches
-    messagesEndRef.current?.scrollIntoView({ behavior: isTyping ? 'auto' : 'smooth' });
+    messagesEndRef.current?.scrollIntoView({ behavior: isTyping ? 'auto' : 'smooth', block: 'end' });
   }, [messages, currentStream, isTyping]);
 
   // Auto-grow textarea
@@ -88,14 +94,6 @@ const ChatView = () => {
     setCurrentStream('');
 
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      await supabase.from('chat_messages').insert({
-        user_id: session.user.id,
-        document_id: activeDoc.id,
-        role: 'user',
-        content: userMsg.content,
-      });
-
       let full = '';
       askStream(
         activeDoc.session_id,
@@ -107,14 +105,8 @@ const ChatView = () => {
           setCurrentStream('');
           setMessages(prev => [...prev, { role: 'assistant', content: full }]);
           setMsgCount(c => c + 2);
-          await supabase.from('chat_messages').insert({
-            user_id: session.user.id,
-            document_id: activeDoc.id,
-            role: 'assistant',
-            content: full,
-          });
         },
-        (err) => { setIsTyping(false); setCurrentStream(''); toast.error(err); }
+        (err) => { setIsTyping(false); setCurrentStream(''); toast.error(err.message || String(err)); }
       );
     } catch (err) {
       setIsTyping(false);
