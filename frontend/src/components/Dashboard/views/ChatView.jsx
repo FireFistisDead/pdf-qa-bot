@@ -65,14 +65,16 @@ const ChatView = () => {
   }, [activeDoc]);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, currentStream]);
+    // Use 'auto' instead of 'smooth' during streaming to prevent animation jitter/glitches
+    messagesEndRef.current?.scrollIntoView({ behavior: isTyping ? 'auto' : 'smooth' });
+  }, [messages, currentStream, isTyping]);
 
   // Auto-grow textarea
   useEffect(() => {
     if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-      textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 140) + 'px';
+      textareaRef.current.style.height = '22px'; // Reset to min-height to calculate true scrollHeight
+      const scrollHeight = textareaRef.current.scrollHeight;
+      textareaRef.current.style.height = Math.min(scrollHeight, 140) + 'px';
     }
   }, [inputText]);
 
@@ -352,7 +354,7 @@ const ChatView = () => {
                   handleSend(e);
                 }
               }}
-              disabled={!activeDoc || isTyping}
+              disabled={!activeDoc}
             />
             <div className="chat-input-actions">
               <span className="cia-hint">SHIFT+ENTER for newline</span>
