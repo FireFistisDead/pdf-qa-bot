@@ -5,7 +5,16 @@ import toast from "react-hot-toast";
 
 import MessageBubble from "./MessageBubble";
 import ExportMenu from "./ExportMenu";
-import { askQuestionApi, summarizePdfApi } from "../../services/api";
+import KnowledgeGapMap from "./KnowledgeGapMap";
+import { askQuestionApi, askQuestionStreamApi, extractApiErrorMessage, summarizePdfApi, mapKnowledgeGapsApi } from "../../services/api";
+
+const MODE_OPTIONS = [
+  { value: "default",  label: "Standard",  tooltip: "Balanced answers grounded in your document. Best for general-purpose reading." },
+  { value: "tutor",    label: "Tutor",     tooltip: "Full answer + one thoughtful follow-up question to push your understanding further." },
+  { value: "socratic", label: "Socratic",  tooltip: "Guides you to the answer through 2–3 questions. Never reveals the answer directly." },
+  { value: "eli5",     label: "Simple",    tooltip: "Plain language, everyday analogies, no jargon. Best for dense academic or legal documents." },
+  { value: "concise",  label: "Concise",   tooltip: "1–2 sentence answer, 60-word maximum. Best for quick fact-checking." },
+];
 
 const ChatPanel = ({
   darkMode,
@@ -13,62 +22,87 @@ const ChatPanel = ({
   selectedPdf,
   currentPdfName,
   currentPdfSessionId,
+  currentPdfSessionSecret,
+  currentDocumentId,
+  knowledgeGapResult,
+  onKnowledgeGapResult,
+  onUpdateLastBotMessage,
   onAppendMessage,
+  onOpenSource,
+  handleClearChat,
+  savedMessageIds,
+  onToggleBookmark,
+  highlightedMessageId,
+  onRegisterMessageRef,
 }) => {
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
   const [summarizing, setSummarizing] = useState(false);
+  const [mappingGaps, setMappingGaps] = useState(false);
+  const [mode, setMode] = useState(() => {
+    const saved = localStorage.getItem("pdfqa_preferred_mode");
+    return MODE_OPTIONS.some(opt => opt.value === saved) ? saved : "default";
+  });
   const messagesEndRef = useRef(null);
+
+  const handleModeChange = (newMode) => {
+    setMode(newMode);
+    localStorage.setItem("pdfqa_preferred_mode", newMode);
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({
       behavior: "smooth",
     });
   }, [currentChat, asking]);
+const askQuestion = async () => {
+  if (!question.trim()) {
+    toast.error("Please enter a question before submitting.");
+    return;
+  }
+  if (!selectedPdf || !currentPdfSessionId || !currentPdfSessionSecret) {
+    toast.error("Please upload and select a PDF document first.");
+    return;
+  }
 
-  const askQuestion = async () => {
-    if (!question.trim()) {
-      toast.error("Please enter a question before submitting.");
-      return;
-    }
+  const trimmedQuestion = question;
+  setAsking(true);
+  setQuestion("");
+  onAppendMessage({ role: "user", text: trimmedQuestion });
+  onAppendMessage({ role: "bot", text: "", question: trimmedQuestion, streaming: true, sources: [], mode });
 
-    if (!selectedPdf || !currentPdfSessionId) {
-      toast.error("Please upload and select a PDF document first.");
-      return;
-    }
-
-    setAsking(true);
-    onAppendMessage({ role: "user", text: question });
-
+  try {
+    await askQuestionStreamApi(trimmedQuestion, currentPdfSessionId, currentPdfSessionSecret, mode, (partialText) => {
+      onUpdateLastBotMessage(partialText, true);
+    });
+    onUpdateLastBotMessage(null, false);
+  } catch (streamErr) {
+    console.warn("Streaming failed, falling back to /ask:", streamErr.message);
     try {
-      const data = await askQuestionApi(question, currentPdfSessionId);
-      onAppendMessage({ role: "bot", text: data.answer });
+      const data = await askQuestionApi(trimmedQuestion, currentPdfSessionId, currentPdfSessionSecret, mode);
+      onUpdateLastBotMessage(data.answer, false, data.sources || [], data.mode);
     } catch (e) {
       let errorMessage = "Error getting answer. Please try again.";
-
       if (e.code === "ECONNABORTED") {
-        errorMessage =
-          "Request timed out. The AI is taking too long to respond. Please try a simpler question.";
+        errorMessage = "Request timed out. Please try a simpler question.";
       } else if (!e.response) {
-        errorMessage =
-          "Network error. Please check if the backend server is running.";
+        errorMessage = "Network error. Please check if the backend server is running.";
       } else if (e.response?.status === 404) {
         errorMessage = "Session not found. Please upload the PDF again.";
       } else if (e.response?.status === 500) {
         errorMessage = "Server error. Please try again later.";
-      } else if (e.response?.data?.error) {
-        errorMessage = e.response.data.error;
+      } else {
+        errorMessage = extractApiErrorMessage(e, errorMessage);
       }
-
       toast.error(errorMessage);
-      onAppendMessage({ role: "bot", text: errorMessage });
+      onUpdateLastBotMessage(errorMessage, false);
     }
-    setQuestion("");
-    setAsking(false);
-  };
+  }
+  setAsking(false);
+};
 
   const summarizePDF = async () => {
-    if (!selectedPdf || !currentPdfSessionId) {
+    if (!selectedPdf || !currentPdfSessionId || !currentPdfSessionSecret) {
       toast.error("Please upload and select a PDF document first.");
       return;
     }
@@ -77,8 +111,8 @@ const ChatPanel = ({
     const loadingToast = toast.loading("Summarizing PDF...");
 
     try {
-      const data = await summarizePdfApi(currentPdfName, currentPdfSessionId);
-      onAppendMessage({ role: "bot", text: data.summary });
+      const data = await summarizePdfApi(currentPdfName, currentPdfSessionId, currentPdfSessionSecret);
+      onAppendMessage({ role: "bot", text: data.summary, question: `Summarize ${currentPdfName || "document"}` });
       toast.success("PDF summarized successfully!", {
         id: loadingToast,
       });
@@ -95,16 +129,49 @@ const ChatPanel = ({
         errorMessage = "Session not found. Please upload the PDF again.";
       } else if (e.response?.status === 500) {
         errorMessage = "Server error. Please try again later.";
-      } else if (e.response?.data?.error) {
-        errorMessage = e.response.data.error;
+      } else {
+        errorMessage = extractApiErrorMessage(e, errorMessage);
       }
 
       toast.error(errorMessage, {
         id: loadingToast,
       });
-      onAppendMessage({ role: "bot", text: errorMessage });
+      onAppendMessage({ role: "bot", text: errorMessage, question: `Summarize ${currentPdfName || "document"}` });
     }
     setSummarizing(false);
+  };
+
+  const mapKnowledgeGaps = async () => {
+    if (!selectedPdf || !currentPdfSessionId || !currentPdfSessionSecret) {
+      toast.error("Please upload and select a PDF document first.");
+      return;
+    }
+    setMappingGaps(true);
+    const loadingToast = toast.loading("Analysing knowledge prerequisites…");
+    try {
+      const data = await mapKnowledgeGapsApi(
+        currentPdfSessionId,
+        currentPdfSessionSecret,
+        currentDocumentId || null,
+      );
+      onKnowledgeGapResult?.(data);
+      toast.success("Knowledge gap map ready!", { id: loadingToast });
+    } catch (e) {
+      let errorMessage = "Error mapping knowledge gaps. Please try again.";
+      if (e.code === "ECONNABORTED") {
+        errorMessage = "Request timed out. Please try again.";
+      } else if (!e.response) {
+        errorMessage = "Network error. Please check if the backend is running.";
+      } else if (e.response?.status === 422) {
+        errorMessage = extractApiErrorMessage(e, errorMessage);
+      } else if (e.response?.status === 404) {
+        errorMessage = "Session not found. Please re-upload the PDF.";
+      } else {
+        errorMessage = extractApiErrorMessage(e, errorMessage);
+      }
+      toast.error(errorMessage, { id: loadingToast });
+    }
+    setMappingGaps(false);
   };
 
   return (
@@ -154,6 +221,7 @@ const ChatPanel = ({
           </div>
           <div className="d-flex gap-2">
             <Button
+              id="btn-summarize"
               variant="warning"
               size="sm"
               onClick={summarizePDF}
@@ -166,9 +234,43 @@ const ChatPanel = ({
               )}
             </Button>
 
+            <Button
+              id="btn-knowledge-gaps"
+              variant="outline-info"
+              size="sm"
+              onClick={mapKnowledgeGaps}
+              disabled={mappingGaps || !selectedPdf}
+              title={`Map prerequisite concepts${currentPdfName ? ` in ${currentPdfName}` : ""}`}
+              style={{ whiteSpace: "nowrap" }}
+            >
+              {mappingGaps ? (
+                <><Spinner animation="border" size="sm" /> Analysing…</>
+              ) : knowledgeGapResult ? (
+                "🔄 Re-run Gap Map"
+              ) : (
+                "📚 Map Knowledge Gaps"
+              )}
+            </Button>
+
             <ExportMenu currentChat={currentChat} selectedPdfName={currentPdfName} />
+            <Button
+            variant="danger"
+            size="sm"
+            onClick={handleClearChat}>
+            Clear Chat
+            </Button>
           </div>
         </div>
+
+        {/* KNOWLEDGE GAP MAP — rendered above chat, not as a chat message */}
+        {knowledgeGapResult && (
+          <KnowledgeGapMap
+            result={knowledgeGapResult}
+            darkMode={darkMode}
+            onOpenSource={onOpenSource}
+            onDismiss={() => onKnowledgeGapResult?.(null)}
+          />
+        )}
 
         {/* CHAT AREA */}
         <div
@@ -224,9 +326,23 @@ const ChatPanel = ({
                   </div>
                 </div>
               </div>
-              {currentChat.map((msg, i) => (
-                <MessageBubble key={i} msg={msg} darkMode={darkMode} />
-              ))}
+              {currentChat.map((msg, i) => {
+                const messageId = msg.id || `legacy-message-${i}`;
+                const messageWithId = { ...msg, id: messageId };
+
+                return (
+                  <MessageBubble
+                    key={messageId}
+                    msg={messageWithId}
+                    darkMode={darkMode}
+                    onOpenSource={onOpenSource}
+                    isBookmarked={savedMessageIds?.has(messageId)}
+                    onToggleBookmark={onToggleBookmark}
+                    highlighted={highlightedMessageId === messageId}
+                    registerMessageRef={(node) => onRegisterMessageRef?.(messageId, node)}
+                  />
+                );
+              })}
 
               {asking && (
                 <div className="d-flex justify-content-start mb-3 chat-message">
@@ -372,6 +488,41 @@ const ChatPanel = ({
           )}
         </div>
         <div ref={messagesEndRef} />
+        {/* MODE SELECTOR */}
+        <div style={{ marginBottom: "10px" }}>
+          <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
+            {MODE_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                id={`mode-btn-${opt.value}`}
+                title={opt.tooltip}
+                onClick={() => handleModeChange(opt.value)}
+                style={{
+                  padding: "4px 12px",
+                  borderRadius: "20px",
+                  border: mode === opt.value
+                    ? "1.5px solid #8B5CF6"
+                    : darkMode ? "1px solid rgba(255,255,255,0.15)" : "1px solid rgba(0,0,0,0.12)",
+                  background: mode === opt.value
+                    ? "rgba(139,92,246,0.15)"
+                    : "transparent",
+                  color: mode === opt.value
+                    ? "#8B5CF6"
+                    : darkMode ? "#A1A1AA" : "#666",
+                  fontSize: "12px",
+                  fontWeight: mode === opt.value ? 600 : 400,
+                  cursor: "pointer",
+                  transition: "all 0.15s ease",
+                }}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <div style={{ fontSize: "11px", color: darkMode ? "#6B7280" : "#9CA3AF", marginTop: "4px" }}>
+            {MODE_OPTIONS.find(o => o.value === mode)?.tooltip}
+          </div>
+        </div>
         {/* INPUT */}
         <div
           style={{
@@ -449,3 +600,5 @@ const ChatPanel = ({
 };
 
 export default ChatPanel;
+
+// Accessibility improvements applied

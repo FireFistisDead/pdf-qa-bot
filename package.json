@@ -1,41 +1,33 @@
 {
-
   "name": "pdf-qa-bot",
-
   "version": "1.0.0",
-
   "description": "",
-
-  "main": "index.js",
-
-  "scripts": {
-
-    "test": "node --test server.test.js"
-    "build": "npm --prefix frontend run build"
-
+  "engines": {
+    "node": ">=20.0.0"
   },
-
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test server.test.js",
+    "build": "npm --prefix frontend run build"
+  },
   "keywords": [],
-
   "author": "",
-
   "license": "ISC",
-
   "type": "commonjs",
-
   "dependencies": {
-
     "axios": "^1.11.0",
-
+    "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
-
+    "dotenv": "^17.4.2",
     "express": "^5.1.0",
-
+    "express-rate-limit": "^8.5.2",
+    "express-slow-down": "^3.1.0",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.3",
     "multer": "^2.0.2",
-
-    "react-hot-toast": "^2.6.0"
-
+    "rate-limit-redis": "^4.2.3",
+    "react-hot-toast": "^2.6.0",
+    "redis": "^4.7.1",
+    "zod": "^4.4.3"
   }
-
 }
-

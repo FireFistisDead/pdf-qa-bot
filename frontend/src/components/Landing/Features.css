@@ -1,0 +1,336 @@
+/* ═══════════════════════════════════════════════════════════
+   Features Section — Bento Grid Layout
+   ═══════════════════════════════════════════════════════════ */
+
+.features-section {
+  padding: 120px 32px 60px 32px;
+  position: relative;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 80px;
+}
+
+/* ─── Header ─── */
+.features-header {
+  max-width: 600px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.features-title {
+  margin: 0;
+}
+
+.lime-text {
+  color: var(--accent);
+}
+
+.features-subtitle {
+  color: #999;
+  font-size: 18px;
+  line-height: 1.6;
+  margin: 0;
+}
+
+/* ─── Bento Grid ─── */
+.bento-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-auto-rows: minmax(320px, auto);
+  gap: 24px;
+  width: 100%;
+}
+
+.bento-card {
+  position: relative;
+  border-radius: 4px;
+  overflow: hidden;
+  padding: 40px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.3s ease;
+}
+
+.card-large {
+  grid-column: span 2;
+}
+
+.card-small {
+  grid-column: span 1;
+}
+
+.bento-card:hover {
+  transform: translateY(-5px);
+  z-index: 2;
+}
+
+/* ─── Glassmorphism Base ─── */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.02);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.glass-panel.glow-hover:hover {
+  border-color: rgba(200, 255, 0, 0.3);
+  box-shadow: 0 10px 40px -10px rgba(200, 255, 0, 0.1);
+}
+
+/* ─── Card Content ─── */
+.card-content {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.card-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 24px;
+  color: var(--text);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.card-icon svg {
+  width: 24px;
+  height: 24px;
+}
+
+.bento-card:hover .card-icon {
+  background: var(--accent);
+  color: #000;
+  border-color: var(--accent);
+}
+
+.card-title {
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 700;
+  margin: 0 0 12px 0;
+  color: #fff;
+  letter-spacing: -0.02em;
+}
+
+.card-text {
+  font-family: var(--font-body);
+  font-size: 15px;
+  color: #888;
+  line-height: 1.6;
+  margin: 0;
+}
+
+/* ─── Background Gradients inside Cards ─── */
+.card-bg-gradient {
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  opacity: 0;
+  transition: opacity 0.5s ease;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.bento-card:hover .card-bg-gradient {
+  opacity: 0.15;
+}
+
+.card-bg-gradient.blue {
+  background: radial-gradient(circle at center, #3d7fff 0%, transparent 50%);
+}
+
+.card-bg-gradient.lime {
+  background: radial-gradient(circle at center, var(--accent) 0%, transparent 50%);
+}
+
+.card-bg-gradient.purple {
+  background: radial-gradient(circle at center, #8B5CF6 0%, transparent 50%);
+}
+
+/* ─── Custom Graphic (Database Stack) ─── */
+.card-graphic {
+  margin-top: auto;
+  display: flex;
+  justify-content: flex-end;
+  align-items: flex-end;
+  padding-top: 40px;
+}
+
+.graphic-db {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transform: perspective(600px) rotateX(20deg) rotateY(-20deg);
+  transform-style: preserve-3d;
+}
+
+.db-layer {
+  width: 120px;
+  height: 30px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 50%;
+  transition: all 0.3s ease;
+}
+
+.bento-card:hover .db-layer {
+  border-color: rgba(61, 127, 255, 0.4);
+}
+
+.db-layer.active {
+  box-shadow: 0 0 20px rgba(61, 127, 255, 0.4);
+  background: rgba(61, 127, 255, 0.1);
+}
+
+.bento-card:hover .db-layer.active {
+  background: rgba(61, 127, 255, 0.3);
+  box-shadow: 0 0 30px rgba(61, 127, 255, 0.6);
+  transform: translateY(-5px);
+}
+
+/* ─── Top Row Layout & Visual ─── */
+.features-top-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  gap: 40px;
+}
+
+.features-header-visual {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  perspective: 1000px;
+}
+
+.rag-terminal {
+  width: 100%;
+  max-width: 420px;
+  background: rgba(10, 10, 10, 0.8);
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(200, 255, 0, 0.05);
+  transform: perspective(800px) rotateX(10deg) rotateY(-15deg);
+  transition: transform 0.5s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.5s ease;
+}
+
+.rag-terminal:hover {
+  transform: perspective(800px) rotateX(0deg) rotateY(0deg) scale(1.02);
+  box-shadow: 0 30px 60px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(200, 255, 0, 0.2);
+}
+
+.terminal-header {
+  height: 32px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  gap: 8px;
+}
+
+.term-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #333;
+}
+
+.term-dot.close { background: #ff5f56; }
+.term-dot.min { background: #ffbd2e; }
+.term-dot.max { background: #27c93f; }
+
+.terminal-title {
+  margin-left: 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #666;
+  letter-spacing: 0.05em;
+}
+
+.terminal-body {
+  padding: 20px 16px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: #ccc;
+  line-height: 1.8;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.term-line {
+  margin: 0;
+  display: flex;
+  gap: 12px;
+}
+
+.term-prompt {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.term-success {
+  color: #27c93f;
+  opacity: 0.9;
+}
+
+.term-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 14px;
+  background: var(--accent);
+  animation: blink 1s step-end infinite;
+  transform: translateY(2px);
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* ─── Text Hover Effect ─── */
+.text-hover-effect {
+  transition: color 0.3s ease, text-shadow 0.3s ease;
+}
+
+.text-hover-effect:hover,
+.bento-card:hover .text-hover-effect {
+  color: #fff;
+  text-shadow: 0 0 10px rgba(255, 255, 255, 0.4);
+}
+
+/* ─── Mobile ─── */
+@media (max-width: 992px) {
+  .bento-grid {
+    grid-template-columns: 1fr;
+  }
+  .card-large, .card-small {
+    grid-column: span 1;
+  }
+  .features-top-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .features-header-visual {
+    width: 100%;
+    margin-top: 32px;
+    justify-content: flex-start;
+  }
+}
