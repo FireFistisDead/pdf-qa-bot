@@ -30,6 +30,10 @@ const ChatPanel = ({
   onAppendMessage,
   onOpenSource,
   handleClearChat,
+  savedMessageIds,
+  onToggleBookmark,
+  highlightedMessageId,
+  onRegisterMessageRef,
 }) => {
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
@@ -65,7 +69,7 @@ const askQuestion = async () => {
   setAsking(true);
   setQuestion("");
   onAppendMessage({ role: "user", text: trimmedQuestion });
-  onAppendMessage({ role: "bot", text: "", streaming: true, sources: [], mode });
+  onAppendMessage({ role: "bot", text: "", question: trimmedQuestion, streaming: true, sources: [], mode });
 
   try {
     await askQuestionStreamApi(trimmedQuestion, currentPdfSessionId, currentPdfSessionSecret, mode, (partialText) => {
@@ -108,7 +112,7 @@ const askQuestion = async () => {
 
     try {
       const data = await summarizePdfApi(currentPdfName, currentPdfSessionId, currentPdfSessionSecret);
-      onAppendMessage({ role: "bot", text: data.summary });
+      onAppendMessage({ role: "bot", text: data.summary, question: `Summarize ${currentPdfName || "document"}` });
       toast.success("PDF summarized successfully!", {
         id: loadingToast,
       });
@@ -132,7 +136,7 @@ const askQuestion = async () => {
       toast.error(errorMessage, {
         id: loadingToast,
       });
-      onAppendMessage({ role: "bot", text: errorMessage });
+      onAppendMessage({ role: "bot", text: errorMessage, question: `Summarize ${currentPdfName || "document"}` });
     }
     setSummarizing(false);
   };
@@ -322,14 +326,23 @@ const askQuestion = async () => {
                   </div>
                 </div>
               </div>
-              {currentChat.map((msg, i) => (
-                <MessageBubble
-                  key={i}
-                  msg={msg}
-                  darkMode={darkMode}
-                  onOpenSource={onOpenSource}
-                />
-              ))}
+              {currentChat.map((msg, i) => {
+                const messageId = msg.id || `legacy-message-${i}`;
+                const messageWithId = { ...msg, id: messageId };
+
+                return (
+                  <MessageBubble
+                    key={messageId}
+                    msg={messageWithId}
+                    darkMode={darkMode}
+                    onOpenSource={onOpenSource}
+                    isBookmarked={savedMessageIds?.has(messageId)}
+                    onToggleBookmark={onToggleBookmark}
+                    highlighted={highlightedMessageId === messageId}
+                    registerMessageRef={(node) => onRegisterMessageRef?.(messageId, node)}
+                  />
+                );
+              })}
 
               {asking && (
                 <div className="d-flex justify-content-start mb-3 chat-message">
