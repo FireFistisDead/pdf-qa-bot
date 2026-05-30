@@ -10,7 +10,15 @@ const crypto = require("crypto");
 const { rateLimit } = require("express-rate-limit");
 const slowDown = require("express-slow-down");
 const helmet = require("helmet");
-const { askSchema, summarizeSchema, sessionsLookupSchema } = require("./validators/schemas");
+const {
+  askSchema,
+  askCredentialSchema,
+  askPayloadSchema,
+  summarizeSchema,
+  summarizeCredentialSchema,
+  sessionsLookupSchema,
+  MAX_QUESTION_LENGTH,
+} = require("./validators/schemas");
 const { clientIpFromRequest } = require("./security/ip");
 const { createRedisClient } = require("./security/redis");
 const authRoutes = require("./src/routes/authRoutes");
@@ -18,6 +26,116 @@ const authRoutes = require("./src/routes/authRoutes");
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
 const INTERNAL_RAG_TOKEN = process.env.INTERNAL_RAG_TOKEN || "";
 const PORT = process.env.PORT || 4000;
+
+// ─── Credential Validation Cache ─────────────────────────────────────────────
+// session_id and session_secret are structurally identical for every request
+// within a session (UUID regex + non-empty checks). Running the full Zod parse
+// on every /ask and /summarize call under Socratic or Tutor mode repeats the
+// same checks dozens of times per session with zero benefit.
+//
+// The cache is keyed on a 16-character HMAC-SHA256 of session_id + ":" +
+// session_secret so the secret is never stored at rest. The TTL matches
+// SESSION_TTL_MINUTES (default 30 days) so the entry expires when the session
+// would have expired anyway. The map is capped at CRED_CACHE_MAX_SIZE entries;
+// when full it evicts the oldest entry (insertion-order FIFO via Map iteration).
+const SESSION_TTL_MS =
+  parseInt(process.env.SESSION_TTL_MINUTES || "43200", 10) * 60 * 1000;
+const CRED_CACHE_MAX_SIZE = parseInt(
+  process.env.CRED_CACHE_MAX_SIZE || "1000",
+  10,
+);
+
+// Map<cacheKey, { validatedAt: number }>
+const _credentialCache = new Map();
+
+const _credCacheHmacKey = crypto
+  .createHash("sha256")
+  .update("pdf-qa-credential-cache-key")
+  .digest();
+
+function _credentialCacheKey(sessionId, sessionSecret) {
+  return crypto
+    .createHmac("sha256", _credCacheHmacKey)
+    .update(`${sessionId}:${sessionSecret}`)
+    .digest("hex")
+    .slice(0, 16);
+}
+
+function _credentialCacheGet(sessionId, sessionSecret) {
+  const key = _credentialCacheKey(sessionId, sessionSecret);
+  const entry = _credentialCache.get(key);
+  if (!entry) return false;
+  if (Date.now() - entry.validatedAt > SESSION_TTL_MS) {
+    _credentialCache.delete(key);
+    return false;
+  }
+  return true;
+}
+
+function _credentialCacheSet(sessionId, sessionSecret) {
+  const key = _credentialCacheKey(sessionId, sessionSecret);
+  if (_credentialCache.size >= CRED_CACHE_MAX_SIZE) {
+    // Evict the oldest entry (first insertion-order key in the Map).
+    _credentialCache.delete(_credentialCache.keys().next().value);
+  }
+  _credentialCache.set(key, { validatedAt: Date.now() });
+}
+
+function _credentialCacheInvalidate(sessionId, sessionSecret) {
+  _credentialCache.delete(_credentialCacheKey(sessionId, sessionSecret));
+}
+
+// Validate the credential fields of a request body, using the cache to skip
+// structural re-validation for session_id + session_secret pairs that have
+// already been proven structurally valid within the session TTL.
+// Always validates question/mode (payload fields that change per request).
+function validateAskBody(body) {
+  const sessionId = typeof body?.session_id === "string" ? body.session_id : "";
+  const sessionSecret =
+    typeof body?.session_secret === "string" ? body.session_secret : "";
+
+  const payloadResult = askPayloadSchema.safeParse(body);
+  if (!payloadResult.success) {
+    return { success: false, error: payloadResult.error };
+  }
+
+  if (_credentialCacheGet(sessionId, sessionSecret)) {
+    return {
+      success: true,
+      data: { ...payloadResult.data, session_id: sessionId, session_secret: sessionSecret },
+    };
+  }
+
+  const credResult = askCredentialSchema.safeParse(body);
+  if (!credResult.success) {
+    return { success: false, error: credResult.error };
+  }
+
+  _credentialCacheSet(sessionId, sessionSecret);
+  return {
+    success: true,
+    data: { ...payloadResult.data, ...credResult.data },
+  };
+}
+
+// Same split for /summarize: credentials cached, no payload schema needed.
+function validateSummarizeBody(body) {
+  const sessionId = typeof body?.session_id === "string" ? body.session_id : "";
+  const sessionSecret =
+    typeof body?.session_secret === "string" ? body.session_secret : "";
+
+  if (_credentialCacheGet(sessionId, sessionSecret)) {
+    return { success: true, data: { session_id: sessionId, session_secret: sessionSecret } };
+  }
+
+  const result = summarizeCredentialSchema.safeParse(body);
+  if (!result.success) {
+    return { success: false, error: result.error };
+  }
+
+  _credentialCacheSet(sessionId, sessionSecret);
+  return { success: true, data: result.data };
+}
 
 const app = express();
 
@@ -606,7 +724,7 @@ if (signatureBuffer.toString() !== "%PDF") {
 });
 
 app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
-  const validation = askSchema.safeParse(req.body);
+  const validation = validateAskBody(req.body);
 
   if (!validation.success) {
     return res.status(400).json({
@@ -647,7 +765,7 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
   }
 });
 app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) => {
-  const validation = askSchema.safeParse(req.body);
+  const validation = validateAskBody(req.body);
 
   if (!validation.success) {
     return res.status(400).json({
@@ -694,7 +812,7 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
 });
 
 app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => {
-  const validation = summarizeSchema.safeParse(req.body);
+  const validation = validateSummarizeBody(req.body);
 
   if (!validation.success) {
     return res.status(400).json({
@@ -813,4 +931,18 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, askSchema, summarizeSchema, extractServiceDetails };
+module.exports = {
+  app,
+  askSchema,
+  summarizeSchema,
+  extractServiceDetails,
+  // Exported for tests: allow verifying cache behaviour without reaching routes.
+  _credentialCache,
+  _credentialCacheKey,
+  _credentialCacheGet,
+  _credentialCacheSet,
+  _credentialCacheInvalidate,
+  validateAskBody,
+  validateSummarizeBody,
+  MAX_QUESTION_LENGTH,
+};

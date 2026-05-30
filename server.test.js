@@ -8,7 +8,17 @@ process.env.JWT_SECRET = "test-secret-for-ci";
 
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
-let app, askSchema, summarizeSchema, extractServiceDetails;
+let app,
+  askSchema,
+  summarizeSchema,
+  extractServiceDetails,
+  _credentialCache,
+  _credentialCacheKey,
+  _credentialCacheGet,
+  _credentialCacheSet,
+  _credentialCacheInvalidate,
+  validateAskBody,
+  validateSummarizeBody;
 let clientIpFromRequest, normalizeIp;
 test("module loads without error", () => {
   process.env.JWT_SECRET = "test-secret-for-ci";
@@ -17,6 +27,13 @@ test("module loads without error", () => {
   askSchema = mod.askSchema;
   summarizeSchema = mod.summarizeSchema;
   extractServiceDetails = mod.extractServiceDetails;
+  _credentialCache = mod._credentialCache;
+  _credentialCacheKey = mod._credentialCacheKey;
+  _credentialCacheGet = mod._credentialCacheGet;
+  _credentialCacheSet = mod._credentialCacheSet;
+  _credentialCacheInvalidate = mod._credentialCacheInvalidate;
+  validateAskBody = mod.validateAskBody;
+  validateSummarizeBody = mod.validateSummarizeBody;
 
   ({ clientIpFromRequest, normalizeIp } = require("./security/ip"));
 
@@ -24,6 +41,8 @@ test("module loads without error", () => {
   assert.ok(typeof askSchema.safeParse === "function", "askSchema should be a Zod schema");
   assert.ok(typeof summarizeSchema.safeParse === "function", "summarizeSchema should be a Zod schema");
   assert.ok(typeof extractServiceDetails === "function", "extractServiceDetails should be exported for tests");
+  assert.ok(typeof validateAskBody === "function", "validateAskBody should be exported");
+  assert.ok(typeof validateSummarizeBody === "function", "validateSummarizeBody should be exported");
 });
 
 const createPdfUploadBody = ({ sessionId = null, sessionSecret = null } = {}) => {
@@ -578,5 +597,158 @@ describe("route error responses", () => {
       data.error.includes("session_id and session_secret must be provided together"),
       `Unexpected error message: ${data.error}`,
     );
+  });
+});
+
+// ─── Credential validation cache tests ───────────────────────────────────────
+
+const VALID_UUID = "550e8400-e29b-41d4-a716-446655440000";
+const VALID_SECRET = "valid-session-secret-value";
+
+describe("credential validation cache", () => {
+  test("cache miss returns false for unseen credentials", () => {
+    const hit = _credentialCacheGet(VALID_UUID, "never-seen-before-secret");
+    assert.equal(hit, false);
+  });
+
+  test("cache hit returns true after credentials are stored", () => {
+    _credentialCacheSet(VALID_UUID, VALID_SECRET);
+    const hit = _credentialCacheGet(VALID_UUID, VALID_SECRET);
+    assert.equal(hit, true);
+    _credentialCacheInvalidate(VALID_UUID, VALID_SECRET);
+  });
+
+  test("cache key differs for different session_secret values", () => {
+    const key1 = _credentialCacheKey(VALID_UUID, "secret-a");
+    const key2 = _credentialCacheKey(VALID_UUID, "secret-b");
+    assert.notEqual(key1, key2, "Different secrets must produce different cache keys");
+  });
+
+  test("cache key differs for different session_id values", () => {
+    const key1 = _credentialCacheKey("550e8400-e29b-41d4-a716-446655440000", VALID_SECRET);
+    const key2 = _credentialCacheKey("660e8400-e29b-41d4-a716-446655440000", VALID_SECRET);
+    assert.notEqual(key1, key2, "Different session IDs must produce different cache keys");
+  });
+
+  test("invalidate removes the cached entry", () => {
+    _credentialCacheSet(VALID_UUID, "to-be-invalidated");
+    assert.equal(_credentialCacheGet(VALID_UUID, "to-be-invalidated"), true);
+    _credentialCacheInvalidate(VALID_UUID, "to-be-invalidated");
+    assert.equal(_credentialCacheGet(VALID_UUID, "to-be-invalidated"), false);
+  });
+
+  test("cache evicts oldest entry when max size is reached", () => {
+    // Temporarily capture the current size and fill to just below a forced eviction.
+    // We rely on the FIFO eviction observed via Map iteration order.
+    const firstKey = _credentialCacheKey("aaa", "aaa");
+    _credentialCacheSet("aaa", "aaa");
+    assert.equal(_credentialCacheGet("aaa", "aaa"), true);
+
+    // Fill with 1000 more distinct entries to trigger eviction of "aaa".
+    for (let i = 0; i < 1001; i++) {
+      _credentialCacheSet(`fill-id-${i}`, `fill-secret-${i}`);
+    }
+
+    // The first entry should have been evicted by now.
+    assert.equal(
+      _credentialCacheGet("aaa", "aaa"),
+      false,
+      "Oldest entry must be evicted when cache is full",
+    );
+  });
+
+  test("validateAskBody returns success for valid input and populates cache", () => {
+    _credentialCacheInvalidate(VALID_UUID, VALID_SECRET);
+    const result = validateAskBody({
+      question: "What is this document about?",
+      session_id: VALID_UUID,
+      session_secret: VALID_SECRET,
+      mode: "default",
+    });
+    assert.equal(result.success, true);
+    assert.ok(result.data);
+    assert.equal(result.data.session_id, VALID_UUID);
+    assert.equal(result.data.question, "What is this document about?");
+    // Credentials must now be in the cache.
+    assert.equal(_credentialCacheGet(VALID_UUID, VALID_SECRET), true);
+    _credentialCacheInvalidate(VALID_UUID, VALID_SECRET);
+  });
+
+  test("validateAskBody uses cache on second call — credential schema not re-run", () => {
+    _credentialCacheInvalidate(VALID_UUID, VALID_SECRET);
+    // First call: populates cache.
+    validateAskBody({
+      question: "First question?",
+      session_id: VALID_UUID,
+      session_secret: VALID_SECRET,
+    });
+    // Second call: should hit cache and succeed.
+    const result = validateAskBody({
+      question: "Second question about the document?",
+      session_id: VALID_UUID,
+      session_secret: VALID_SECRET,
+    });
+    assert.equal(result.success, true);
+    assert.equal(result.data.question, "Second question about the document?");
+    _credentialCacheInvalidate(VALID_UUID, VALID_SECRET);
+  });
+
+  test("validateAskBody rejects invalid session_id (non-UUID)", () => {
+    const result = validateAskBody({
+      question: "Valid question?",
+      session_id: "not-a-uuid",
+      session_secret: VALID_SECRET,
+    });
+    assert.equal(result.success, false);
+  });
+
+  test("validateAskBody rejects empty question even on cache hit", () => {
+    _credentialCacheSet(VALID_UUID, VALID_SECRET);
+    const result = validateAskBody({
+      question: "",
+      session_id: VALID_UUID,
+      session_secret: VALID_SECRET,
+    });
+    assert.equal(result.success, false, "Empty question must fail even on credential cache hit");
+    _credentialCacheInvalidate(VALID_UUID, VALID_SECRET);
+  });
+
+  test("validateAskBody rejects question exceeding MAX_QUESTION_LENGTH", () => {
+    const { MAX_QUESTION_LENGTH: maxLen } = require("./validators/schemas");
+    const result = validateAskBody({
+      question: "a".repeat(maxLen + 1),
+      session_id: VALID_UUID,
+      session_secret: VALID_SECRET,
+    });
+    assert.equal(result.success, false, "Oversized question must be rejected");
+  });
+
+  test("validateSummarizeBody returns success for valid credentials", () => {
+    _credentialCacheInvalidate(VALID_UUID, "sum-secret");
+    const result = validateSummarizeBody({
+      session_id: VALID_UUID,
+      session_secret: "sum-secret",
+    });
+    assert.equal(result.success, true);
+    assert.equal(result.data.session_id, VALID_UUID);
+    _credentialCacheInvalidate(VALID_UUID, "sum-secret");
+  });
+
+  test("validateSummarizeBody uses cache on second call", () => {
+    _credentialCacheInvalidate(VALID_UUID, "sum-cache-secret");
+    validateSummarizeBody({ session_id: VALID_UUID, session_secret: "sum-cache-secret" });
+    const result = validateSummarizeBody({
+      session_id: VALID_UUID,
+      session_secret: "sum-cache-secret",
+    });
+    assert.equal(result.success, true);
+    _credentialCacheInvalidate(VALID_UUID, "sum-cache-secret");
+  });
+
+  test("validateSummarizeBody rejects missing session_id", () => {
+    const result = validateSummarizeBody({
+      session_secret: "some-secret",
+    });
+    assert.equal(result.success, false);
   });
 });
