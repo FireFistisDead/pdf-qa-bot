@@ -806,11 +806,12 @@ def _recover_session_unlocked(session_id: str):
         logger.exception("Failed to recover persisted session session_id=%s", session_id)
         return None
 
+    recovered_secret = (entry.get("session_secret") or "").strip() or None
     meta = {
         "vectorstore": vectorstore,
         "lock": threading.Lock(),
         "documents": list(entry.get("documents", [])),
-        "session_secret": entry.get("session_secret"),
+        "session_secret": recovered_secret,
         "session_dir": session_dir,
         "created_at": float(entry.get("created_at", last_accessed) or last_accessed),
         "last_accessed": last_accessed,
