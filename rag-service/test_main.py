@@ -43,9 +43,14 @@ import secrets as _secrets
 
 def is_authorized_session_update(session: dict, provided_secret) -> bool:
     """Replicate the session-secret check from the endpoint (moved inline upstream)."""
-    expected = (session.get("session_secret") or "").strip()
     candidate = (provided_secret or "").strip()
-    if not expected or not candidate:
+    if not candidate:
+        return False
+    stored_hash = (session.get("hashed_session_secret") or "").strip()
+    if stored_hash:
+        return _secrets.compare_digest(main._hash_secret(candidate), stored_hash)
+    expected = (session.get("session_secret") or "").strip()
+    if not expected:
         return False
     return _secrets.compare_digest(candidate, expected)
 
@@ -57,6 +62,15 @@ def test_session_secret_authorizes_only_matching_secret():
     assert is_authorized_session_update(session, "wrong-secret") is False
     assert is_authorized_session_update(session, None) is False
     assert is_authorized_session_update({}, "expected-secret") is False
+
+
+def test_session_secret_authorizes_with_hashed_secret():
+    hashed = main._hash_secret("my-secret")
+    session = {"hashed_session_secret": hashed}
+
+    assert is_authorized_session_update(session, "my-secret") is True
+    assert is_authorized_session_update(session, "wrong") is False
+    assert is_authorized_session_update(session, None) is False
 
 
 def test_detect_question_intent():
