@@ -672,3 +672,154 @@ def test_internal_token_valid_case_sensitive():
     """Token comparison must be case-sensitive — 'Secret' != 'secret'."""
     assert internal_token_valid("Secret", "secret") is False
     assert internal_token_valid("secret", "secret") is True
+
+
+# ─── Retrieval cache correctness tests ───────────────────────────────────────
+
+def _make_cache_entry(results=None, age_seconds=0):
+    import time
+    return {
+        "results": results if results is not None else [],
+        "cached_at": time.time() - age_seconds,
+        "hits": 0,
+    }
+
+
+def test_cleanup_retrieval_cache_evicts_raw_list_entries():
+    """Entries stored as bare lists (pre-fix format) must be evicted."""
+    from main import cleanup_retrieval_cache
+    cache = {"q1": [("doc", 0.5)]}  # old format — not a dict
+    cleanup_retrieval_cache(cache)
+    assert "q1" not in cache, "Raw-list entry must be evicted"
+
+
+def test_cleanup_retrieval_cache_evicts_missing_cached_at():
+    """Dict entries without cached_at are malformed and must be evicted."""
+    from main import cleanup_retrieval_cache
+    cache = {"q1": {"results": [], "hits": 0}}
+    cleanup_retrieval_cache(cache)
+    assert "q1" not in cache
+
+
+def test_cleanup_retrieval_cache_evicts_expired_entries():
+    from main import cleanup_retrieval_cache, RETRIEVAL_CACHE_TTL_SECONDS
+    cache = {"old": _make_cache_entry(age_seconds=RETRIEVAL_CACHE_TTL_SECONDS + 1)}
+    cleanup_retrieval_cache(cache)
+    assert "old" not in cache, "Expired entry must be evicted"
+
+
+def test_cleanup_retrieval_cache_retains_fresh_entries():
+    from main import cleanup_retrieval_cache
+    cache = {"fresh": _make_cache_entry([("doc", 0.2)], age_seconds=10)}
+    cleanup_retrieval_cache(cache)
+    assert "fresh" in cache, "Fresh entry must be retained"
+
+
+def test_cleanup_retrieval_cache_mixed_scenario():
+    """Expired entry removed; fresh entry kept in one pass."""
+    from main import cleanup_retrieval_cache, RETRIEVAL_CACHE_TTL_SECONDS
+    cache = {
+        "stale": _make_cache_entry(age_seconds=RETRIEVAL_CACHE_TTL_SECONDS + 5),
+        "fresh": _make_cache_entry([("doc", 0.1)], age_seconds=30),
+    }
+    cleanup_retrieval_cache(cache)
+    assert "stale" not in cache
+    assert "fresh" in cache
+
+
+def test_stats_endpoint_returns_expected_shape():
+    import threading
+    from main import sessions, sessions_lock
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    import secrets as _sec
+    sid = "stats-" + _sec.token_hex(4)
+
+    with sessions_lock:
+        sessions[sid] = {
+            "chat": [], "created_at": 0, "last_accessed": 0,
+            "documents": [], "session_secret": "s",
+            "lock": threading.Lock(), "vectorstore": None,
+            "retrieval_cache": {"k": _make_cache_entry()},
+            "cache_hits": 3, "cache_misses": 7,
+        }
+    try:
+        resp = client.get("/stats")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "active_sessions" in data
+        assert "total_cache_hits" in data
+        assert "total_cache_misses" in data
+        assert "hit_rate" in data
+        assert "sessions" in data
+        entry = next((s for s in data["sessions"] if s["session_id"] == sid), None)
+        assert entry is not None
+        assert entry["cache_hits"] == 3
+        assert entry["cache_misses"] == 7
+        assert entry["cached_entries"] == 1
+    finally:
+        with sessions_lock:
+            sessions.pop(sid, None)
+
+
+def test_stats_zero_division_safety():
+    """hit_rate must be 0.0 when no requests have been processed yet."""
+    import threading
+    from main import sessions, sessions_lock
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    import secrets as _sec
+    sid = "zerorate-" + _sec.token_hex(4)
+
+    with sessions_lock:
+        sessions[sid] = {
+            "chat": [], "created_at": 0, "last_accessed": 0,
+            "documents": [], "session_secret": "s",
+            "lock": threading.Lock(), "vectorstore": None,
+            "retrieval_cache": {}, "cache_hits": 0, "cache_misses": 0,
+        }
+    try:
+        resp = client.get("/stats")
+        assert resp.status_code == 200
+        assert resp.json()["hit_rate"] >= 0.0
+    finally:
+        with sessions_lock:
+            sessions.pop(sid, None)
+
+
+def test_cache_entry_format():
+    """Verify the dict envelope produced by _make_cache_entry has required keys."""
+    entry = _make_cache_entry([("chunk", 0.4)], age_seconds=5)
+    assert isinstance(entry, dict)
+    assert "results" in entry
+    assert "cached_at" in entry
+    assert "hits" in entry
+    assert isinstance(entry["results"], list)
+    assert isinstance(entry["cached_at"], float)
+    assert entry["hits"] == 0
+
+
+def test_new_session_starts_with_zero_counters():
+    import threading
+    from main import sessions, sessions_lock
+    import secrets as _sec
+
+    sid = "ctr-" + _sec.token_hex(4)
+    with sessions_lock:
+        sessions[sid] = {
+            "chat": [], "created_at": 0, "last_accessed": 0,
+            "documents": [], "session_secret": "s",
+            "lock": threading.Lock(), "vectorstore": None,
+            "retrieval_cache": {}, "cache_hits": 0, "cache_misses": 0,
+        }
+    try:
+        with sessions_lock:
+            meta = sessions[sid]
+            assert meta["retrieval_cache"] == {}
+            assert meta["cache_hits"] == 0
+            assert meta["cache_misses"] == 0
+    finally:
+        with sessions_lock:
+            sessions.pop(sid, None)
