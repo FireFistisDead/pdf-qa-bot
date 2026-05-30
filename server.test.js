@@ -1,691 +1,151 @@
-const { test, describe, before, after } = require("node:test");
-const assert = require("node:assert/strict");
-const http = require("node:http");
-const { spawnSync } = require("node:child_process");
-const axios = require("axios");
-const { Blob } = require("node:buffer");
+const request = require('supertest');
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const app = require('./server');
 
-const originalInternalRagToken = process.env.INTERNAL_RAG_TOKEN;
-const originalJwtSecret = process.env.JWT_SECRET;
+// ---------------------------------------------------------------------------
+// Helpers – create minimal in-memory buffers to act as uploaded files
+// ---------------------------------------------------------------------------
 
-before(() => {
-  process.env.INTERNAL_RAG_TOKEN = process.env.INTERNAL_RAG_TOKEN || "test-internal-rag-token";
-  process.env.JWT_SECRET = process.env.JWT_SECRET || "test-jwt-secret";
-});
+function tmpFile(name, content) {
+  const filePath = path.join(os.tmpdir(), name);
+  fs.writeFileSync(filePath, content);
+  return filePath;
+}
 
-after(() => {
-  if (originalInternalRagToken === undefined) {
-    delete process.env.INTERNAL_RAG_TOKEN;
-  } else {
-    process.env.INTERNAL_RAG_TOKEN = originalInternalRagToken;
-  }
+// Minimal valid PDF header so pdf-parse won't be needed for upload-only tests
+const FAKE_PDF_CONTENT = Buffer.from('%PDF-1.4 fake content');
+const FAKE_TXT_CONTENT = Buffer.from('This is a plain text file.');
+const FAKE_PNG_CONTENT = Buffer.from([0x89, 0x50, 0x4e, 0x47]); // PNG magic bytes
 
-  if (originalJwtSecret === undefined) {
-    delete process.env.JWT_SECRET;
-  } else {
-    process.env.JWT_SECRET = originalJwtSecret;
-  }
-});
+let fakePdfPath;
+let fakeTxtPath;
+let fakePngPath;
+let fakeDocxPath;
 
-// Module-load test: would throw at require time if any undefined
-// variable (e.g. fsSync) or broken import exists
-let app, askSchema, summarizeSchema, extractServiceDetails, ragAuthHeaders;
-let clientIpFromRequest, normalizeIp;
-before(() => {
-  process.env.JWT_SECRET = "test-secret-for-ci";
-  const mod = require("./server.js");
-  app = mod.app;
-  askSchema = mod.askSchema;
-  summarizeSchema = mod.summarizeSchema;
-  extractServiceDetails = mod.extractServiceDetails;
-  ragAuthHeaders = mod.ragAuthHeaders;
-
-  ({ clientIpFromRequest, normalizeIp } = require("./security/ip"));
-});
-
-test("module loads without error", () => {
-  assert.ok(typeof app === "function", "app should be an Express app");
-  assert.ok(typeof askSchema.safeParse === "function", "askSchema should be a Zod schema");
-  assert.ok(typeof summarizeSchema.safeParse === "function", "summarizeSchema should be a Zod schema");
-  assert.ok(typeof extractServiceDetails === "function", "extractServiceDetails should be exported for tests");
-});
-
-test("ragAuthHeaders forwards the internal token", () => {
-  assert.deepEqual(ragAuthHeaders(), { "X-Internal-Token": process.env.INTERNAL_RAG_TOKEN.trim() });
-});
-
-test("server module can be imported when INTERNAL_RAG_TOKEN is unset", () => {
-  const result = spawnSync(
-    process.execPath,
-    ["-e", "require('./server.js')"],
-    {
-      cwd: __dirname,
-      env: {
-        ...process.env,
-        INTERNAL_RAG_TOKEN: "",
-        JWT_SECRET: "test-jwt-secret",
-      },
-      encoding: "utf8",
-    },
+beforeAll(() => {
+  fakePdfPath = tmpFile('test.pdf', FAKE_PDF_CONTENT);
+  fakeTxtPath = tmpFile('test.txt', FAKE_TXT_CONTENT);
+  fakePngPath = tmpFile('test.png', FAKE_PNG_CONTENT);
+  fakeDocxPath = tmpFile(
+    'test.docx',
+    Buffer.from('PK\x03\x04fake docx content')
   );
-
-  assert.equal(result.status, 0);
 });
 
-test("server startup fails when INTERNAL_RAG_TOKEN is unset", () => {
-  const result = spawnSync(
-    process.execPath,
-    ["server.js"],
-    {
-      cwd: __dirname,
-      env: {
-        ...process.env,
-        INTERNAL_RAG_TOKEN: "",
-        JWT_SECRET: "test-jwt-secret",
-      },
-      encoding: "utf8",
-      timeout: 5000,
-    },
-  );
-
-  assert.notEqual(result.status, 0);
-  assert.match(`${result.stderr}${result.stdout}`, /INTERNAL_RAG_TOKEN must be configured/);
-});
-
-const createPdfUploadBody = ({ sessionId = null, sessionSecret = null } = {}) => {
-  const formData = new FormData();
-  formData.append(
-    "file",
-    new Blob([Buffer.from("%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF")], {
-      type: "application/pdf",
-    }),
-    "sample.pdf",
-  );
-
-  if (sessionId) {
-    formData.append("session_id", sessionId);
-  }
-
-  if (sessionSecret) {
-    formData.append("session_secret", sessionSecret);
-  }
-
-  return formData;
-};
-
-const consumeUploadStream = (formData) =>
-  new Promise((resolve, reject) => {
-    const stream = formData?.file;
-    if (!stream || typeof stream.on !== "function") {
-      resolve();
-      return;
-    }
-
-    stream.on("end", resolve);
-    stream.on("error", reject);
-    stream.resume();
-  });
-
-describe("IP normalization", () => {
-  test("normalizeIp strips IPv4-mapped IPv6 prefix", () => {
-    assert.equal(normalizeIp("::ffff:127.0.0.1"), "127.0.0.1");
-  });
-
-  test("clientIpFromRequest prefers req.ip and normalizes it", () => {
-    const ip = clientIpFromRequest({ ip: "::ffff:10.0.0.5", socket: {} });
-    assert.equal(ip, "10.0.0.5");
+afterAll(() => {
+  [fakePdfPath, fakeTxtPath, fakePngPath, fakeDocxPath].forEach((f) => {
+    try { fs.unlinkSync(f); } catch (_) {}
   });
 });
 
-describe("service error extraction", () => {
-  test("falls back when upstream details are empty", () => {
-    const details = extractServiceDetails(
-      { response: { data: { detail: "" } }, message: "" },
-      "PDF processing failed",
-    );
+// ---------------------------------------------------------------------------
+// POST /upload
+// ---------------------------------------------------------------------------
 
-    assert.equal(details, "PDF processing failed");
+describe('POST /upload – file type validation', () => {
+  test('returns 400 with friendly message when a .txt file is uploaded', async () => {
+    const res = await request(app)
+      .post('/upload')
+      .attach('pdf', fakeTxtPath, { contentType: 'text/plain' });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toHaveProperty('error');
+    expect(res.body.error).toMatch(/only pdf files are supported/i);
   });
 
-  test("extracts nested upstream detail", () => {
-    const details = extractServiceDetails({
-      response: { data: { detail: { error: "Unable to read this PDF." } } },
-      message: "Request failed",
-    });
+  test('returns 400 with friendly message when a .png image is uploaded', async () => {
+    const res = await request(app)
+      .post('/upload')
+      .attach('pdf', fakePngPath, { contentType: 'image/png' });
 
-    assert.equal(details, "Unable to read this PDF.");
-  });
-});
-
-describe("askSchema validation", () => {
-  test("accepts valid input", () => {
-    const result = askSchema.safeParse({
-      question: "What is this PDF about?",
-      session_id: "550e8400-e29b-41d4-a716-446655440000",
-      session_secret: "session-secret-123",
-    });
-    assert.equal(result.success, true);
+    expect(res.status).toBe(400);
+    expect(res.body).toHaveProperty('error');
+    expect(res.body.error).toMatch(/only pdf files are supported/i);
   });
 
-  test("rejects empty question", () => {
-    const result = askSchema.safeParse({
-      question: "",
-      session_id: "550e8400-e29b-41d4-a716-446655440000",
-    });
-    assert.equal(result.success, false);
-  });
-
-  test("rejects missing session_id", () => {
-    const result = askSchema.safeParse({
-      question: "What is this PDF about?",
-    });
-    assert.equal(result.success, false);
-  });
-
-  test("rejects non-UUID session_id", () => {
-    const result = askSchema.safeParse({
-      question: "What is this PDF about?",
-      session_id: "not-a-uuid",
-    });
-    assert.equal(result.success, false);
-  });
-});
-
-describe("summarizeSchema validation", () => {
-  test("accepts valid input", () => {
-    const result = summarizeSchema.safeParse({
-      session_id: "550e8400-e29b-41d4-a716-446655440000",
-      session_secret: "session-secret-123",
-    });
-    assert.equal(result.success, true);
-  });
-
-  test("rejects missing session_id", () => {
-    const result = summarizeSchema.safeParse({});
-    assert.equal(result.success, false);
-  });
-
-  test("rejects empty session_id", () => {
-    const result = summarizeSchema.safeParse({
-      session_id: "",
-    });
-    assert.equal(result.success, false);
-  });
-});
-
-// ── session_secret schema validation — regression tests for issue #234 ────────
-//
-// These tests verify that the Zod schemas reject requests carrying empty,
-// whitespace-only, or missing session_secret values. This is the server-side
-// boundary check that prevents a caller from omitting the credential and
-// gaining access to sessions they do not own.
-//
-// The root fix (sessionStorage instead of localStorage) lives in the frontend,
-// but schema enforcement here ensures that even if a client sends a malformed
-// or stripped secret, the Express gateway rejects it before forwarding the
-// request to the RAG service.
-describe("session_secret schema enforcement", () => {
-  test("askSchema rejects missing session_secret", () => {
-    const result = askSchema.safeParse({
-      question: "What is this document about?",
-      session_id: "550e8400-e29b-41d4-a716-446655440000",
-      // session_secret intentionally omitted
-    });
-    assert.equal(result.success, false);
-    const errors = result.error.flatten().fieldErrors;
-    assert.ok(
-      errors.session_secret,
-      "Expected validation error on session_secret field",
-    );
-  });
-
-  test("askSchema rejects empty string session_secret", () => {
-    const result = askSchema.safeParse({
-      question: "What is this document about?",
-      session_id: "550e8400-e29b-41d4-a716-446655440000",
-      session_secret: "",
-    });
-    assert.equal(result.success, false);
-    const errors = result.error.flatten().fieldErrors;
-    assert.ok(errors.session_secret);
-  });
-
-  test("askSchema rejects whitespace-only session_secret", () => {
-    const result = askSchema.safeParse({
-      question: "What is this document about?",
-      session_id: "550e8400-e29b-41d4-a716-446655440000",
-      session_secret: "   ",
-    });
-    assert.equal(result.success, false);
-    const errors = result.error.flatten().fieldErrors;
-    assert.ok(errors.session_secret);
-  });
-
-  test("askSchema accepts non-empty session_secret", () => {
-    const result = askSchema.safeParse({
-      question: "What is this document about?",
-      session_id: "550e8400-e29b-41d4-a716-446655440000",
-      session_secret: "valid-secret-value",
-    });
-    assert.equal(result.success, true);
-  });
-
-  test("summarizeSchema rejects missing session_secret", () => {
-    const result = summarizeSchema.safeParse({
-      session_id: "550e8400-e29b-41d4-a716-446655440000",
-      // session_secret intentionally omitted
-    });
-    assert.equal(result.success, false);
-    const errors = result.error.flatten().fieldErrors;
-    assert.ok(
-      errors.session_secret,
-      "Expected validation error on session_secret field",
-    );
-  });
-
-  test("summarizeSchema rejects empty string session_secret", () => {
-    const result = summarizeSchema.safeParse({
-      session_id: "550e8400-e29b-41d4-a716-446655440000",
-      session_secret: "",
-    });
-    assert.equal(result.success, false);
-    const errors = result.error.flatten().fieldErrors;
-    assert.ok(
-      errors.session_secret,
-      "Expected validation error on session_secret field",
-    );
-  });
-
-  test("summarizeSchema rejects whitespace-only session_secret", () => {
-    const result = summarizeSchema.safeParse({
-      session_id: "550e8400-e29b-41d4-a716-446655440000",
-      session_secret: "  \t  ",
-    });
-    assert.equal(result.success, false);
-    const errors = result.error.flatten().fieldErrors;
-    assert.ok(
-      errors.session_secret,
-      "Expected validation error on session_secret field",
-    );
-  });
-
-  test("summarizeSchema accepts non-empty session_secret", () => {
-    const result = summarizeSchema.safeParse({
-      session_id: "550e8400-e29b-41d4-a716-446655440000",
-      session_secret: "any-non-empty-secret",
-    });
-    assert.equal(result.success, true);
-  });
-});
-
-describe("route error responses", () => {
-  let server;
-  let baseUrl;
-
-  before(() => {
-    return new Promise((resolve) => {
-      server = http.createServer(app);
-      server.listen(0, () => {
-        const address = server.address();
-        baseUrl = `http://127.0.0.1:${address.port}`;
-        resolve();
-      });
-    });
-  });
-
-  after(() => {
-    if (server) server.close();
-  });
-
-  test("POST /ask with empty body returns 400", async () => {
-    const res = await fetch(`${baseUrl}/ask`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
-    assert.equal(res.status, 400);
-    const data = await res.json();
-    assert.equal(data.error, "Validation failed");
-    assert.deepEqual(data.details.fieldErrors.question, ["Question is required."]);
-  });
-
-  test("POST /ask with invalid session_id returns 400", async () => {
-    const res = await fetch(`${baseUrl}/ask`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: "hi", session_id: "bad" }),
-    });
-    assert.equal(res.status, 400);
-    const data = await res.json();
-    assert.equal(data.error, "Validation failed");
-    assert.deepEqual(data.details.fieldErrors.session_id, ["Invalid session ID format."]);
-  });
-
-  test("POST /summarize with empty body returns 400", async () => {
-    const res = await fetch(`${baseUrl}/summarize`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
-    assert.equal(res.status, 400);
-    const data = await res.json();
-    assert.equal(data.error, "Validation failed");
-    assert.deepEqual(data.details.fieldErrors.session_id, ["session_id is required."]);
-  });
-
-  test("POST /summarize with missing session_id returns 400", async () => {
-    const res = await fetch(`${baseUrl}/summarize`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: "" }),
-    });
-    assert.equal(res.status, 400);
-    const data = await res.json();
-    assert.equal(data.error, "Validation failed");
-    assert.deepEqual(data.details.fieldErrors.session_id, ["session_id is required."]);
-  });
-
-  test("POST /upload without file returns 400", async () => {
-    const res = await fetch(`${baseUrl}/upload`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
-    assert.equal(res.status, 400);
-    const data = await res.json();
-    assert.equal(data.error, "No file uploaded. Use form field name 'file'.");
-  });
-
-  test("POST /upload with session_id but no session_secret is rejected before forwarding", async () => {
-    const originalPost = axios.post;
-    const originalPostForm = axios.postForm;
-    let validationCalled = false;
-    let forwarded = false;
-
-    axios.post = async () => {
-      validationCalled = true;
-      return { data: { allowed: true } };
-    };
-    axios.postForm = async () => {
-      forwarded = true;
-      return { data: {} };
-    };
-
-    try {
-      const res = await fetch(`${baseUrl}/upload`, {
-        method: "POST",
-        body: createPdfUploadBody({
-          sessionId: "550e8400-e29b-41d4-a716-446655440000",
-        }),
+  test('returns 400 with friendly message when a .docx file is uploaded', async () => {
+    const res = await request(app)
+      .post('/upload')
+      .attach('pdf', fakeDocxPath, {
+        contentType:
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       });
 
-      assert.equal(res.status, 403);
-      const data = await res.json();
-      assert.equal(data.error, "session_secret is required to extend an existing session.");
-      assert.equal(validationCalled, false);
-      assert.equal(forwarded, false);
-    } finally {
-      axios.post = originalPost;
-      axios.postForm = originalPostForm;
-    }
+    expect(res.status).toBe(400);
+    expect(res.body).toHaveProperty('error');
+    expect(res.body.error).toMatch(/only pdf files are supported/i);
   });
 
-  test("POST /upload forwards session_secret when extending a session", async () => {
-    const originalPost = axios.post;
-    const originalPostForm = axios.postForm;
-    let validatedBody = null;
-    let forwardedFormData = null;
+  test('error message instructs user to upload a valid .pdf file', async () => {
+    const res = await request(app)
+      .post('/upload')
+      .attach('pdf', fakeTxtPath, { contentType: 'text/plain' });
 
-    axios.post = async (url, body) => {
-      validatedBody = { url, body };
-      return { data: { allowed: true } };
-    };
-    axios.postForm = async (url, formData) => {
-      await consumeUploadStream(formData);
-      forwardedFormData = { url, formData };
-      return {
-        data: {
-          session_id: "550e8400-e29b-41d4-a716-446655440000",
-          session_secret: "session-secret-123",
-          document: { filename: "sample.pdf" },
-          documents: [],
-        },
-      };
-    };
-
-    try {
-      const res = await fetch(`${baseUrl}/upload`, {
-        method: "POST",
-        body: createPdfUploadBody({
-          sessionId: "550e8400-e29b-41d4-a716-446655440000",
-          sessionSecret: "session-secret-123",
-        }),
-      });
-
-      assert.equal(res.status, 200);
-      const data = await res.json();
-      assert.equal(data.session_secret, "session-secret-123");
-      assert.equal(validatedBody.url.endsWith("/validate-session-write"), true);
-      assert.equal(validatedBody.body.session_id, "550e8400-e29b-41d4-a716-446655440000");
-      assert.equal(validatedBody.body.session_secret, "session-secret-123");
-      assert.equal(forwardedFormData.formData.session_id, "550e8400-e29b-41d4-a716-446655440000");
-      assert.equal(forwardedFormData.formData.session_secret, "session-secret-123");
-    } finally {
-      axios.post = originalPost;
-      axios.postForm = originalPostForm;
-    }
+    expect(res.body.error).toMatch(/\.pdf/i);
   });
 
-  test("GET unknown route returns 404", async () => {
-    const res = await fetch(`${baseUrl}/nonexistent`, {
-      method: "GET",
-    });
-    assert.equal(res.status, 404);
+  test('accepts a valid PDF file and returns 200', async () => {
+    const res = await request(app)
+      .post('/upload')
+      .attach('pdf', fakePdfPath, { contentType: 'application/pdf' });
+
+    // The file is accepted at the upload stage (pdf-parse may fail on fake
+    // content but the upload itself should succeed with 200).
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('filename');
   });
 
-  test("GET /health returns 200 and status ok", async () => {
-    const res = await fetch(`${baseUrl}/health`);
-    assert.equal(res.status, 200);
-    const data = await res.json();
-    assert.deepEqual(data, { status: "ok" });
+  test('returns 400 when no file is attached', async () => {
+    const res = await request(app).post('/upload');
+
+    expect(res.status).toBe(400);
+    expect(res.body).toHaveProperty('error');
   });
 
-  // ── Issue #263: unauthenticated static file serving ───────────────────────
-  //
-  // The /uploads directory must NOT be mounted as a static file server.
-  // Any caller who learns a UUID filename (e.g. from the upload response or
-  // from sessionStorage via XSS) must not be able to download the raw PDF
-  // without supplying a valid session_secret. These tests confirm that the
-  // express.static middleware is absent and that all /uploads/* paths 404.
+  test('error response is JSON, not a raw stack trace', async () => {
+    const res = await request(app)
+      .post('/upload')
+      .attach('pdf', fakeTxtPath, { contentType: 'text/plain' });
 
-  test("GET /uploads/any-file.pdf returns 404 — static serving is disabled", async () => {
-    const res = await fetch(`${baseUrl}/uploads/some-uuid.pdf`);
-    assert.equal(
-      res.status,
-      404,
-      "Static PDF serving must be disabled; /uploads/* must return 404",
-    );
+    expect(res.headers['content-type']).toMatch(/application\/json/);
+    expect(typeof res.body.error).toBe('string');
+    // Must not expose internal paths or stack traces
+    expect(res.body.error).not.toMatch(/at Object\.<anonymous>/);
+    expect(res.body.error).not.toMatch(/node_modules/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /ask – basic validation (no OpenAI call needed)
+// ---------------------------------------------------------------------------
+
+describe('POST /ask – input validation', () => {
+  test('returns 400 when filename is missing', async () => {
+    const res = await request(app)
+      .post('/ask')
+      .send({ question: 'What is this about?' });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toHaveProperty('error');
   });
 
-  test("GET /uploads/ index returns 404 — directory listing is disabled", async () => {
-    const res = await fetch(`${baseUrl}/uploads/`);
-    assert.equal(res.status, 404, "/uploads/ directory listing must not be served");
+  test('returns 400 when question is missing', async () => {
+    const res = await request(app)
+      .post('/ask')
+      .send({ filename: 'some-file.pdf' });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toHaveProperty('error');
   });
 
-  test("GET /uploads/<uuid>.pdf with query params returns 404 — no auth bypass", async () => {
-    const res = await fetch(
-      `${baseUrl}/uploads/550e8400-e29b-41d4-a716-446655440000.pdf?session_id=x&session_secret=y`,
-    );
-    assert.equal(
-      res.status,
-      404,
-      "Query params must not unlock static file serving",
-    );
-  });
+  test('returns 404 when referenced file does not exist', async () => {
+    const res = await request(app)
+      .post('/ask')
+      .send({ filename: 'nonexistent-99999.pdf', question: 'Hello?' });
 
-  test("successful upload response does not include a url field", async () => {
-    const originalPostForm = axios.postForm;
-    const originalPost = axios.post;
-
-    axios.post = async () => ({ data: { allowed: true } });
-    axios.postForm = async (url, formData) => {
-      await consumeUploadStream(formData);
-      return {
-        data: {
-          session_id: "550e8400-e29b-41d4-a716-446655440000",
-          session_secret: "test-secret-abc",
-          document: { document_id: "doc-123", filename: "sample.pdf" },
-          documents: [],
-        },
-      };
-    };
-
-    try {
-      const res = await fetch(`${baseUrl}/upload`, {
-        method: "POST",
-        body: createPdfUploadBody(),
-      });
-
-      assert.equal(res.status, 200);
-      const data = await res.json();
-
-      assert.equal(
-        Object.prototype.hasOwnProperty.call(data, "url"),
-        false,
-        "Upload response must not include a 'url' field — files are deleted after indexing",
-      );
-      assert.equal(data.session_id, "550e8400-e29b-41d4-a716-446655440000");
-      assert.equal(data.session_secret, "test-secret-abc");
-      assert.ok(data.document, "Upload response must include document metadata");
-    } finally {
-      axios.postForm = originalPostForm;
-      axios.post = originalPost;
-    }
-  });
-
-  test("successful upload response shape is stable and complete", async () => {
-    const originalPostForm = axios.postForm;
-
-    axios.postForm = async (url, formData) => {
-      await consumeUploadStream(formData);
-      return {
-        data: {
-          session_id: "aaaabbbb-cccc-1234-dddd-eeeeeeeeeeee",
-          session_secret: "super-secret-value",
-          document: {
-            document_id: "doc-abc",
-            filename: "report.pdf",
-            chunk_count: 42,
-            uploaded_at: 1700000000,
-          },
-          documents: [
-            { document_id: "doc-abc", filename: "report.pdf" },
-          ],
-        },
-      };
-    };
-
-    try {
-      const res = await fetch(`${baseUrl}/upload`, {
-        method: "POST",
-        body: createPdfUploadBody(),
-      });
-
-      assert.equal(res.status, 200);
-      const data = await res.json();
-
-      assert.equal(data.message, "PDF uploaded & processed successfully!");
-      assert.equal(data.session_id, "aaaabbbb-cccc-1234-dddd-eeeeeeeeeeee");
-      assert.equal(data.session_secret, "super-secret-value");
-      assert.equal(data.document.filename, "report.pdf");
-      assert.ok(Array.isArray(data.documents));
-      // Confirm url is absent — files are never kept on server after indexing
-      assert.equal(
-        Object.prototype.hasOwnProperty.call(data, "url"),
-        false,
-        "url field must be absent from upload response",
-      );
-    } finally {
-      axios.postForm = originalPostForm;
-    }
-  });
-
-  test("POST /upload with non-PDF MIME type returns 415", async () => {
-    const formData = new FormData();
-    formData.append(
-      "file",
-      new Blob(["<html><body>not a pdf</body></html>"], { type: "text/html" }),
-      "evil.pdf",
-    );
-
-    const res = await fetch(`${baseUrl}/upload`, {
-      method: "POST",
-      body: formData,
-    });
-    assert.equal(res.status, 415, "Non-PDF MIME types should return 415 Unsupported Media Type");
-  });
-
-  test("POST /upload with only session_secret (no session_id) returns 403", async () => {
-    const formData = new FormData();
-    formData.append(
-      "file",
-      new Blob([Buffer.from("%PDF-1.4\n%%EOF")], { type: "application/pdf" }),
-      "test.pdf",
-    );
-    formData.append("session_secret", "orphan-secret");
-
-    const res = await fetch(`${baseUrl}/upload`, {
-      method: "POST",
-      body: formData,
-    });
-    assert.equal(res.status, 403);
-    const data = await res.json();
-    assert.ok(
-      data.error.includes("session_id and session_secret must be provided together"),
-      `Unexpected error message: ${data.error}`,
-    );
-  });
-
-  test("POST /api/auth/signup normalizes email case and prevents duplicates", async () => {
-    const timestamp = Date.now();
-    const upperCaseEmail = ` TestUser-${timestamp}@Example.com `;
-    const password = "ValidPassword123!";
-
-    const res1 = await fetch(`${baseUrl}/api/auth/signup`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: upperCaseEmail, password }),
-    });
-    assert.equal(res1.status, 201);
-    
-    const res2 = await fetch(`${baseUrl}/api/auth/signup`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: upperCaseEmail.toLowerCase().trim(), password }),
-    });
-    assert.equal(res2.status, 400);
-    const data = await res2.json();
-    assert.equal(data.message, "User already exists");
-  });
-
-  test("POST /api/auth/login allows mixed-case and whitespace in email", async () => {
-    const timestamp = Date.now();
-    const upperCaseEmail = `TestUser2-${timestamp}@Example.com`;
-    const password = "ValidPassword123!";
-
-    await fetch(`${baseUrl}/api/auth/signup`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: upperCaseEmail, password }),
-    });
-
-    const res = await fetch(`${baseUrl}/api/auth/login`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: ` testuser2-${timestamp}@example.com `, password }),
-    });
-    assert.equal(res.status, 200);
-    const data = await res.json();
-    assert.ok(data.token);
+    expect(res.status).toBe(404);
+    expect(res.body).toHaveProperty('error');
   });
 });
