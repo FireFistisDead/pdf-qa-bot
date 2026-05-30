@@ -770,7 +770,7 @@ def test_internal_token_valid_case_sensitive():
 def _make_cache_entry(results=None, age_seconds=0):
     import time
     return {
-        "results": results if results is not None else [],
+        "scored_candidates": results if results is not None else [],
         "cached_at": time.time() - age_seconds,
         "hits": 0,
     }
@@ -884,10 +884,10 @@ def test_cache_entry_format():
     """Verify the dict envelope produced by _make_cache_entry has required keys."""
     entry = _make_cache_entry([("chunk", 0.4)], age_seconds=5)
     assert isinstance(entry, dict)
-    assert "results" in entry
+    assert "scored_candidates" in entry
     assert "cached_at" in entry
     assert "hits" in entry
-    assert isinstance(entry["results"], list)
+    assert isinstance(entry["scored_candidates"], list)
     assert isinstance(entry["cached_at"], float)
     assert entry["hits"] == 0
 

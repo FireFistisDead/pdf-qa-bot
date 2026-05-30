@@ -2915,20 +2915,14 @@ def ask_question(data: Question):
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
 
-        # Session-level retrieval cache (ensure proper type and expiry cleanup)
         retrieval_cache = ensure_retrieval_cache(session)
         cleanup_retrieval_cache(retrieval_cache)
         cache_key = f"{mode}:{normalized_query}"
         _entry = retrieval_cache.get(cache_key)
-        if _entry is not None and isinstance(_entry, dict):
-            scored_candidates = _entry["results"]
+        if _entry is not None and isinstance(_entry, dict) and "scored_candidates" in _entry:
+            scored_candidates = _entry["scored_candidates"]
             _entry["hits"] = _entry.get("hits", 0) + 1
             session["cache_hits"] = session.get("cache_hits", 0) + 1
-
-        cache_key = f"{mode}:{normalized_query}"
-        cached_value = retrieval_cache.get(cache_key)
-        cache_hit = False
-        if isinstance(cached_value, dict) and "scored_candidates" in cached_value:
             logger.info(
                 "Retrieval cache hit session_id=%s cache_key=%s hits=%s",
                 session_id,
@@ -2937,15 +2931,6 @@ def ask_question(data: Question):
             )
             cache_hit = True
         else:
-            scored_candidates = cached_value["scored_candidates"]
-            cache_hit = True
-        elif cached_value is not None:
-            logger.info(
-                "Retrieval cache invalidated session_id=%s cache_key=%s",
-                session_id,
-                cache_key,
-            )
-            retrieval_cache.pop(cache_key, None)
             cache_hit = False
 
     try:
@@ -3349,45 +3334,23 @@ def ask_question_stream(data: Question):
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
 
-        retrieval_cache = session.setdefault("retrieval_cache", {})
+        retrieval_cache = ensure_retrieval_cache(session)
         cleanup_retrieval_cache(retrieval_cache)
         cache_key = f"{mode}:{normalized_query}"
         _stream_entry = retrieval_cache.get(cache_key)
-        if _stream_entry is not None and isinstance(_stream_entry, dict):
+        if _stream_entry is not None and isinstance(_stream_entry, dict) and "scored_candidates" in _stream_entry:
             logger.info(
                 "Stream retrieval cache hit session_id=%s cache_key=%s hits=%s",
                 session_id,
                 cache_key,
                 _stream_entry.get("hits", 0) + 1,
             )
-            scored_candidates = _stream_entry["results"]
+            scored_candidates = _stream_entry["scored_candidates"]
             _stream_entry["hits"] = _stream_entry.get("hits", 0) + 1
             session["cache_hits"] = session.get("cache_hits", 0) + 1
             cache_hit = True
         else:
-        # Session-level retrieval cache for streaming path
-        retrieval_cache = ensure_retrieval_cache(session)
-        with session_lock:
-            cleanup_retrieval_cache(retrieval_cache)
-            cache_key = f"{mode}:{normalized_query}"
-            cached_value = retrieval_cache.get(cache_key)
             cache_hit = False
-            if isinstance(cached_value, dict) and "scored_candidates" in cached_value:
-                logger.info(
-                    "Stream retrieval cache hit session_id=%s cache_key=%s",
-                    session_id,
-                    cache_key,
-                )
-                scored_candidates = cached_value["scored_candidates"]
-                cache_hit = True
-            elif cached_value is not None:
-                logger.info(
-                    "Stream retrieval cache invalidated session_id=%s cache_key=%s",
-                    session_id,
-                    cache_key,
-                )
-                retrieval_cache.pop(cache_key, None)
-                cache_hit = False
 
     try:
         with session_lock:
