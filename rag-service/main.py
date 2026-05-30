@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, HTTPException, File, UploadFile, Form
+from fastapi import Depends, FastAPI, Request, HTTPException, File, UploadFile, Form
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field, field_validator
@@ -322,7 +322,103 @@ async def internal_auth_middleware(request: Request, call_next):
 
 @app.get("/health")
 def health_check():
+    """Liveness probe — returns 200 as long as the process is running.
+
+    Kubernetes liveness probes and Docker HEALTHCHECK directives should call
+    this endpoint.  It does NOT check whether models have finished loading;
+    use /ready for that (readiness probe).
+    """
     return {"status": "ok"}
+
+
+# ── Model readiness gate ──────────────────────────────────────────────────────
+# By default, models are pre-loaded in a background thread during the FastAPI
+# startup event so the first real user request never pays the loading cost.
+# Set LAZY_MODEL_LOAD=true to skip pre-loading (useful in unit tests and local
+# dev where a fast startup matters more than eliminating first-request latency).
+#
+# Inference endpoints depend on require_models_ready() which raises 503 with
+# Retry-After while _models_ready is unset.  /ready returns 503 until both
+# models have loaded successfully.
+
+LAZY_MODEL_LOAD: bool = os.getenv("LAZY_MODEL_LOAD", "false").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+
+_models_ready = threading.Event()
+
+MODEL_READY_RETRY_AFTER: int = int(os.getenv("MODEL_READY_RETRY_AFTER", "30"))
+
+
+def _preload_models_thread() -> None:
+    """Target for the startup daemon thread that loads both models."""
+    try:
+        logger.info("Startup: pre-loading embedding model")
+        get_embedding_model()
+        logger.info("Startup: pre-loading generation model")
+        load_generation_model()
+        _models_ready.set()
+        logger.info("Startup: models ready — readiness gate open")
+    except Exception:
+        logger.exception(
+            "Startup: model pre-load failed — inference endpoints will return 503 "
+            "until the service is restarted with a working model configuration"
+        )
+
+
+@app.on_event("startup")
+def startup_event() -> None:
+    if LAZY_MODEL_LOAD:
+        logger.warning(
+            "LAZY_MODEL_LOAD is enabled — first inference request will pay the "
+            "full model loading latency (~30-90s on CPU). Not for production."
+        )
+        _models_ready.set()
+        return
+    threading.Thread(
+        target=_preload_models_thread,
+        daemon=True,
+        name="model-preload",
+    ).start()
+
+
+async def require_models_ready() -> None:
+    """FastAPI dependency that gates all inference endpoints on model readiness.
+
+    Raises HTTPException(503) with Retry-After while _models_ready is unset so
+    callers receive a clear, retryable error rather than queuing indefinitely
+    behind the loader thread or hitting a timeout.
+    """
+    if not _models_ready.is_set():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The AI service is starting up and loading models. "
+                f"Please retry in {MODEL_READY_RETRY_AFTER} seconds."
+            ),
+            headers={"Retry-After": str(MODEL_READY_RETRY_AFTER)},
+        )
+
+
+@app.get("/ready")
+def readiness_check() -> dict:
+    """Readiness probe — returns 200 only when both models have finished loading.
+
+    Kubernetes readiness probes and Docker HEALTHCHECK directives should call
+    this endpoint instead of /health.  Until /ready returns 200 the service
+    should not receive inference traffic.
+    """
+    if not _models_ready.is_set():
+        raise HTTPException(
+            status_code=503,
+            detail="Service is starting up — models are still loading.",
+            headers={"Retry-After": str(MODEL_READY_RETRY_AFTER)},
+        )
+    return {
+        "status": "ready",
+        "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+        "generation_model": os.getenv("HF_GENERATION_MODEL", "google/flan-t5-base"),
+    }
 
 
 @app.exception_handler(RequestValidationError)
@@ -2106,7 +2202,8 @@ def process_pdf(
     file: UploadFile = File(...),
     session_id: str | None = Form(None),
     original_filename: str | None = Form(None),
-    session_secret: str | None = Form(None)
+    session_secret: str | None = Form(None),
+    _ready: None = Depends(require_models_ready)
 ):
     cleanup_expired_sessions()
 
@@ -2444,8 +2541,7 @@ def processing_status(session_id: str, session_secret: str | None = None):
 
 
 @app.post("/ask")
-
-def ask_question(data: Question):
+def ask_question(data: Question, _ready: None = Depends(require_models_ready)):
     cleanup_expired_sessions()
 
     question = (data.question or "").strip()
@@ -2789,7 +2885,7 @@ def ask_question(data: Question):
     return response_payload
 
 @app.post("/ask/stream")
-def ask_question_stream(data: Question):
+def ask_question_stream(data: Question, _ready: None = Depends(require_models_ready)):
     """
     Streaming variant of /ask. Returns the generated answer as a plain-text
     chunked response so the frontend can render tokens progressively.
@@ -3029,7 +3125,7 @@ def _run_generation_locked(model, generate_kwargs):
 
 
 @app.post("/summarize")
-def summarize_pdf(data: SummarizeRequest):
+def summarize_pdf(data: SummarizeRequest, _ready: None = Depends(require_models_ready)):
     cleanup_expired_sessions()
     session_id = str(data.session_id)
     with sessions_lock:
