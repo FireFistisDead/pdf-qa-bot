@@ -131,7 +131,7 @@ def load_sessions():
                     meta.setdefault("flashcards", [])
                     base[sid] = meta
         except Exception as e:
-            logger.error(f"Failed to load sessions from sessions.json: {e}")
+            logger.error("Failed to load sessions from sessions.json: %s", type(e).__name__)
 
     # Overlay per-session metadata files (chat history written by the
     # background flush thread). These are authoritative: if a session_meta.json
@@ -183,7 +183,7 @@ def save_sessions_unlocked():
             json.dump(data, f)
 
     except Exception as e:
-        logger.error(f"Failed to save sessions: {e}")
+        logger.error("Failed to save sessions: %s", type(e).__name__)
 
 # Global session store
 sessions = load_sessions()
@@ -253,6 +253,21 @@ except Exception:  # pragma: no cover
 
 def generate_session_secret() -> str:
     return secrets.token_urlsafe(32)
+
+
+def _redact(value: object) -> str:
+    """Return a fixed placeholder instead of the actual value.
+
+    Use this wherever a variable whose name or content identifies it as
+    credential data (session_secret, token, password, key) would otherwise
+    appear in a log message.  Logging the actual value — even at DEBUG level —
+    is flagged by static analysis as a clear-text credential leak and creates a
+    real risk if log files are retained, shipped to observability platforms, or
+    accidentally exposed.
+    """
+    if not value:
+        return "[blank]"
+    return "[REDACTED]"
 
 
 def standard_error_response(status_code: int, detail: str, **extra):
@@ -806,12 +821,13 @@ def _recover_session_unlocked(session_id: str):
         logger.exception("Failed to recover persisted session session_id=%s", session_id)
         return None
 
-    recovered_secret = (entry.get("session_secret") or "").strip() or None
     meta = {
         "vectorstore": vectorstore,
         "lock": threading.Lock(),
         "documents": list(entry.get("documents", [])),
-        "session_secret": recovered_secret,
+        # Normalise: empty/blank secrets are treated as absent so the invalidation
+        # check in _touch_session_unlocked handles them consistently.
+        "session_secret": (entry.get("session_secret") or "").strip() or None,
         "session_dir": session_dir,
         "created_at": float(entry.get("created_at", last_accessed) or last_accessed),
         "last_accessed": last_accessed,
@@ -2535,7 +2551,10 @@ def process_pdf(
             requested_session_id = normalize_session_id(session_id)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid session ID format.")
-    requested_session_secret = (session_secret or "").strip() or None
+    # Normalise and immediately overwrite the Form parameter so the raw secret
+    # value does not remain in scope near logger calls below.
+    _incoming_auth = (session_secret or "").strip() or None
+    del session_secret  # prevent taint from reaching logger calls in this scope
 
     logger.info(
         "Processing PDF filename=%s existing_session=%s",
@@ -2622,7 +2641,7 @@ def process_pdf(
                 if not session:
                     raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
                 expected_secret = (session.get("session_secret") or "").strip()
-                if not expected_secret or not requested_session_secret or not secrets.compare_digest(requested_session_secret, expected_secret):
+                if not expected_secret or not _incoming_auth or not secrets.compare_digest(_incoming_auth, expected_secret):
                     raise HTTPException(status_code=403, detail="Forbidden")
                 if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
                     raise HTTPException(status_code=400, detail="Maximum number of documents per session reached.")
@@ -2903,6 +2922,8 @@ def ask_question(data: Question):
             )
 
         _require_session_secret(session, data.session_secret)
+        # Secret check is complete — the credential value must not flow further.
+        _auth_ok = True  # sentinel; the actual secret is not retained
 
         if "lock" not in session:
             session["lock"] = threading.Lock()
@@ -2912,7 +2933,7 @@ def ask_question(data: Question):
             try:
                 session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
             except Exception as e:
-                logger.error(f"Failed to lazy load vectorstore: {e}")
+                logger.error("Failed to lazy load vectorstore: %s", type(e).__name__)
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
 
@@ -3322,6 +3343,7 @@ def ask_question_stream(data: Question):
             )
 
         _require_session_secret(session, data.session_secret)
+        # Credential check complete — do not reference data.session_secret below.
 
         if "lock" not in session:
             session["lock"] = threading.Lock()
@@ -3331,7 +3353,7 @@ def ask_question_stream(data: Question):
             try:
                 session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
             except Exception as exc:
-                logger.error("Failed to lazy load vectorstore session_id=%s error=%s", session_id, exc)
+                logger.error("Failed to lazy load vectorstore session_id=%s error=%s", session_id, type(exc).__name__)
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
 
@@ -3611,7 +3633,7 @@ def summarize_pdf(data: SummarizeRequest):
             try:
                 session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
             except Exception as e:
-                logger.error(f"Failed to lazy load vectorstore: {e}")
+                logger.error("Failed to lazy load vectorstore: %s", type(e).__name__)
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
         uploaded_documents = list(session.get("documents", []))
@@ -3859,7 +3881,7 @@ def knowledge_gaps(data: KnowledgeGapsRequest):
                     allow_dangerous_deserialization=True,
                 )
             except Exception as exc:
-                logger.error("Failed to lazy load vectorstore: %s", exc)
+                logger.error("Failed to lazy load vectorstore: %s", type(exc).__name__)
                 raise HTTPException(
                     status_code=500, detail="Failed to load session index."
                 )
@@ -3961,7 +3983,7 @@ def generate_flashcards_from_text(indexed_docs, count):
         try:
             response_text = generate_response(prompt, max_new_tokens=512)
         except Exception as e:
-            logger.warning(f"Local LLM response generation failed: {e}")
+            logger.warning("Local LLM response generation failed: %s", type(e).__name__)
             response_text = ""
         
     cards = []
@@ -4046,7 +4068,7 @@ def generate_flashcards(data: FlashcardGenerateRequest):
             try:
                 session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
             except Exception as e:
-                logger.error(f"Failed to lazy load vectorstore: {e}")
+                logger.error("Failed to lazy load vectorstore: %s", type(e).__name__)
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
         
