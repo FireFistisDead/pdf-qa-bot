@@ -296,7 +296,7 @@ app.use("/api/auth", authRoutes);
 // Environment variable validation: Ensures the value is a positive integer and rejects
 // malformed strings like "50gb" or "50.5mb" that parseInt would silently truncate.
 const validateUploadSizeConfig = () => {
-  const rawValue = process.env.MAX_UPLOAD_SIZE_MB || "50";
+  const rawValue = process.env.MAX_UPLOAD_SIZE_MB || "10";
   // Regex: match only pure positive integers (no units, decimals, or garbage)
   const integerRegex = /^\d+$/;
   if (!integerRegex.test(rawValue.trim())) {
