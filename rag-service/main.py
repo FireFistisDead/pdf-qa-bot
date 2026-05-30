@@ -229,7 +229,9 @@ def internal_token_valid(provided: str | None, expected: str) -> bool:
 
 def require_internal_rag_token_configured():
     if not INTERNAL_RAG_TOKEN:
-        raise RuntimeError("INTERNAL_RAG_TOKEN must be configured for protected endpoints.")
+        logger.warning(
+            "INTERNAL_RAG_TOKEN is not configured; protected RAG endpoints will return 503."
+        )
 
 
 require_internal_rag_token_configured()
@@ -384,6 +386,16 @@ async def internal_auth_middleware(request: Request, call_next):
         path in PROTECTED_RAG_PATHS
         or any(path.startswith(prefix) for prefix in PROTECTED_RAG_PREFIXES)
     ):
+        if not INTERNAL_RAG_TOKEN:
+            logger.warning(
+                "Protected endpoint unavailable path=%s reason=missing_internal_token",
+                raw_path,
+            )
+            return standard_error_response(
+                503,
+                "RAG protected endpoints are unavailable: INTERNAL_RAG_TOKEN is not configured.",
+            )
+
         provided = request.headers.get("X-Internal-Token")
         if not internal_token_valid(provided, INTERNAL_RAG_TOKEN):
             logger.warning(
