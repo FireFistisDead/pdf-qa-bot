@@ -1047,9 +1047,9 @@ def test_stream_lazy_load_uses_secure_vectorstore_loader():
                     mock_snapshot_load.assert_called_once()
                     mock_faiss_load.assert_not_called()
 
-                    # Verify that the secure loader was called with the result of get_embedding_model().
+                    # Verify that the secure loader was called with the session id and embedding model.
                     call_args = mock_snapshot_load.call_args
-                    assert call_args[0][0] == main_module.get_session_dir(session_id)
+                    assert call_args[0][0] == session_id
                     assert call_args[0][1] == mock_get_embedding_model.return_value
 
                     with main_module.sessions_lock:
@@ -1062,20 +1062,61 @@ def test_stream_lazy_load_uses_secure_vectorstore_loader():
 
 def test_secure_vectorstore_loader_fails_closed_on_corrupt_snapshot(tmp_path):
     import main as main_module
+    from unittest.mock import patch
 
-    session_dir = tmp_path / "session"
+    session_id = "550e8400-e29b-41d4-a716-446655440000"
+    session_dir = tmp_path / session_id
     session_dir.mkdir()
     snapshot_path = session_dir / main_module.VECTORSTORE_SNAPSHOT_FILENAME
     snapshot_path.write_text("{not-json}", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="Failed to load vectorstore snapshot"):
-        main_module._load_vectorstore_from_snapshot(str(session_dir), MagicMock())
+    with patch.object(main_module, "get_session_dir", return_value=str(session_dir)):
+        with pytest.raises(ValueError, match="Failed to load vectorstore snapshot"):
+            main_module._load_vectorstore_from_snapshot(session_id, MagicMock())
 
 
-def test_vectorstore_snapshot_path_rejects_outside_persist_root(tmp_path):
+def test_vectorstore_snapshot_round_trip_uses_same_session_dir(tmp_path):
+    import main as main_module
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    session_id = "550e8400-e29b-41d4-a716-446655440001"
+    session_dir = tmp_path / session_id
+    session_dir.mkdir()
+
+    fake_vectorstore = SimpleNamespace(
+        docstore=SimpleNamespace(
+            _dict={
+                "doc-1": SimpleNamespace(
+                    page_content="Alpha beta gamma.",
+                    metadata={"filename": "doc.pdf", "page": 0},
+                )
+            }
+        ),
+        index_to_docstore_id={0: "doc-1"},
+        save_local=MagicMock(),
+    )
+
+    loaded_vectorstore = object()
+
+    with patch.object(main_module, "get_session_dir", return_value=str(session_dir)):
+        with patch("langchain_community.vectorstores.faiss.dependable_faiss_import") as mock_faiss_import:
+            mock_faiss = MagicMock()
+            mock_faiss.read_index.return_value = "fake-index"
+            mock_faiss_import.return_value = mock_faiss
+            with patch.object(main_module, "FAISS", return_value=loaded_vectorstore) as mock_faiss_cls:
+                persisted_dir = main_module.persist_vectorstore(session_id, fake_vectorstore)
+                restored = main_module._load_vectorstore_from_snapshot(session_id, MagicMock())
+
+    assert persisted_dir == str(session_dir)
+    assert fake_vectorstore.save_local.call_args[0][0] == str(session_dir)
+    assert mock_faiss.read_index.call_args[0][0] == str(session_dir / "index.faiss")
+    assert mock_faiss_cls.call_count == 1
+    assert restored is loaded_vectorstore
+
+
+def test_vectorstore_loader_rejects_path_traversal_like_session_id():
     import main as main_module
 
-    outside_dir = tmp_path / "outside-session"
-
-    with pytest.raises(ValueError, match="Invalid persisted session directory"):
-        main_module._vectorstore_snapshot_path(str(outside_dir))
+    with pytest.raises(ValueError, match="Missing session id|Invalid"):
+        main_module._load_vectorstore_from_snapshot("../escape", MagicMock())

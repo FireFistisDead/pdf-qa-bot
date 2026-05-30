@@ -739,20 +739,12 @@ def persist_vectorstore(session_id: str, vectorstore):
     session_dir = get_session_dir(session_id)
     os.makedirs(session_dir, exist_ok=True)
     vectorstore.save_local(session_dir)
-    _write_vectorstore_snapshot(session_dir, vectorstore)
+    _write_vectorstore_snapshot(session_id, vectorstore)
     return session_dir
 
 
-def _validated_persisted_session_dir(session_dir: str | Path) -> Path:
-    resolved_dir = Path(session_dir).resolve()
-    persisted_root = PERSIST_PATH.resolve()
-    if resolved_dir != persisted_root and persisted_root not in resolved_dir.parents:
-        raise ValueError(f"Invalid persisted session directory: {session_dir}")
-    return resolved_dir
-
-
-def _vectorstore_snapshot_path(session_dir: str | Path) -> Path:
-    return _validated_persisted_session_dir(session_dir) / VECTORSTORE_SNAPSHOT_FILENAME
+def _vectorstore_snapshot_path(session_id: str) -> Path:
+    return Path(get_session_dir(session_id)) / VECTORSTORE_SNAPSHOT_FILENAME
 
 
 def _vectorstore_snapshot_payload(vectorstore) -> dict:
@@ -784,8 +776,8 @@ def _vectorstore_snapshot_payload(vectorstore) -> dict:
     }
 
 
-def _write_vectorstore_snapshot(session_dir: str, vectorstore) -> None:
-    snapshot_path = _vectorstore_snapshot_path(session_dir)
+def _write_vectorstore_snapshot(session_id: str, vectorstore) -> None:
+    snapshot_path = _vectorstore_snapshot_path(session_id)
     temp_path = snapshot_path.with_suffix(".tmp")
     payload = _vectorstore_snapshot_payload(vectorstore)
 
@@ -795,8 +787,8 @@ def _write_vectorstore_snapshot(session_dir: str, vectorstore) -> None:
     os.replace(temp_path, snapshot_path)
 
 
-def _load_vectorstore_from_snapshot(session_dir: str, embeddings):
-    session_dir_path = _validated_persisted_session_dir(session_dir)
+def _load_vectorstore_from_snapshot(session_id: str, embeddings):
+    session_dir_path = Path(get_session_dir(session_id))
     snapshot_path = session_dir_path / VECTORSTORE_SNAPSHOT_FILENAME
     try:
         with open(snapshot_path, "r", encoding="utf-8") as snapshot_file:
@@ -855,7 +847,7 @@ def _load_vectorstore_from_snapshot(session_dir: str, embeddings):
 def _load_vectorstore_for_session_unlocked(session_id: str, meta: dict):
     session_dir = meta.get("session_dir") or get_session_dir(session_id)
     meta["session_dir"] = session_dir
-    return _load_vectorstore_from_snapshot(session_dir, get_embedding_model())
+    return _load_vectorstore_from_snapshot(session_id, get_embedding_model())
 
 
 def _recover_session_unlocked(session_id: str):
@@ -875,7 +867,7 @@ def _recover_session_unlocked(session_id: str):
         return None
 
     try:
-        vectorstore = _load_vectorstore_from_snapshot(session_dir, get_embedding_model())
+        vectorstore = _load_vectorstore_from_snapshot(session_id, get_embedding_model())
     except Exception:
         logger.exception("Failed to recover persisted session session_id=%s", session_id)
         return None
@@ -3848,7 +3840,7 @@ def knowledge_gaps(data: KnowledgeGapsRequest):
         if not session.get("vectorstore"):
             try:
                 session["vectorstore"] = _load_vectorstore_from_snapshot(
-                    str(FAISS_DIR / session_id),
+                    session_id,
                     get_embedding_model(),
                 )
             except Exception as exc:
