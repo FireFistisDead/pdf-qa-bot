@@ -95,6 +95,12 @@ const summarizeSchema = z.object({
 const summarizeCredentialSchema = z.object({
   session_id: uuidSchema,
   session_secret: sessionSecretSchema,
+// Knowledge gap mapping: same auth fields as summarize, plus an optional
+// document_id that scopes analysis to the active document in a multi-doc session.
+const knowledgeGapsSchema = z.object({
+  session_id: uuidSchema,
+  session_secret: sessionSecretSchema,
+  document_id: z.string().optional(),
 });
 
 const sessionsLookupSchema = z.object({
@@ -108,6 +114,19 @@ const sessionsLookupSchema = z.object({
     .min(1, "sessions is required."),
 });
 
+const generateFlashcardsSchema = z.object({
+  session_id: uuidSchema,
+  session_secret: sessionSecretSchema,
+  count: z.number().int().min(1).max(50).optional().default(10),
+});
+
+const updateFlashcardProgressSchema = z.object({
+  session_id: uuidSchema,
+  session_secret: sessionSecretSchema,
+  card_id: z.string().trim().min(1, "card_id is required."),
+  rating: z.enum(["again", "good", "easy"]),
+});
+
 module.exports = {
   askSchema,
   askCredentialSchema,
@@ -116,4 +135,8 @@ module.exports = {
   summarizeCredentialSchema,
   sessionsLookupSchema,
   MAX_QUESTION_LENGTH,
+  knowledgeGapsSchema,
+  sessionsLookupSchema,
+  generateFlashcardsSchema,
+  updateFlashcardProgressSchema,
 };
