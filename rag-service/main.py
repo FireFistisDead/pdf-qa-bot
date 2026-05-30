@@ -1028,6 +1028,67 @@ def _peek_session_unlocked(session_id: str):
     return meta
 
 
+def _cleanup_expired_sessions_unlocked():
+    """Must be called with sessions_lock held."""
+    ttl_seconds = SESSION_TTL_MINUTES * 60
+    expired = [
+        sid for sid, meta in list(sessions.items())
+        if now_ts() - meta["last_accessed"] > ttl_seconds
+    ]
+    for sid in expired:
+        session_dir = sessions[sid].get("session_dir")
+        del sessions[sid]
+        remove_persisted_session(sid, session_dir)
+    if expired:
+        logger.info("Expired sessions removed count=%s", len(expired))
+
+
+def _enforce_max_sessions_unlocked():
+    while len(sessions) >= MAX_ACTIVE_SESSIONS:
+        oldest = min(sessions.items(), key=lambda x: x[1]["created_at"])[0]
+        session_dir = sessions[oldest].get("session_dir")
+        del sessions[oldest]
+        remove_persisted_session(oldest, session_dir)
+        logger.info("Evicted oldest session session_id=%s", oldest)
+
+
+def _snapshot_session_for_persistence(meta: dict) -> dict:
+    """Return a JSON-serialisable snapshot of the fields that belong in session_meta.json."""
+    return {
+        "created_at": meta.get("created_at"),
+        "last_accessed": meta.get("last_accessed"),
+        "documents": list(meta.get("documents", [])),
+        "chat": list(meta.get("chat", [])),
+        "flashcards": list(meta.get("flashcards", [])),
+        "hashed_session_secret": meta.get("hashed_session_secret") or _hash_secret(meta.get("session_secret", "")),
+    }
+
+
+def _write_session_meta_file(session_id: str, data: dict) -> None:
+    """Atomically write *data* to <session_dir>/session_meta.json."""
+    session_dir = get_session_dir(session_id)
+    os.makedirs(session_dir, exist_ok=True)
+    meta_path = os.path.join(session_dir, "session_meta.json")
+    temp_path = meta_path + ".tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, separators=(",", ":"))
+        os.replace(temp_path, meta_path)
+    except Exception:
+        logger.exception("Failed to write session metadata session_id=%s", session_id)
+
+
+def _mark_session_dirty(session_id: str) -> None:
+    """Mark a session as dirty so background persistence flushes metadata.
+
+    Must be called while sessions_lock is held.
+    """
+    meta = sessions.get(session_id)
+    if not meta:
+        return
+    _dirty_sessions.add(session_id)
+
+
 def _flush_dirty_sessions() -> None:
     """Write per-session metadata files for every session in _dirty_sessions.
 
