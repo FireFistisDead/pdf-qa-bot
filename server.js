@@ -17,9 +17,9 @@ const {
   summarizeSchema,
   summarizeCredentialSchema,
   sessionsLookupSchema,
+  knowledgeGapsSchema,
   MAX_QUESTION_LENGTH,
 } = require("./validators/schemas");
-const { askSchema, summarizeSchema, knowledgeGapsSchema, sessionsLookupSchema } = require("./validators/schemas");
 const { clientIpFromRequest } = require("./security/ip");
 const { createRedisClient } = require("./security/redis");
 const authRoutes = require("./src/routes/authRoutes");

@@ -95,6 +95,8 @@ const summarizeSchema = z.object({
 const summarizeCredentialSchema = z.object({
   session_id: uuidSchema,
   session_secret: sessionSecretSchema,
+});
+
 // Knowledge gap mapping: same auth fields as summarize, plus an optional
 // document_id that scopes analysis to the active document in a multi-doc session.
 const knowledgeGapsSchema = z.object({

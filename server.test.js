@@ -29,10 +29,9 @@ after(() => {
 
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
-let app, askSchema, summarizeSchema, extractServiceDetails;
+let app, askSchema, summarizeSchema, extractServiceDetails, ragAuthHeaders;
 let _credCache, _credKey, _credCacheHit, _credCacheStore, _credCacheDrop;
 let validateAskBody, validateSummarizeBody, MAX_QUESTION_LENGTH;
-let app, askSchema, summarizeSchema, extractServiceDetails, ragAuthHeaders;
 let clientIpFromRequest, normalizeIp;
 before(() => {
   process.env.JWT_SECRET = "test-secret-for-ci";
