@@ -962,6 +962,35 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
   }
 });
 
+app.post("/rag/validate", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+  const validation = askSchema.safeParse(req.body);
+
+  if (!validation.success) {
+    return res.status(400).json({
+      error: "Validation failed",
+      details: validation.error.flatten(),
+    });
+  }
+
+  try {
+    const response = await axios.post(
+      `${RAG_SERVICE_URL}/rag/validate`,
+      validation.data,
+      { headers: ragAuthHeaders() },
+    );
+    return res.json(response.data);
+  } catch (err) {
+    const statusCode = err.response?.status || 500;
+    const details = extractServiceDetails(err, "Error validating RAG retrieval");
+    console.error("RAG validation failed:", details);
+
+    return res.status(statusCode).json({
+      error: typeof details === "string" ? details : "Error validating RAG retrieval",
+      details: isDevelopment ? details : "Internal processing error",
+    });
+  }
+});
+
 app.post("/knowledge-gaps", inferenceSlowDown, inferenceLimiter, async (req, res) => {
   const validation = knowledgeGapsSchema.safeParse(req.body);
 

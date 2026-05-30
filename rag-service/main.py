@@ -213,6 +213,7 @@ PROTECTED_RAG_PATHS = {
     "/ask/stream",
     "/summarize",
     "/knowledge-gaps",
+    "/rag/validate",
     "/validate-session-write",
     "/sessions/lookup",
 }
@@ -2741,6 +2742,96 @@ def validate_session_write(data: SessionWriteRequest):
     return {"allowed": True}
 
 
+def build_rag_validation_report(question, session_id, session_secret, mode="default"):
+    """Run retrieval + evidence checks without LLM generation."""
+    cleanup_expired_sessions()
+    cleaned_question = (question or "").strip()
+    if not cleaned_question:
+        raise HTTPException(status_code=400, detail="Question is required.")
+
+    intent = detect_question_intent(cleaned_question)
+
+    with sessions_lock:
+        session = _touch_session_unlocked(session_id)
+        if not session:
+            raise HTTPException(
+                status_code=404,
+                detail="Session expired or invalid. Please re-upload your PDFs.",
+            )
+        _require_session_secret(session, session_secret)
+        if "lock" not in session:
+            session["lock"] = threading.Lock()
+        session_lock = session["lock"]
+        if not session.get("vectorstore"):
+            try:
+                session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
+            except Exception as exc:
+                logger.error("Failed to lazy load vectorstore: %s", exc)
+                raise HTTPException(status_code=500, detail="Failed to load session index.")
+        vectorstore = session["vectorstore"]
+
+    try:
+        with session_lock:
+            indexed_documents = collect_index_documents(vectorstore)
+            scored_candidates = search_retrieval_candidates(
+                vectorstore,
+                cleaned_question,
+                ASK_RETRIEVAL_CANDIDATES,
+            )
+    except Exception:
+        logger.exception("Validation retrieval failed session_id=%s", session_id)
+        raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
+
+    docs = (
+        representative_documents_by_source(indexed_documents)
+        if intent == "overview"
+        else diversify_retrieved_documents(scored_candidates, cleaned_question)
+    )
+    best_score = scored_candidates[0][1] if scored_candidates else None
+    keyword_overlap = best_keyword_overlap_count(cleaned_question, docs)
+    evidence_passed = passes_evidence_gate(cleaned_question, docs, best_score, intent)
+    context_chars = sum(len((doc.page_content or "").strip()) for doc in docs)
+    min_context_chars = int(os.getenv("RAG_MIN_CONTEXT_CHARS", "120"))
+
+    return {
+        "question": cleaned_question,
+        "intent": intent,
+        "mode": mode,
+        "checks": {
+            "has_candidates": bool(scored_candidates),
+            "has_context_chunks": bool(docs),
+            "evidence_gate_passed": evidence_passed,
+            "keyword_overlap": keyword_overlap,
+            "min_context_met": context_chars >= min_context_chars,
+            "best_distance": best_score,
+            "max_allowed_distance": ASK_EVIDENCE_MAX_DISTANCE,
+        },
+        "metrics": {
+            "candidate_count": len(scored_candidates),
+            "selected_chunk_count": len(docs),
+            "context_characters": context_chars,
+            "indexed_document_count": len(indexed_documents),
+        },
+        "preview_sources": [
+            {
+                "document": document_display_name(doc),
+                "page": (doc.metadata.get("page", 0) + 1) if isinstance(doc.metadata.get("page"), int) else None,
+                "score": round(float(score), 4),
+            }
+            for doc, score, _rank in scored_candidates[:3]
+        ],
+        "would_answer": evidence_passed,
+    }
+
+
+@app.post("/rag/validate")
+def rag_validate(data: Question):
+    return build_rag_validation_report(
+        data.question,
+        str(data.session_id),
+        data.session_secret,
+        data.mode,
+    )
 
 
 @app.get("/processing-status/{session_id}")
