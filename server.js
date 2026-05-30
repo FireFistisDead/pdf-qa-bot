@@ -28,9 +28,6 @@ const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
 const getInternalRagToken = () => (process.env.INTERNAL_RAG_TOKEN || "").trim();
 const PORT = process.env.PORT || 4000;
 const SUPABASE_JWT_SECRET = process.env.SUPABASE_JWT_SECRET;
-if (!SUPABASE_JWT_SECRET) {
-  throw new Error("SUPABASE_JWT_SECRET missing in .env – required for /process-from-url authentication");
-}
 
 // ─── Credential Validation Cache ─────────────────────────────────────────────
 // session_id and session_secret are structurally identical on every request
@@ -1265,6 +1262,9 @@ app.use((err, req, res, next) => {
 
 if (require.main === module) {
   requireInternalRagToken();
+  if (!SUPABASE_JWT_SECRET) {
+    throw new Error("SUPABASE_JWT_SECRET missing in .env – required for /process-from-url authentication");
+  }
 
   (async () => {
     requireInternalRagToken();

@@ -4,6 +4,7 @@ const http = require("node:http");
 const { spawnSync } = require("node:child_process");
 const axios = require("axios");
 const { Blob } = require("node:buffer");
+const jwt = require("jsonwebtoken");
 
 const originalInternalRagToken = process.env.INTERNAL_RAG_TOKEN;
 const originalJwtSecret = process.env.JWT_SECRET;
@@ -110,6 +111,27 @@ test("server startup fails when INTERNAL_RAG_TOKEN is unset", () => {
 
   assert.notEqual(result.status, 0);
   assert.match(`${result.stderr}${result.stdout}`, /INTERNAL_RAG_TOKEN must be configured/);
+});
+
+test("server startup fails when SUPABASE_JWT_SECRET is unset", () => {
+  const result = spawnSync(
+    process.execPath,
+    ["server.js"],
+    {
+      cwd: __dirname,
+      env: {
+        ...process.env,
+        SUPABASE_JWT_SECRET: "",
+        JWT_SECRET: "test-jwt-secret",
+        INTERNAL_RAG_TOKEN: "test-internal-rag-token",
+      },
+      encoding: "utf8",
+      timeout: 5000,
+    },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stderr}${result.stdout}`, /SUPABASE_JWT_SECRET missing/);
 });
 
 const createPdfUploadBody = ({ sessionId = null, sessionSecret = null } = {}) => {
@@ -1033,3 +1055,77 @@ describe("credential validation cache", () => {
     assert.equal(result.success, false);
   });
 });
+
+describe("requireSupabaseAuth", () => {
+  let server;
+  let baseUrl;
+
+  before(() => {
+    return new Promise((resolve) => {
+      server = http.createServer(app);
+      server.listen(0, () => {
+        const address = server.address();
+        baseUrl = `http://127.0.0.1:${address.port}`;
+        resolve();
+      });
+    });
+  });
+
+  after(() => {
+    if (server) server.close();
+  });
+
+  test("rejects missing Authorization header", async () => {
+    const res = await fetch(`${baseUrl}/process-from-url`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "https://example.com/test.pdf" }),
+    });
+    assert.equal(res.status, 401);
+    const data = await res.json();
+    assert.equal(data.error, "Missing or invalid authorization token");
+  });
+
+  test("rejects malformed token", async () => {
+    const res = await fetch(`${baseUrl}/process-from-url`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer invalid.jwt.token",
+      },
+      body: JSON.stringify({ url: "https://example.com/test.pdf" }),
+    });
+    assert.equal(res.status, 401);
+    const data = await res.json();
+    assert.equal(data.error, "Invalid token");
+  });
+
+  test("rejects token signed with wrong secret", async () => {
+    const token = jwt.sign({ role: "authenticated" }, "wrong-secret");
+    const res = await fetch(`${baseUrl}/process-from-url`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ url: "https://example.com/test.pdf" }),
+    });
+    assert.equal(res.status, 401);
+    const data = await res.json();
+    assert.equal(data.error, "Invalid token");
+  });
+
+  test("accepts valid token and proceeds to route handler", async () => {
+    const token = jwt.sign({ role: "authenticated" }, process.env.SUPABASE_JWT_SECRET);
+    const res = await fetch(`${baseUrl}/process-from-url`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ url: "https://example.com/test.pdf" }),
+    });
+    assert.notEqual(res.status, 401, "Valid token should not be rejected");
+  });
+});
+
