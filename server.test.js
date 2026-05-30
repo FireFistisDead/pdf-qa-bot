@@ -5,8 +5,35 @@ const { spawnSync } = require("node:child_process");
 const axios = require("axios");
 const { Blob } = require("node:buffer");
 
-process.env.JWT_SECRET = "test-secret-for-ci";
-process.env.INTERNAL_RAG_TOKEN = "test-internal-token-for-ci";
+const originalInternalRagToken = process.env.INTERNAL_RAG_TOKEN;
+const originalJwtSecret = process.env.JWT_SECRET;
+const originalSupabaseJwtSecret = process.env.SUPABASE_JWT_SECRET;
+
+before(() => {
+  process.env.INTERNAL_RAG_TOKEN = process.env.INTERNAL_RAG_TOKEN || "test-internal-rag-token";
+  process.env.JWT_SECRET = process.env.JWT_SECRET || "test-jwt-secret";
+  process.env.SUPABASE_JWT_SECRET = process.env.SUPABASE_JWT_SECRET || "test-supabase-jwt-secret";
+});
+
+after(() => {
+  if (originalInternalRagToken === undefined) {
+    delete process.env.INTERNAL_RAG_TOKEN;
+  } else {
+    process.env.INTERNAL_RAG_TOKEN = originalInternalRagToken;
+  }
+
+  if (originalJwtSecret === undefined) {
+    delete process.env.JWT_SECRET;
+  } else {
+    process.env.JWT_SECRET = originalJwtSecret;
+  }
+
+  if (originalSupabaseJwtSecret === undefined) {
+    delete process.env.SUPABASE_JWT_SECRET;
+  } else {
+    process.env.SUPABASE_JWT_SECRET = originalSupabaseJwtSecret;
+  }
+});
 
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
