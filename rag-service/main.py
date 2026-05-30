@@ -767,9 +767,6 @@ def _vectorstore_snapshot_payload(vectorstore) -> dict:
             }
         )
 
-    if not documents:
-        raise ValueError("Vectorstore contains no documents")
-
     return {
         "schema_version": VECTORSTORE_SNAPSHOT_VERSION,
         "documents": documents,
@@ -788,7 +785,10 @@ def _write_vectorstore_snapshot(session_id: str, vectorstore) -> None:
 
 
 def _load_vectorstore_from_snapshot(session_id: str, embeddings):
-    session_dir_path = Path(get_session_dir(session_id))
+    try:
+        session_dir_path = Path(get_session_dir(session_id))
+    except ValueError as exc:
+        raise ValueError(f"Invalid persisted session id: {session_id}") from exc
     snapshot_path = session_dir_path / VECTORSTORE_SNAPSHOT_FILENAME
     try:
         with open(snapshot_path, "r", encoding="utf-8") as snapshot_file:
@@ -800,7 +800,7 @@ def _load_vectorstore_from_snapshot(session_id: str, embeddings):
         raise ValueError(f"Unsupported vectorstore snapshot format at {snapshot_path}")
 
     documents = snapshot.get("documents")
-    if not isinstance(documents, list) or not documents:
+    if not isinstance(documents, list):
         raise ValueError(f"Vectorstore snapshot is empty at {snapshot_path}")
 
     index_path = session_dir_path / "index.faiss"

@@ -1118,5 +1118,5 @@ def test_vectorstore_snapshot_round_trip_uses_same_session_dir(tmp_path):
 def test_vectorstore_loader_rejects_path_traversal_like_session_id():
     import main as main_module
 
-    with pytest.raises(ValueError, match="Missing session id|Invalid"):
+    with pytest.raises(ValueError, match=r"(badly formed hexadecimal UUID string|Invalid persisted session id)"):
         main_module._load_vectorstore_from_snapshot("../escape", MagicMock())
