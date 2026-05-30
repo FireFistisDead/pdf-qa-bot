@@ -3470,7 +3470,6 @@ def ask_question_stream(data: Question):
             for token_text in streamer:
                 if token_text:
                     full_answer_parts.append(token_text)
-                    yield token_text
 
             generation_thread.join(timeout=180)
 
@@ -3487,6 +3486,8 @@ def ask_question_stream(data: Question):
             if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
                 framed = full_answer
 
+            yield framed
+
             citation_sources = [
                 citation_source_for_document(doc, idx)
                 for idx, doc in enumerate(docs)
@@ -3501,7 +3502,7 @@ def ask_question_stream(data: Question):
                     append_chat_exchange(
                         current_session,
                         question,
-                        full_answer,
+                        framed,
                         citation_sources,
                         mode,
                     )
