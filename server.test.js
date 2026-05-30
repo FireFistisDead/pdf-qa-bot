@@ -1,29 +1,95 @@
 const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const http = require("node:http");
+const { spawnSync } = require("node:child_process");
 const axios = require("axios");
 const { Blob } = require("node:buffer");
 
-process.env.JWT_SECRET = "test-secret-for-ci";
+const originalInternalRagToken = process.env.INTERNAL_RAG_TOKEN;
+const originalJwtSecret = process.env.JWT_SECRET;
+
+before(() => {
+  process.env.INTERNAL_RAG_TOKEN = process.env.INTERNAL_RAG_TOKEN || "test-internal-rag-token";
+  process.env.JWT_SECRET = process.env.JWT_SECRET || "test-jwt-secret";
+});
+
+after(() => {
+  if (originalInternalRagToken === undefined) {
+    delete process.env.INTERNAL_RAG_TOKEN;
+  } else {
+    process.env.INTERNAL_RAG_TOKEN = originalInternalRagToken;
+  }
+
+  if (originalJwtSecret === undefined) {
+    delete process.env.JWT_SECRET;
+  } else {
+    process.env.JWT_SECRET = originalJwtSecret;
+  }
+});
 
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
-let app, askSchema, summarizeSchema, extractServiceDetails;
+let app, askSchema, summarizeSchema, extractServiceDetails, ragAuthHeaders;
 let clientIpFromRequest, normalizeIp;
-test("module loads without error", () => {
+before(() => {
   process.env.JWT_SECRET = "test-secret-for-ci";
   const mod = require("./server.js");
   app = mod.app;
   askSchema = mod.askSchema;
   summarizeSchema = mod.summarizeSchema;
   extractServiceDetails = mod.extractServiceDetails;
+  ragAuthHeaders = mod.ragAuthHeaders;
 
   ({ clientIpFromRequest, normalizeIp } = require("./security/ip"));
+});
 
+test("module loads without error", () => {
   assert.ok(typeof app === "function", "app should be an Express app");
   assert.ok(typeof askSchema.safeParse === "function", "askSchema should be a Zod schema");
   assert.ok(typeof summarizeSchema.safeParse === "function", "summarizeSchema should be a Zod schema");
   assert.ok(typeof extractServiceDetails === "function", "extractServiceDetails should be exported for tests");
+});
+
+test("ragAuthHeaders forwards the internal token", () => {
+  assert.deepEqual(ragAuthHeaders(), { "X-Internal-Token": process.env.INTERNAL_RAG_TOKEN.trim() });
+});
+
+test("server module can be imported when INTERNAL_RAG_TOKEN is unset", () => {
+  const result = spawnSync(
+    process.execPath,
+    ["-e", "require('./server.js')"],
+    {
+      cwd: __dirname,
+      env: {
+        ...process.env,
+        INTERNAL_RAG_TOKEN: "",
+        JWT_SECRET: "test-jwt-secret",
+      },
+      encoding: "utf8",
+    },
+  );
+
+  assert.equal(result.status, 0);
+});
+
+test("server startup fails when INTERNAL_RAG_TOKEN is unset", () => {
+  const result = spawnSync(
+    process.execPath,
+    ["server.js"],
+    {
+      cwd: __dirname,
+      env: {
+        ...process.env,
+        INTERNAL_RAG_TOKEN: "",
+        JWT_SECRET: "test-jwt-secret",
+      },
+      encoding: "utf8",
+      timeout: 5000,
+    },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stderr}${result.stdout}`, /INTERNAL_RAG_TOKEN must be configured/);
 });
 
 const createPdfUploadBody = ({ sessionId = null, sessionSecret = null } = {}) => {
@@ -544,7 +610,7 @@ describe("route error responses", () => {
     }
   });
 
-  test("POST /upload with non-PDF MIME type returns 400", async () => {
+  test("POST /upload with non-PDF MIME type returns 415", async () => {
     const formData = new FormData();
     formData.append(
       "file",
@@ -556,7 +622,7 @@ describe("route error responses", () => {
       method: "POST",
       body: formData,
     });
-    assert.equal(res.status, 400);
+    assert.equal(res.status, 415, "Non-PDF MIME types should return 415 Unsupported Media Type");
   });
 
   test("POST /upload with only session_secret (no session_id) returns 403", async () => {
@@ -578,5 +644,48 @@ describe("route error responses", () => {
       data.error.includes("session_id and session_secret must be provided together"),
       `Unexpected error message: ${data.error}`,
     );
+  });
+
+  test("POST /api/auth/signup normalizes email case and prevents duplicates", async () => {
+    const timestamp = Date.now();
+    const upperCaseEmail = ` TestUser-${timestamp}@Example.com `;
+    const password = "ValidPassword123!";
+
+    const res1 = await fetch(`${baseUrl}/api/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: upperCaseEmail, password }),
+    });
+    assert.equal(res1.status, 201);
+    
+    const res2 = await fetch(`${baseUrl}/api/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: upperCaseEmail.toLowerCase().trim(), password }),
+    });
+    assert.equal(res2.status, 400);
+    const data = await res2.json();
+    assert.equal(data.message, "User already exists");
+  });
+
+  test("POST /api/auth/login allows mixed-case and whitespace in email", async () => {
+    const timestamp = Date.now();
+    const upperCaseEmail = `TestUser2-${timestamp}@Example.com`;
+    const password = "ValidPassword123!";
+
+    await fetch(`${baseUrl}/api/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: upperCaseEmail, password }),
+    });
+
+    const res = await fetch(`${baseUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: ` testuser2-${timestamp}@example.com `, password }),
+    });
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.ok(data.token);
   });
 });

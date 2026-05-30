@@ -19,7 +19,7 @@
 .auth-grid-bg {
   position: absolute;
   inset: 0;
-  background-image: 
+  background-image:
     linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
   background-size: 40px 40px;
@@ -49,16 +49,16 @@
 }
 
 .auth-form-side::-webkit-scrollbar-track {
-  background: #0f0f0f; 
+  background: #0f0f0f;
 }
 
 .auth-form-side::-webkit-scrollbar-thumb {
-  background: #333; 
+  background: #333;
   border-radius: 4px;
 }
 
 .auth-form-side::-webkit-scrollbar-thumb:hover {
-  background: var(--accent, #c8ff00); 
+  background: var(--accent, #c8ff00);
 }
 
 .auth-form-wrapper {
