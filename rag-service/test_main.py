@@ -1070,3 +1070,12 @@ def test_secure_vectorstore_loader_fails_closed_on_corrupt_snapshot(tmp_path):
 
     with pytest.raises(ValueError, match="Failed to load vectorstore snapshot"):
         main_module._load_vectorstore_from_snapshot(str(session_dir), MagicMock())
+
+
+def test_vectorstore_snapshot_path_rejects_outside_persist_root(tmp_path):
+    import main as main_module
+
+    outside_dir = tmp_path / "outside-session"
+
+    with pytest.raises(ValueError, match="Invalid persisted session directory"):
+        main_module._vectorstore_snapshot_path(str(outside_dir))

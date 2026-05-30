@@ -743,8 +743,16 @@ def persist_vectorstore(session_id: str, vectorstore):
     return session_dir
 
 
+def _validated_persisted_session_dir(session_dir: str | Path) -> Path:
+    resolved_dir = Path(session_dir).resolve()
+    persisted_root = PERSIST_PATH.resolve()
+    if resolved_dir != persisted_root and persisted_root not in resolved_dir.parents:
+        raise ValueError(f"Invalid persisted session directory: {session_dir}")
+    return resolved_dir
+
+
 def _vectorstore_snapshot_path(session_dir: str | Path) -> Path:
-    return Path(session_dir) / VECTORSTORE_SNAPSHOT_FILENAME
+    return _validated_persisted_session_dir(session_dir) / VECTORSTORE_SNAPSHOT_FILENAME
 
 
 def _vectorstore_snapshot_payload(vectorstore) -> dict:
@@ -788,7 +796,8 @@ def _write_vectorstore_snapshot(session_dir: str, vectorstore) -> None:
 
 
 def _load_vectorstore_from_snapshot(session_dir: str, embeddings):
-    snapshot_path = _vectorstore_snapshot_path(session_dir)
+    session_dir_path = _validated_persisted_session_dir(session_dir)
+    snapshot_path = session_dir_path / VECTORSTORE_SNAPSHOT_FILENAME
     try:
         with open(snapshot_path, "r", encoding="utf-8") as snapshot_file:
             snapshot = json.load(snapshot_file)
@@ -802,7 +811,7 @@ def _load_vectorstore_from_snapshot(session_dir: str, embeddings):
     if not isinstance(documents, list) or not documents:
         raise ValueError(f"Vectorstore snapshot is empty at {snapshot_path}")
 
-    index_path = Path(session_dir) / "index.faiss"
+    index_path = session_dir_path / "index.faiss"
     try:
         from langchain_community.vectorstores.faiss import dependable_faiss_import
 
