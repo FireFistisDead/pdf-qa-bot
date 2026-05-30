@@ -109,8 +109,7 @@ def test_require_internal_token_config_fails_when_unset(monkeypatch):
 
     monkeypatch.setattr(main_module, "INTERNAL_RAG_TOKEN", "")
 
-    with pytest.raises(RuntimeError, match="INTERNAL_RAG_TOKEN"):
-        require_internal_rag_token_configured()
+    assert require_internal_rag_token_configured() is False
 
 
 def test_internal_token_validation_passes_when_configured(monkeypatch):
@@ -118,7 +117,7 @@ def test_internal_token_validation_passes_when_configured(monkeypatch):
 
     monkeypatch.setattr(main_module, "INTERNAL_RAG_TOKEN", "configured-secret")
 
-    assert require_internal_rag_token_configured() is None
+    assert require_internal_rag_token_configured() is True
 
 
 def test_internal_auth_middleware_protects_validate_session_write():
@@ -695,7 +694,8 @@ def test_ask_stream_passes_middleware_with_correct_token():
     finally:
         main_module.INTERNAL_RAG_TOKEN = original
 
-def test_ask_stream_rejected_when_token_is_cleared_after_startup():
+@pytest.mark.parametrize("path", ["/process-pdf", "/ask", "/summarize"])
+def test_protected_endpoints_rejected_when_token_is_cleared_after_startup(path):
     """Protected endpoints fail closed if token config becomes unavailable."""
     import main as main_module
 
@@ -703,20 +703,14 @@ def test_ask_stream_rejected_when_token_is_cleared_after_startup():
     main_module.INTERNAL_RAG_TOKEN = ""
     try:
         client = TestClient(app, raise_server_exceptions=False)
-        response = client.post(
-            "/ask/stream",
-            json={
-                "question": "What is this document about?",
-                "session_id": "00000000-0000-0000-0000-000000000004",
-                "session_secret": "irrelevant",
-            },
-        )
+        response = client.post(path)
         # Fail-closed behavior: when INTERNAL_RAG_TOKEN is unset, the
-        # middleware should still block protected requests with 403.
-        assert response.status_code == 403, (
-            "Middleware must block protected requests when INTERNAL_RAG_TOKEN is unset. "
+        # middleware should reject protected requests with 503.
+        assert response.status_code == 503, (
+            "Middleware must reject protected requests when INTERNAL_RAG_TOKEN is unset. "
             f"Got {response.status_code}"
         )
+        assert response.json()["detail"] == "INTERNAL_RAG_TOKEN is not configured"
     finally:
         main_module.INTERNAL_RAG_TOKEN = original
 
