@@ -246,6 +246,11 @@ PDF_PARSE_TIMEOUT_SECONDS = int(os.getenv("PDF_PARSE_TIMEOUT_SECONDS", "20"))
 MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "200"))
 MAX_PDF_EXTRACT_CHARS = int(os.getenv("MAX_PDF_EXTRACT_CHARS", "400000"))
 
+# Maximum PDF upload size in megabytes. Must match the Express gateway's
+# MAX_UPLOAD_SIZE_MB to avoid rejecting files that pass the gateway check.
+# Default: 50 MB (same as Express gateway default)
+MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "50"))
+
 try:
     from langchain_core.documents import Document  # type: ignore
 except Exception:  # pragma: no cover
@@ -2526,13 +2531,13 @@ def process_pdf(
             )
         file.file.seek(0)  # Reset stream so we can copy the full file
 
-        max_size = 20 * 1024 * 1024
+        max_size = MAX_UPLOAD_SIZE_MB * 1024 * 1024
         bytes_written = 0
         with open(temp_path, "wb") as f:
             while chunk := file.file.read(65536):
                 bytes_written += len(chunk)
                 if bytes_written > max_size:
-                    raise HTTPException(status_code=413, detail="Uploaded PDF exceeds the maximum size of 20MB.")
+                    raise HTTPException(status_code=413, detail=f"Uploaded PDF exceeds the maximum size of {MAX_UPLOAD_SIZE_MB}MB.")
                 f.write(chunk)
 
         if bytes_written == 0:
