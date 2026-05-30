@@ -4,14 +4,14 @@ const http = require("node:http");
 const axios = require("axios");
 const { Blob } = require("node:buffer");
 
-process.env.JWT_SECRET = "test-secret-for-ci";
+process.env.JWT_SECRET = "set-your-jwt-secret-in-env";
 
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
 let app, askSchema, summarizeSchema, extractServiceDetails;
 let clientIpFromRequest, normalizeIp;
 test("module loads without error", () => {
-  process.env.JWT_SECRET = "test-secret-for-ci";
+  process.env.JWT_SECRET = "set-your-jwt-secret-in-env";
   const mod = require("./server.js");
   app = mod.app;
   askSchema = mod.askSchema;
