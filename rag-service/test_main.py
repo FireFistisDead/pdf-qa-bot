@@ -36,6 +36,7 @@ from main import (
     cleanup_expired_sessions,
     _background_cleanup_loop,
     SESSION_CLEANUP_INTERVAL_MINUTES,
+    _hash_secret,
 )
 
 import secrets as _secrets
@@ -48,7 +49,7 @@ def is_authorized_session_update(session: dict, provided_secret) -> bool:
         return False
     stored_hash = (session.get("hashed_session_secret") or "").strip()
     if stored_hash:
-        return _secrets.compare_digest(main._hash_secret(candidate), stored_hash)
+        return _secrets.compare_digest(_hash_secret(candidate), stored_hash)
     expected = (session.get("session_secret") or "").strip()
     if not expected:
         return False
@@ -65,7 +66,7 @@ def test_session_secret_authorizes_only_matching_secret():
 
 
 def test_session_secret_authorizes_with_hashed_secret():
-    hashed = main._hash_secret("my-secret")
+    hashed = _hash_secret("my-secret")
     session = {"hashed_session_secret": hashed}
 
     assert is_authorized_session_update(session, "my-secret") is True
@@ -531,7 +532,7 @@ def test_snapshot_session_for_persistence_excludes_runtime_fields():
     assert "lock" not in snap
     assert "vectorstore" not in snap
     assert snap["created_at"] == 1000.0
-    assert snap["session_secret"] == "s3cr3t"
+    assert snap["hashed_session_secret"] == _hash_secret("s3cr3t")
     assert snap["chat"] == [{"question": "q", "answer": "a"}]
     assert snap["documents"] == ["doc1.pdf"]
 

@@ -256,13 +256,16 @@ def generate_session_secret() -> str:
     return secrets.token_urlsafe(32)
 
 
-def _hash_secret(secret: str) -> str:
+def _hash_secret(secret: str | None) -> str:
     """Return the SHA-256 hex digest of *secret* for persistent storage.
 
     Only the hash is written to disk so that a compromised session file does
     not leak the plaintext secret.  Comparison at authentication time re-hashes
     the client-supplied value and compares digests.
+    Returns empty string when *secret* is None or empty.
     """
+    if not secret:
+        return ""
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
