@@ -2931,6 +2931,21 @@ def ask_question(data: Question):
     except Exception:
         logger.exception("Similarity search failed session_id=%s", session_id)
         raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
+
+    try:
+        docs = (
+            representative_documents_by_source(indexed_documents)
+            if intent == "overview"
+            else diversify_retrieved_documents(scored_candidates, question)
+        )
+    except Exception:
+        logger.exception(
+            "Failed to build retrieval context session_id=%s intent=%s",
+            session_id,
+            intent,
+        )
+        docs = []
+
     best_score = scored_candidates[0][1] if scored_candidates else None
     if not passes_evidence_gate(question, docs, best_score, intent):
         logger.info(
