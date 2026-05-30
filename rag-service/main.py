@@ -469,6 +469,12 @@ SESSION_TOUCH_PERSIST_INTERVAL_SECONDS = int(
 SEMANTIC_CHUNK_SOFT_MAX = int(os.getenv("SEMANTIC_CHUNK_SOFT_MAX", "1200"))
 SEMANTIC_CHUNK_MERGE_MIN = int(os.getenv("SEMANTIC_CHUNK_MERGE_MIN", "150"))
 SEMANTIC_CHUNK_MERGE_MAX = int(os.getenv("SEMANTIC_CHUNK_MERGE_MAX", "1400"))
+SEMANTIC_CHUNK_MAX_TINY_CHUNKS = int(
+    os.getenv("SEMANTIC_CHUNK_MAX_TINY_CHUNKS", "256")
+)
+SEMANTIC_CHUNK_MAX_MERGE_CANDIDATES = int(
+    os.getenv("SEMANTIC_CHUNK_MAX_MERGE_CANDIDATES", "384")
+)
 SEMANTIC_CHUNK_SIMILARITY_THRESHOLD = float(
     os.getenv("SEMANTIC_CHUNK_SIMILARITY_THRESHOLD", "0.75")
 )
@@ -2114,6 +2120,16 @@ def _split_pass2(
     if not tiny_indices:
         return list(raw_chunks)  # fast-path: nothing to merge
 
+    # Keep semantic merge work bounded for adversarial inputs that fragment a page
+    # into a large number of tiny chunks. Normal PDFs stay on the merge path.
+    if len(tiny_indices) > SEMANTIC_CHUNK_MAX_TINY_CHUNKS:
+        logger.warning(
+            "Semantic merge skipped tiny_chunks=%s limit=%s",
+            len(tiny_indices),
+            SEMANTIC_CHUNK_MAX_TINY_CHUNKS,
+        )
+        return list(raw_chunks)
+
     # Collect tiny chunks + their immediate neighbours for batch embedding
     neighbour_indices = set()
     for idx in tiny_indices:
@@ -2124,6 +2140,16 @@ def _split_pass2(
             neighbour_indices.add(idx + 1)
 
     sorted_indices = sorted(neighbour_indices)
+
+    if len(sorted_indices) > SEMANTIC_CHUNK_MAX_MERGE_CANDIDATES:
+        logger.warning(
+            "Semantic merge skipped candidates=%s tiny_chunks=%s limit=%s",
+            len(sorted_indices),
+            len(tiny_indices),
+            SEMANTIC_CHUNK_MAX_MERGE_CANDIDATES,
+        )
+        return list(raw_chunks)
+
     texts_to_embed = [raw_chunks[i] for i in sorted_indices]
 
     try:
