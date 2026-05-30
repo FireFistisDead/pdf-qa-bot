@@ -292,6 +292,7 @@ async def internal_auth_middleware(request: Request, call_next):
         "/summarize",
         "/validate-session-write",
         "/sessions/lookup",
+        "/stats",
     }
 
     # Prefix-based guard: any sub-path under these trees is also protected.
@@ -431,28 +432,25 @@ FACTUAL_QUESTION_PREFIXES = (
 def now_ts():
     return time.time()
 
-def cleanup_retrieval_cache(retrieval_cache):
-    expired_keys = []
+def cleanup_retrieval_cache(retrieval_cache: dict) -> None:
+    """Evict malformed entries and TTL-expired entries from the retrieval cache.
 
+    Each cache entry must be a dict with a ``cached_at`` float timestamp.
+    Entries that are not dicts (legacy format from before this fix), entries
+    missing ``cached_at``, and entries older than RETRIEVAL_CACHE_TTL_SECONDS
+    are all removed.  The eviction is done in a single pass to avoid repeated
+    dict mutations during iteration.
+    """
     current_time = now_ts()
-
-    for key, value in retrieval_cache.items():
-
-        if not isinstance(value, dict):
-            expired_keys.append(key)
-            continue
-
-        cached_at = value.get("cached_at")
-
-        if not cached_at:
-            expired_keys.append(key)
-            continue
-
-        age = current_time - cached_at
-
-        if age > RETRIEVAL_CACHE_TTL_SECONDS:
-            expired_keys.append(key)
-
+    expired_keys = [
+        key
+        for key, value in retrieval_cache.items()
+        if (
+            not isinstance(value, dict)
+            or not value.get("cached_at")
+            or (current_time - float(value["cached_at"])) > RETRIEVAL_CACHE_TTL_SECONDS
+        )
+    ]
     for key in expired_keys:
         retrieval_cache.pop(key, None)
 
@@ -2241,6 +2239,8 @@ def process_pdf(
                 "created_at": created_at,
                 "last_accessed": created_at,
                 "retrieval_cache": {},
+                "cache_hits": 0,
+                "cache_misses": 0,
                 "chat": [],
             }
             persist_session_registry_entry(processing_session_id, sessions[processing_session_id])
@@ -2330,7 +2330,11 @@ def process_pdf(
                     raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
                 session.setdefault("documents", []).append(uploaded_document)
                 session["last_accessed"] = now
+                # Invalidate the retrieval cache — stale entries from the old
+                # FAISS index must not be served after a new document is merged.
                 session["retrieval_cache"] = {}
+                session["cache_hits"] = 0
+                session["cache_misses"] = 0
                 session_id = requested_session_id
                 persist_session_registry_entry(session_id, session)
                 logger.info(
@@ -2373,6 +2377,8 @@ def process_pdf(
                     "created_at": created_at,
                     "last_accessed": now,
                     "retrieval_cache": {},
+                    "cache_hits": 0,
+                    "cache_misses": 0,
                     "chat": [],
                 }
                 if progress:
@@ -2488,29 +2494,25 @@ def ask_question(data: Question):
                 raise HTTPException(status_code=500, detail="Failed to load session index.")
         vectorstore = session["vectorstore"]
 
-        # Session-level retrieval cache
-        retrieval_cache = session.setdefault(
-            "retrieval_cache",
-            OrderedDict()
-        )
+        # Session-level retrieval cache.  Each entry is a dict:
+        #   {"results": scored_candidates, "cached_at": float, "hits": int}
+        # Using a plain dict is sufficient — LRU eviction is done by key count.
+        retrieval_cache = session.setdefault("retrieval_cache", {})
 
         cleanup_retrieval_cache(retrieval_cache)
-        # Cache hit
         cache_key = f"{mode}:{normalized_query}"
-        if cache_key in retrieval_cache:
-
+        cache_entry = retrieval_cache.get(cache_key)
+        if cache_entry is not None and isinstance(cache_entry, dict):
             logger.info(
-                "Retrieval cache hit session_id=%s cache_key=%s",
+                "Retrieval cache hit session_id=%s cache_key=%s hits=%s",
                 session_id,
                 cache_key,
+                cache_entry.get("hits", 0) + 1,
             )
-
-            scored_candidates = retrieval_cache[
-                cache_key
-            ]
-
+            scored_candidates = cache_entry["results"]
+            cache_entry["hits"] = cache_entry.get("hits", 0) + 1
+            session["cache_hits"] = session.get("cache_hits", 0) + 1
             cache_hit = True
-
         else:
             cache_hit = False
 
@@ -2537,7 +2539,12 @@ def ask_question(data: Question):
                         if len(retrieval_cache) >= RETRIEVAL_CACHE_LIMIT:
                             oldest_key = next(iter(retrieval_cache))
                             del retrieval_cache[oldest_key]
-                        retrieval_cache[cache_key] = scored_candidates
+                        retrieval_cache[cache_key] = {
+                            "results": scored_candidates,
+                            "cached_at": now_ts(),
+                            "hits": 0,
+                        }
+                        session["cache_misses"] = session.get("cache_misses", 0) + 1
 
     except Exception:
         logger.exception("Similarity search failed session_id=%s", session_id)
@@ -2841,14 +2848,19 @@ def ask_question_stream(data: Question):
         vectorstore = session["vectorstore"]
 
         retrieval_cache = session.setdefault("retrieval_cache", {})
+        cleanup_retrieval_cache(retrieval_cache)
         cache_key = f"{mode}:{normalized_query}"
-        if cache_key in retrieval_cache:
+        stream_cache_entry = retrieval_cache.get(cache_key)
+        if stream_cache_entry is not None and isinstance(stream_cache_entry, dict):
             logger.info(
-                "Stream retrieval cache hit session_id=%s cache_key=%s",
+                "Stream retrieval cache hit session_id=%s cache_key=%s hits=%s",
                 session_id,
                 cache_key,
+                stream_cache_entry.get("hits", 0) + 1,
             )
-            scored_candidates = retrieval_cache[cache_key]
+            scored_candidates = stream_cache_entry["results"]
+            stream_cache_entry["hits"] = stream_cache_entry.get("hits", 0) + 1
+            session["cache_hits"] = session.get("cache_hits", 0) + 1
             cache_hit = True
         else:
             cache_hit = False
@@ -2874,7 +2886,14 @@ def ask_question_stream(data: Question):
                         if len(rc) >= RETRIEVAL_CACHE_LIMIT:
                             oldest = next(iter(rc))
                             del rc[oldest]
-                        rc[cache_key] = scored_candidates
+                        rc[cache_key] = {
+                            "results": scored_candidates,
+                            "cached_at": now_ts(),
+                            "hits": 0,
+                        }
+                        current_session["cache_misses"] = (
+                            current_session.get("cache_misses", 0) + 1
+                        )
     except Exception:
         logger.exception("Stream similarity search failed session_id=%s", session_id)
         raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
@@ -2917,15 +2936,12 @@ def ask_question_stream(data: Question):
             framed = grounded_answer
 
         with sessions_lock:
-            current_session = sessions.get(session_id)
-            if current_session:
-                current_session.setdefault("chat", []).append({
-                    "question": question,
-                    "answer": framed,
-                    "sources": citation_sources,
-                    "mode": mode,
-                })
-                save_sessions_unlocked()
+            _append_chat_and_mark_dirty(session_id, {
+                "question": question,
+                "answer": framed,
+                "sources": citation_sources,
+                "mode": mode,
+            })
 
         def _grounded_stream():
             yield framed
@@ -3062,6 +3078,49 @@ def summarize_pdf(data: SummarizeRequest):
     )
 
     return {"summary": build_session_summary(uploaded_documents, indexed_documents)}
+@app.get("/stats")
+def get_stats():
+    """Return aggregate retrieval-cache metrics across all active sessions.
+
+    Protected by INTERNAL_RAG_TOKEN (same as inference endpoints) so this
+    endpoint is never reachable by external callers when the token is set.
+    Only operators or the Express gateway can query it.
+    """
+    total_hits: int = 0
+    total_misses: int = 0
+    total_cached_entries: int = 0
+    session_stats: list = []
+
+    with sessions_lock:
+        for sid, meta in sessions.items():
+            hits = meta.get("cache_hits", 0)
+            misses = meta.get("cache_misses", 0)
+            entries = len(meta.get("retrieval_cache", {}))
+            total_hits += hits
+            total_misses += misses
+            total_cached_entries += entries
+            session_stats.append(
+                {
+                    "session_id": sid,
+                    "cache_hits": hits,
+                    "cache_misses": misses,
+                    "cached_entries": entries,
+                }
+            )
+
+    total_requests = total_hits + total_misses
+    hit_rate = round(total_hits / total_requests, 4) if total_requests > 0 else 0.0
+
+    return {
+        "active_sessions": len(session_stats),
+        "total_cache_hits": total_hits,
+        "total_cache_misses": total_misses,
+        "total_cached_entries": total_cached_entries,
+        "hit_rate": hit_rate,
+        "sessions": session_stats,
+    }
+
+
 if __name__ == "__main__":
     is_production = os.getenv("ENVIRONMENT", "development").lower() == "production"
     host = os.getenv("HOST", "0.0.0.0")

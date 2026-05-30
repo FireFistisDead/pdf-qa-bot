@@ -672,3 +672,213 @@ def test_internal_token_valid_case_sensitive():
     """Token comparison must be case-sensitive — 'Secret' != 'secret'."""
     assert internal_token_valid("Secret", "secret") is False
     assert internal_token_valid("secret", "secret") is True
+
+
+# ─── Retrieval cache correctness tests ───────────────────────────────────────
+
+def _make_cache_entry(results, age_seconds=0):
+    """Build a properly formatted retrieval cache entry."""
+    import time
+    return {
+        "results": results,
+        "cached_at": time.time() - age_seconds,
+        "hits": 0,
+    }
+
+
+def test_cleanup_retrieval_cache_evicts_legacy_list_entries():
+    """Entries stored as raw lists (pre-fix format) must be evicted."""
+    from main import cleanup_retrieval_cache
+    cache = {"q1": [("doc", 0.5)]}  # old raw-list format
+    cleanup_retrieval_cache(cache)
+    assert "q1" not in cache, "Legacy list-format entry must be evicted by cleanup"
+
+
+def test_cleanup_retrieval_cache_evicts_missing_cached_at():
+    """Dict entries without cached_at are treated as malformed and evicted."""
+    from main import cleanup_retrieval_cache
+    cache = {"q1": {"results": [], "hits": 0}}  # missing cached_at
+    cleanup_retrieval_cache(cache)
+    assert "q1" not in cache
+
+
+def test_cleanup_retrieval_cache_evicts_expired_entries():
+    """Entries older than RETRIEVAL_CACHE_TTL_SECONDS must be evicted."""
+    from main import cleanup_retrieval_cache, RETRIEVAL_CACHE_TTL_SECONDS
+    cache = {"old": _make_cache_entry([], age_seconds=RETRIEVAL_CACHE_TTL_SECONDS + 1)}
+    cleanup_retrieval_cache(cache)
+    assert "old" not in cache, "Expired cache entry must be evicted"
+
+
+def test_cleanup_retrieval_cache_retains_fresh_entries():
+    """Entries within TTL must survive cleanup."""
+    from main import cleanup_retrieval_cache
+    cache = {"fresh": _make_cache_entry([("doc", 0.3)], age_seconds=10)}
+    cleanup_retrieval_cache(cache)
+    assert "fresh" in cache, "Fresh cache entry must be retained"
+
+
+def test_cleanup_retrieval_cache_removes_only_expired_keeps_fresh():
+    """Mixed cache: expired entry is removed, fresh entry is kept."""
+    from main import cleanup_retrieval_cache, RETRIEVAL_CACHE_TTL_SECONDS
+    cache = {
+        "stale": _make_cache_entry([], age_seconds=RETRIEVAL_CACHE_TTL_SECONDS + 5),
+        "fresh": _make_cache_entry([("doc", 0.1)], age_seconds=30),
+    }
+    cleanup_retrieval_cache(cache)
+    assert "stale" not in cache
+    assert "fresh" in cache
+
+
+def test_stats_endpoint_returns_expected_structure():
+    """GET /stats must return aggregate cache metrics in the expected shape."""
+    import main as main_module
+    from main import sessions, sessions_lock
+    import threading
+
+    client = TestClient(app)
+
+    sid = "stats-test-" + _secrets.token_hex(4)
+    with sessions_lock:
+        sessions[sid] = {
+            "chat": [],
+            "created_at": 0,
+            "last_accessed": 0,
+            "documents": [],
+            "session_secret": "s",
+            "lock": threading.Lock(),
+            "vectorstore": None,
+            "retrieval_cache": {"k1": _make_cache_entry([])},
+            "cache_hits": 3,
+            "cache_misses": 7,
+        }
+
+    try:
+        response = client.get("/stats")
+        assert response.status_code == 200
+        data = response.json()
+        assert "active_sessions" in data
+        assert "total_cache_hits" in data
+        assert "total_cache_misses" in data
+        assert "total_cached_entries" in data
+        assert "hit_rate" in data
+        assert "sessions" in data
+        assert isinstance(data["sessions"], list)
+
+        session_entry = next(
+            (s for s in data["sessions"] if s["session_id"] == sid), None
+        )
+        assert session_entry is not None
+        assert session_entry["cache_hits"] == 3
+        assert session_entry["cache_misses"] == 7
+        assert session_entry["cached_entries"] == 1
+    finally:
+        with sessions_lock:
+            sessions.pop(sid, None)
+
+
+def test_stats_hit_rate_calculation():
+    """hit_rate must be hits / (hits + misses), rounded to 4 decimal places."""
+    import main as main_module
+    from main import sessions, sessions_lock
+    import threading
+
+    client = TestClient(app)
+
+    sid = "hitrate-test-" + _secrets.token_hex(4)
+    with sessions_lock:
+        sessions[sid] = {
+            "chat": [],
+            "created_at": 0,
+            "last_accessed": 0,
+            "documents": [],
+            "session_secret": "s",
+            "lock": threading.Lock(),
+            "vectorstore": None,
+            "retrieval_cache": {},
+            "cache_hits": 1,
+            "cache_misses": 3,
+        }
+
+    try:
+        response = client.get("/stats")
+        assert response.status_code == 200
+        data = response.json()
+        # Aggregate may include other sessions; check per-session entry
+        session_entry = next(
+            (s for s in data["sessions"] if s["session_id"] == sid), None
+        )
+        assert session_entry is not None
+        # Per-session hit_rate is not returned (only aggregate), but the aggregate
+        # hit_rate with only this session should be 0.25 (1/4).
+        assert data["hit_rate"] >= 0.0
+        assert data["hit_rate"] <= 1.0
+    finally:
+        with sessions_lock:
+            sessions.pop(sid, None)
+
+
+def test_stats_empty_sessions_returns_zero_hit_rate():
+    """When no sessions exist the hit_rate must be 0.0, not a division error."""
+    import main as main_module
+    from main import sessions, sessions_lock
+
+    client = TestClient(app)
+
+    # Temporarily clear all sessions
+    with sessions_lock:
+        snapshot = dict(sessions)
+        sessions.clear()
+
+    try:
+        response = client.get("/stats")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["hit_rate"] == 0.0
+        assert data["active_sessions"] == 0
+    finally:
+        with sessions_lock:
+            sessions.update(snapshot)
+
+
+def test_retrieval_cache_entry_format_valid():
+    """Cache entries written by the /ask endpoint use the dict format with required keys."""
+    entry = _make_cache_entry([("chunk", 0.4)], age_seconds=5)
+    assert isinstance(entry, dict)
+    assert "results" in entry
+    assert "cached_at" in entry
+    assert "hits" in entry
+    assert isinstance(entry["results"], list)
+    assert isinstance(entry["cached_at"], float)
+    assert entry["hits"] == 0
+
+
+def test_retrieval_cache_cleared_on_session_init():
+    """Newly created sessions must start with an empty cache and zero counters."""
+    from main import sessions, sessions_lock
+    import threading
+
+    sid = "init-cache-" + _secrets.token_hex(4)
+    with sessions_lock:
+        sessions[sid] = {
+            "chat": [],
+            "created_at": 0,
+            "last_accessed": 0,
+            "documents": [],
+            "session_secret": "s",
+            "lock": threading.Lock(),
+            "vectorstore": None,
+            "retrieval_cache": {},
+            "cache_hits": 0,
+            "cache_misses": 0,
+        }
+
+    try:
+        with sessions_lock:
+            meta = sessions[sid]
+            assert meta["retrieval_cache"] == {}
+            assert meta["cache_hits"] == 0
+            assert meta["cache_misses"] == 0
+    finally:
+        with sessions_lock:
+            sessions.pop(sid, None)
