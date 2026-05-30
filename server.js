@@ -22,7 +22,7 @@ const storage = multer.diskStorage({
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, uniqueSuffix + '-' + file.originalname);
+    cb(null, uniqueSuffix + path.extname(file.originalname));
   },
 });
 
@@ -54,7 +54,7 @@ app.post('/upload', (req, res) => {
         err.code === 'LIMIT_UNEXPECTED_FILE'
       ) {
         return res.status(400).json({
-          error: 'Invalid file type. Only PDF files are supported. Please upload a valid .pdf file.',
+          error: 'Only PDF files are supported. Please upload a valid .pdf file.',
         });
       }
       if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
@@ -62,11 +62,11 @@ app.post('/upload', (req, res) => {
           error: 'File is too large. Maximum allowed size is 50MB.',
         });
       }
-      return res.status(500).json({ error: 'An unexpected error occurred during upload.' });
+      return res.status(500).json({ error: 'An unexpected error occurred during file upload.' });
     }
 
     if (!req.file) {
-      return res.status(400).json({ error: 'No file was uploaded.' });
+      return res.status(400).json({ error: 'No file uploaded.' });
     }
 
     return res.status(200).json({
