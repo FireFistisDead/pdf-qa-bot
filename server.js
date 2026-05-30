@@ -445,6 +445,23 @@ const extractServiceDetails = (err, fallbackMessage = "Upstream service request 
 const ragAuthHeaders = () =>
   INTERNAL_RAG_TOKEN ? { "X-Internal-Token": INTERNAL_RAG_TOKEN } : {};
 
+// Propagate 503 + Retry-After from the RAG service back to the caller.
+// When the RAG service is still loading models it returns 503 with a
+// Retry-After header. Without this helper the gateway would swallow that
+// header and the client would have no way to know when to retry.
+const propagateRagServiceError = (err, res, fallbackMessage) => {
+  const statusCode = err.response?.status || 500;
+  const details = extractServiceDetails(err, fallbackMessage);
+  if (statusCode === 503) {
+    const retryAfter = err.response?.headers?.["retry-after"] || "30";
+    res.set("Retry-After", String(retryAfter));
+  }
+  return res.status(statusCode).json({
+    error: typeof details === "string" ? details : fallbackMessage,
+    details: isDevelopment ? details : "Internal processing error",
+  });
+};
+
 const normalizeSessionSecret = (value) =>
   typeof value === "string" ? value.trim() || null : null;
 
@@ -636,14 +653,8 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
       mode: response.data.mode ?? "default",
     });
   } catch (err) {
-    const statusCode = err.response?.status || 500;
-    const details = extractServiceDetails(err, "Error answering question");
-    console.error("Question answering failed:", details);
-
-    return res.status(statusCode).json({
-      error: typeof details === "string" ? details : "Error answering question",
-      details: isDevelopment ? details : "Internal processing error",
-    });
+    console.error("Question answering failed:", extractServiceDetails(err, "Error answering question"));
+    return propagateRagServiceError(err, res, "Error answering question");
   }
 });
 app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) => {
@@ -683,13 +694,8 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
       }
     });
   } catch (err) {
-    const statusCode = err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
-    const details = extractServiceDetails(err, "Error answering question");
-    console.error("Streaming question answering failed:", details);
-    return res.status(statusCode).json({
-      error: typeof details === "string" ? details : "Error answering question",
-      details: isDevelopment ? details : "Internal processing error",
-    });
+    console.error("Streaming question answering failed:", extractServiceDetails(err, "Error answering question"));
+    return propagateRagServiceError(err, res, "Error answering question");
   }
 });
 
@@ -712,14 +718,8 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
       summary: response.data.summary,
     });
   } catch (err) {
-    const statusCode = err.response?.status || 500;
-    const details = extractServiceDetails(err, "Error summarizing PDF");
-    console.error("Summarization failed:", details);
-
-    return res.status(statusCode).json({
-      error: typeof details === "string" ? details : "Error summarizing PDF",
-      details: isDevelopment ? details : "Internal processing error",
-    });
+    console.error("Summarization failed:", extractServiceDetails(err, "Error summarizing PDF"));
+    return propagateRagServiceError(err, res, "Error summarizing PDF");
   }
 });
 

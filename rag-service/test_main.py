@@ -672,3 +672,103 @@ def test_internal_token_valid_case_sensitive():
     """Token comparison must be case-sensitive — 'Secret' != 'secret'."""
     assert internal_token_valid("Secret", "secret") is False
     assert internal_token_valid("secret", "secret") is True
+
+
+# ─── Model readiness gate tests ───────────────────────────────────────────────
+
+def test_health_endpoint_returns_200_when_models_not_ready():
+    """/health must return 200 even before models finish loading (liveness probe)."""
+    import main as main_module
+
+    original_state = main_module._models_ready.is_set()
+    main_module._models_ready.clear()
+    try:
+        client = TestClient(app)
+        response = client.get("/health")
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+    finally:
+        if original_state:
+            main_module._models_ready.set()
+        else:
+            main_module._models_ready.clear()
+
+
+def test_ready_endpoint_returns_503_when_models_not_loaded():
+    """/ready must return 503 while models are still loading."""
+    import main as main_module
+
+    original_state = main_module._models_ready.is_set()
+    main_module._models_ready.clear()
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.get("/ready")
+        assert response.status_code == 503
+        data = response.json()
+        assert "error" in data or "detail" in data
+        assert "Retry-After" in response.headers
+    finally:
+        if original_state:
+            main_module._models_ready.set()
+        else:
+            main_module._models_ready.clear()
+
+
+def test_ready_endpoint_returns_200_when_models_loaded():
+    """/ready must return 200 once _models_ready is set."""
+    import main as main_module
+
+    original_state = main_module._models_ready.is_set()
+    main_module._models_ready.set()
+    try:
+        client = TestClient(app)
+        response = client.get("/ready")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ready"
+        assert "embedding_model" in data
+        assert "generation_model" in data
+    finally:
+        if original_state:
+            main_module._models_ready.set()
+        else:
+            main_module._models_ready.clear()
+
+
+def test_ready_endpoint_includes_retry_after_header_on_503():
+    """/ready 503 must carry a Retry-After header so callers know when to retry."""
+    import main as main_module
+
+    original_state = main_module._models_ready.is_set()
+    main_module._models_ready.clear()
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.get("/ready")
+        assert response.status_code == 503
+        retry_after = response.headers.get("Retry-After")
+        assert retry_after is not None, "Retry-After header must be present on 503"
+        assert int(retry_after) > 0
+    finally:
+        if original_state:
+            main_module._models_ready.set()
+        else:
+            main_module._models_ready.clear()
+
+
+def test_health_and_ready_distinction():
+    """/health and /ready return different statuses while models are loading."""
+    import main as main_module
+
+    original_state = main_module._models_ready.is_set()
+    main_module._models_ready.clear()
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+        health_response = client.get("/health")
+        ready_response = client.get("/ready")
+        assert health_response.status_code == 200, "/health must stay 200 (liveness)"
+        assert ready_response.status_code == 503, "/ready must be 503 (not ready)"
+    finally:
+        if original_state:
+            main_module._models_ready.set()
+        else:
+            main_module._models_ready.clear()

@@ -43,16 +43,23 @@ services:
     #           count: 1
     #           capabilities: [gpu]
     healthcheck:
+      # Use /ready (not /health) so Docker waits until models are fully loaded
+      # before routing inference traffic. /health stays 200 the whole time
+      # (liveness); /ready returns 503 until both embedding and generation
+      # models have finished initialising. Without this distinction the
+      # container appears healthy while the first request still pays the full
+      # 30-90s model-load penalty.
       test:
         [
           "CMD",
           "python",
           "-c",
-          "import urllib.request; response = urllib.request.urlopen('http://localhost:5000/health', timeout=5); response.read(1); response.close()",
+          "import urllib.request; response = urllib.request.urlopen('http://localhost:5000/ready', timeout=10); response.read(1); response.close()",
         ]
       interval: 30s
-      timeout: 10s
-      retries: 3
+      timeout: 15s
+      retries: 6
+      start_period: 120s
 
   backend:
     build:

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, HTTPException, File, UploadFile, Form
+from fastapi import Depends, FastAPI, Request, HTTPException, File, UploadFile, Form
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field, field_validator
@@ -322,7 +322,109 @@ async def internal_auth_middleware(request: Request, call_next):
 
 @app.get("/health")
 def health_check():
+    """Liveness probe — returns 200 as long as the process is alive.
+
+    Docker Compose and Kubernetes liveness probes should call this endpoint.
+    It answers immediately without checking whether the embedding or generation
+    models have finished loading. Use /ready for readiness checks.
+    """
     return {"status": "ok"}
+
+
+# ── Model readiness gate ──────────────────────────────────────────────────────
+# Models are loaded eagerly on startup (unless LAZY_MODEL_LOAD=true). The
+# _models_ready Event is set once both models return successfully from their
+# loaders. Until that event is set, inference endpoints return 503 with a
+# Retry-After header so callers know to back off rather than queue indefinitely.
+#
+# LAZY_MODEL_LOAD=true skips pre-loading (useful in unit tests and local dev
+# where you want a fast startup and do not intend to call inference). The event
+# is set immediately, so no 503s are produced in that mode.
+
+LAZY_MODEL_LOAD: bool = os.getenv("LAZY_MODEL_LOAD", "false").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+
+_models_ready = threading.Event()
+
+# How long callers should wait before retrying after a 503 (seconds).
+# Should be long enough for the typical model load time on the target hardware.
+MODEL_READY_RETRY_AFTER = int(os.getenv("MODEL_READY_RETRY_AFTER", "30"))
+
+
+def _preload_models() -> None:
+    """Load embedding and generation models in a background thread.
+
+    Sets _models_ready once both succeed so inference endpoints can proceed.
+    Any exception is logged and the event is NOT set — subsequent /ready calls
+    will keep returning 503 until a restart resolves the underlying issue.
+    """
+    try:
+        logger.info("Pre-loading embedding model on startup")
+        get_embedding_model()
+        logger.info("Pre-loading generation model on startup")
+        load_generation_model()
+        _models_ready.set()
+        logger.info("Models ready — readiness gate opened")
+    except Exception:
+        logger.exception(
+            "Model pre-load failed — inference endpoints will return 503 until "
+            "the service is restarted with a working model configuration"
+        )
+
+
+@app.on_event("startup")
+def startup_event() -> None:
+    """FastAPI startup handler — triggers model pre-load unless disabled."""
+    if LAZY_MODEL_LOAD:
+        logger.warning(
+            "LAZY_MODEL_LOAD is enabled — first inference request will pay the "
+            "full model loading latency (~30-90s on CPU). Do not use in production."
+        )
+        _models_ready.set()
+        return
+
+    thread = threading.Thread(target=_preload_models, daemon=True, name="model-preload")
+    thread.start()
+
+
+async def require_models_ready() -> None:
+    """FastAPI dependency: raises 503 if models have not finished loading.
+
+    Applied to all inference endpoints (/process-pdf, /ask, /ask/stream,
+    /summarize) so that callers receive a clear, retryable error rather than
+    queuing indefinitely behind the model loader thread.
+    """
+    if not _models_ready.is_set():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The AI service is starting up and loading models. "
+                f"Please retry in {MODEL_READY_RETRY_AFTER} seconds."
+            ),
+            headers={"Retry-After": str(MODEL_READY_RETRY_AFTER)},
+        )
+
+
+@app.get("/ready")
+def readiness_check() -> dict:
+    """Readiness probe — returns 200 only when models are fully loaded.
+
+    Docker Compose and Kubernetes readiness probes should call this endpoint.
+    Until /ready returns 200 the service should not receive inference traffic.
+    The /health endpoint (liveness) continues to return 200 the entire time.
+    """
+    if not _models_ready.is_set():
+        raise HTTPException(
+            status_code=503,
+            detail="Service is starting up. Models are still loading.",
+            headers={"Retry-After": str(MODEL_READY_RETRY_AFTER)},
+        )
+    return {
+        "status": "ready",
+        "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+        "generation_model": os.getenv("HF_GENERATION_MODEL", "google/flan-t5-base"),
+    }
 
 
 @app.exception_handler(RequestValidationError)
@@ -2106,7 +2208,8 @@ def process_pdf(
     file: UploadFile = File(...),
     session_id: str | None = Form(None),
     original_filename: str | None = Form(None),
-    session_secret: str | None = Form(None)
+    session_secret: str | None = Form(None),
+    _ready: None = Depends(require_models_ready),
 ):
     cleanup_expired_sessions()
 
@@ -2444,8 +2547,7 @@ def processing_status(session_id: str, session_secret: str | None = None):
 
 
 @app.post("/ask")
-
-def ask_question(data: Question):
+def ask_question(data: Question, _ready: None = Depends(require_models_ready)):
     cleanup_expired_sessions()
 
     question = (data.question or "").strip()
@@ -2789,7 +2891,7 @@ def ask_question(data: Question):
     return response_payload
 
 @app.post("/ask/stream")
-def ask_question_stream(data: Question):
+def ask_question_stream(data: Question, _ready: None = Depends(require_models_ready)):
     """
     Streaming variant of /ask. Returns the generated answer as a plain-text
     chunked response so the frontend can render tokens progressively.
@@ -3029,7 +3131,7 @@ def _run_generation_locked(model, generate_kwargs):
 
 
 @app.post("/summarize")
-def summarize_pdf(data: SummarizeRequest):
+def summarize_pdf(data: SummarizeRequest, _ready: None = Depends(require_models_ready)):
     cleanup_expired_sessions()
     session_id = str(data.session_id)
     with sessions_lock:
