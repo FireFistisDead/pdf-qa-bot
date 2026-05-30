@@ -423,7 +423,12 @@ LAZY_MODEL_LOAD: bool = os.getenv("LAZY_MODEL_LOAD", "false").strip().lower() in
     "1", "true", "yes", "on",
 }
 
+# Default-open so that module imports without startup (e.g. pytest without
+# a lifespan context manager) never block existing tests.  The startup event
+# clears the gate when running in production mode before the loader thread
+# sets it again once both models succeed.
 _models_ready = threading.Event()
+_models_ready.set()
 
 MODEL_READY_RETRY_AFTER: int = int(os.getenv("MODEL_READY_RETRY_AFTER", "30"))
 
@@ -451,8 +456,10 @@ def startup_event() -> None:
             "LAZY_MODEL_LOAD is enabled — first inference request will pay the "
             "full model loading latency (~30-90s on CPU). Not for production."
         )
-        _models_ready.set()
+        _models_ready.set()  # Ensure gate is open in lazy mode.
         return
+    # Close the gate while models load, then the thread re-opens it on success.
+    _models_ready.clear()
     threading.Thread(
         target=_preload_models_thread,
         daemon=True,
@@ -514,7 +521,12 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     detail = exc.detail
     if not isinstance(detail, str):
         detail = str(detail)
-    return standard_error_response(exc.status_code, detail)
+    response = standard_error_response(exc.status_code, detail)
+    # Forward any headers set on the exception (e.g. Retry-After for 503).
+    if exc.headers:
+        for header_name, header_value in exc.headers.items():
+            response.headers[header_name] = header_value
+    return response
 
 
 @app.exception_handler(Exception)
