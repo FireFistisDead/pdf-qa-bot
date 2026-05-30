@@ -33,6 +33,9 @@ from main import (
     normalize_session_id,
     get_session_dir,
     _extract_pdf_text_worker,
+    cleanup_expired_sessions,
+    _background_cleanup_loop,
+    SESSION_CLEANUP_INTERVAL_MINUTES,
 )
 
 import secrets as _secrets
@@ -761,6 +764,246 @@ def test_internal_token_valid_case_sensitive():
     assert internal_token_valid("Secret", "secret") is False
     assert internal_token_valid("secret", "secret") is True
 
+
+# ── Issue #264: background session cleanup ────────────────────────────────────
+#
+# cleanup_expired_sessions() must no longer be called inline inside request
+# handlers. These tests verify:
+#   1. The function is not referenced in the hot path of /ask, /summarize,
+#      /process-pdf, /ask/stream, or /sessions/lookup.
+#   2. The background loop coroutine exists and is wired up.
+#   3. SESSION_CLEANUP_INTERVAL_MINUTES is a positive integer.
+#   4. cleanup_expired_sessions() handles an empty session map without error.
+#   5. cleanup_expired_sessions() evicts expired sessions and releases the
+#      sessions_lock before performing any shutil.rmtree calls.
+#   6. cleanup_expired_sessions() enforces MAX_ACTIVE_SESSIONS by evicting
+#      the oldest session when the cap is exceeded.
+
+import inspect
+import asyncio as _asyncio
+import threading as _threading
+from unittest.mock import patch, call as mock_call
+import main as _main_module
+
+
+def test_cleanup_not_called_inline_in_ask_handler():
+    """
+    /ask handler must not call cleanup_expired_sessions().
+    Cleanup now runs on a background schedule; calling it inline on every
+    inference request causes O(N) session scan and sessions_lock contention.
+    """
+    source = inspect.getsource(_main_module.ask_question)
+    assert "cleanup_expired_sessions()" not in source, (
+        "/ask handler must not call cleanup_expired_sessions() inline. "
+        "Cleanup should only run via the background asyncio task."
+    )
+
+
+def test_cleanup_not_called_inline_in_ask_stream_handler():
+    """/ask/stream handler must not call cleanup_expired_sessions() inline."""
+    source = inspect.getsource(_main_module.ask_question_stream)
+    assert "cleanup_expired_sessions()" not in source, (
+        "/ask/stream handler must not call cleanup_expired_sessions() inline."
+    )
+
+
+def test_cleanup_not_called_inline_in_summarize_handler():
+    """/summarize handler must not call cleanup_expired_sessions() inline."""
+    source = inspect.getsource(_main_module.summarize_pdf)
+    assert "cleanup_expired_sessions()" not in source, (
+        "/summarize handler must not call cleanup_expired_sessions() inline."
+    )
+
+
+def test_cleanup_not_called_inline_in_process_pdf_handler():
+    """/process-pdf handler must not call cleanup_expired_sessions() inline.
+
+    Note: _cleanup_expired_sessions_unlocked() is a different, narrower helper
+    called inside sessions_lock during session creation — its presence in this
+    handler is intentional. Only the broad O(N) cleanup_expired_sessions() call
+    must be absent.
+    """
+    source = inspect.getsource(_main_module.process_pdf)
+    # Use the exact call signature so _cleanup_expired_sessions_unlocked() does
+    # not trigger a false positive (it does not contain this exact substring).
+    assert "cleanup_expired_sessions()" not in source, (
+        "/process-pdf handler must not call cleanup_expired_sessions() inline. "
+        "Cleanup should only run via the background asyncio task."
+    )
+
+
+def test_cleanup_not_called_inline_in_lookup_sessions_handler():
+    """/sessions/lookup handler must not call cleanup_expired_sessions() inline."""
+    source = inspect.getsource(_main_module.lookup_sessions)
+    assert "cleanup_expired_sessions()" not in source, (
+        "/sessions/lookup handler must not call cleanup_expired_sessions() inline."
+    )
+
+
+def test_session_cleanup_interval_is_positive_integer():
+    """SESSION_CLEANUP_INTERVAL_MINUTES must be a positive integer >= 1."""
+    assert isinstance(SESSION_CLEANUP_INTERVAL_MINUTES, int), (
+        "SESSION_CLEANUP_INTERVAL_MINUTES must be an int"
+    )
+    assert SESSION_CLEANUP_INTERVAL_MINUTES >= 1, (
+        "SESSION_CLEANUP_INTERVAL_MINUTES must be >= 1 to prevent a tight spin loop"
+    )
+
+
+def test_background_cleanup_loop_is_async_coroutine():
+    """_background_cleanup_loop must be an async function (coroutine function)."""
+    assert _asyncio.iscoroutinefunction(_background_cleanup_loop), (
+        "_background_cleanup_loop must be declared with 'async def' so it can "
+        "yield control to the event loop between cleanup runs."
+    )
+
+
+def test_cleanup_expired_sessions_noop_on_empty_sessions():
+    """cleanup_expired_sessions() on an empty session map must not raise."""
+    original = _main_module.sessions.copy()
+    _main_module.sessions.clear()
+    try:
+        cleanup_expired_sessions()
+    finally:
+        _main_module.sessions.update(original)
+
+
+def test_cleanup_expired_sessions_removes_expired_entry():
+    """
+    An expired session (last_accessed far in the past) must be removed from
+    the sessions dict and its session_dir queued for deletion outside the lock.
+    """
+    import time as _time
+
+    sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    fake_dir = "/tmp/nonexistent-session-dir-test-only"
+
+    original = dict(_main_module.sessions)
+    _main_module.sessions[sid] = {
+        "last_accessed": 0,  # epoch — always expired
+        "created_at": 0,
+        "session_dir": fake_dir,
+        "session_secret": "test-secret",
+        "lock": _threading.Lock(),
+        "vectorstore": None,
+        "documents": [],
+        "chat": [],
+    }
+
+    rmtree_calls = []
+
+    def fake_rmtree(path, **kwargs):
+        rmtree_calls.append(path)
+
+    with patch.object(_main_module.shutil, "rmtree", side_effect=fake_rmtree):
+        with patch.object(_main_module, "save_sessions_unlocked"):
+            with patch.object(_main_module, "cleanup_expired_persisted_sessions"):
+                cleanup_expired_sessions()
+
+    try:
+        assert sid not in _main_module.sessions, (
+            "Expired session must be removed from the in-memory sessions dict"
+        )
+    finally:
+        # Restore any sessions that were there before the test.
+        _main_module.sessions.clear()
+        _main_module.sessions.update(original)
+
+
+def test_cleanup_expired_sessions_evicts_oldest_when_over_cap():
+    """
+    When the session count exceeds MAX_ACTIVE_SESSIONS, cleanup must evict
+    the oldest session (lowest created_at) to bring the count back to the cap.
+    """
+    import copy as _copy
+
+    original = dict(_main_module.sessions)
+    original_cap = _main_module.MAX_ACTIVE_SESSIONS
+
+    # Temporarily lower the cap to 1 so a second session causes eviction.
+    _main_module.MAX_ACTIVE_SESSIONS = 1
+
+    sid_old = "00000000-0000-0000-0000-000000000001"
+    sid_new = "00000000-0000-0000-0000-000000000002"
+    now = _main_module.now_ts()
+
+    def _make_session(created_at, last_accessed):
+        return {
+            "created_at": created_at,
+            "last_accessed": last_accessed,
+            "session_dir": None,
+            "session_secret": "s",
+            "lock": _threading.Lock(),
+            "vectorstore": None,
+            "documents": [],
+            "chat": [],
+        }
+
+    _main_module.sessions.clear()
+    _main_module.sessions[sid_old] = _make_session(now - 1000, now)
+    _main_module.sessions[sid_new] = _make_session(now, now)
+
+    try:
+        with patch.object(_main_module, "save_sessions_unlocked"):
+            with patch.object(_main_module, "cleanup_expired_persisted_sessions"):
+                cleanup_expired_sessions()
+
+        assert sid_old not in _main_module.sessions, (
+            "Oldest session must be evicted when MAX_ACTIVE_SESSIONS is exceeded"
+        )
+        assert sid_new in _main_module.sessions, (
+            "Newer session must be retained after eviction"
+        )
+    finally:
+        _main_module.sessions.clear()
+        _main_module.sessions.update(original)
+        _main_module.MAX_ACTIVE_SESSIONS = original_cap
+
+
+def test_cleanup_holds_lock_only_for_dict_mutation_not_disk_io():
+    """
+    shutil.rmtree must never be called while sessions_lock is held.
+    The lock should be released before any filesystem operation.
+    """
+    import threading as _t
+
+    sid = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    fake_dir = "/tmp/nonexistent-lock-test-dir"
+
+    original = dict(_main_module.sessions)
+    _main_module.sessions[sid] = {
+        "last_accessed": 0,
+        "created_at": 0,
+        "session_dir": fake_dir,
+        "session_secret": "x",
+        "lock": _t.Lock(),
+        "vectorstore": None,
+        "documents": [],
+        "chat": [],
+    }
+
+    lock_held_during_rmtree = []
+
+    def fake_rmtree(path, **kwargs):
+        # sessions_lock.locked() returns True if ANY thread holds the lock.
+        # Because this test runs single-threaded, the lock must be released
+        # before we get here.
+        lock_held_during_rmtree.append(_main_module.sessions_lock.locked())
+
+    with patch.object(_main_module.shutil, "rmtree", side_effect=fake_rmtree):
+        with patch.object(_main_module, "save_sessions_unlocked"):
+            with patch.object(_main_module, "cleanup_expired_persisted_sessions"):
+                cleanup_expired_sessions()
+
+    try:
+        for held in lock_held_during_rmtree:
+            assert not held, (
+                "sessions_lock must NOT be held during shutil.rmtree — "
+                "disk I/O inside the lock blocks all concurrent request handlers"
+            )
+    finally:
+        _main_module.sessions.clear()
+        _main_module.sessions.update(original)
 def test_stream_lazy_load_faiss_uses_get_embedding_model():
     import main as main_module
     from unittest.mock import patch, MagicMock
