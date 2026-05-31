@@ -23,7 +23,7 @@ jobs:
         run: npm ci
 
       - name: Run backend security audit
-        run: npm audit --audit-level=high || true
+        run: npm audit --audit-level=high
 
       - name: Run backend tests
         run: npm test
@@ -57,7 +57,7 @@ jobs:
       - name: Run Python SAST (Bandit)
         run: |
           cd rag-service
-          bandit -r . -ll -ii || true
+          bandit -r . -ll -ii
 
       - name: Run RAG tests
         run: |
@@ -85,7 +85,7 @@ jobs:
       - name: Run frontend security audit
         run: |
           cd frontend
-          npm audit --audit-level=high || true
+          npm audit --audit-level=high
 
       - name: Build frontend
         run: |

@@ -39,6 +39,8 @@ exports.signup = async (req, res) => {
       return res.status(400).json({ message: "Invalid input types" });
     }
     
+    email = normalizeEmail(email);
+    
     if (email.length > 255 || password.length > 1024) {
       return res.status(400).json({ message: "Input exceeds maximum allowed length" });
     }
@@ -47,8 +49,6 @@ exports.signup = async (req, res) => {
     if (!emailRegex.test(email)) {
       return res.status(400).json({ message: "Invalid email format" });
     }
-    
-    email = normalizeEmail(email);
 
     const validation = validatePassword(password);
 
@@ -108,11 +108,11 @@ exports.login = async (req, res) => {
       return res.status(400).json({ message: "Invalid input types" });
     }
 
+    email = normalizeEmail(email);
+
     if (email.length > 255 || password.length > 1024) {
       return res.status(400).json({ message: "Input exceeds maximum allowed length" });
     }
-    
-    email = normalizeEmail(email);
 
     const users = getUsers();
 
