@@ -689,9 +689,23 @@ const getSessionSecretFromCookie = async (req, sessionId) => {
   }
 
   const cookies = readRequestCookies(req);
-  const token = normalizeSessionSecret(cookies[getSessionSecretCookieName(sessionId)]);
-  if (!token) return null;
-  return await _lookupSessionSecret(token);
+  const rawCookieValue = normalizeSessionSecret(cookies[getSessionSecretCookieName(sessionId)]);
+  if (!rawCookieValue) return null;
+
+  const resolvedFromStore = await _lookupSessionSecret(rawCookieValue);
+  if (resolvedFromStore) {
+    return resolvedFromStore;
+  }
+
+  // Legacy compatibility: older clients/tests may still send the plaintext
+  // session secret in the cookie. Only accept the raw value when it is not one
+  // of our generated UUID-like tokens, so token loss on restart does not
+  // silently fall back to an opaque token string.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(rawCookieValue)) {
+    return rawCookieValue;
+  }
+
+  return null;
 };
 
 const resolveSessionSecret = async (req, sessionId, providedSecret) =>
