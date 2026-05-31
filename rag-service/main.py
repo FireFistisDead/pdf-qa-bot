@@ -1,10 +1,12 @@
-from fastapi import FastAPI, Request, HTTPException, File, UploadFile, Form
+from fastapi import FastAPI, Request, HTTPException, File, UploadFile, Form, Header
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.exceptions import RequestValidationError
+from contextlib import asynccontextmanager
 from pydantic import BaseModel, Field, field_validator
 from pathlib import Path
 from uuid import UUID
 from contextlib import contextmanager
+import asyncio
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from dotenv import load_dotenv
@@ -19,6 +21,7 @@ import torch
 import multiprocessing
 import os
 import secrets
+import hashlib
 import shutil
 import urllib.request
 import urllib.error
@@ -174,7 +177,7 @@ def save_sessions_unlocked():
                 "retrieval_cache": {},  # Do not persist retrieval cache (contains Document objects)
                 "chat": meta.get("chat", []),
                 "flashcards": meta.get("flashcards", []),
-                "session_secret": meta.get("session_secret"),
+                "hashed_session_secret": meta.get("hashed_session_secret") or _hash_secret(meta.get("session_secret", "")),
             }
 
         with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
@@ -190,7 +193,7 @@ sessions = load_sessions()
 # per-session session_meta.json file. Protected by sessions_lock.
 # The background flush thread drains this set on each wake cycle.
 _dirty_sessions: set = set()
-
+_dirty_registry_sessions: set = set()
 processing_progress = {}
 def update_processing_progress(session_id, stage, progress):
     payload = {
@@ -207,6 +210,19 @@ def update_processing_progress(session_id, stage, progress):
             meta["processing_progress"] = payload
 
 INTERNAL_RAG_TOKEN = os.getenv("INTERNAL_RAG_TOKEN", "").strip()
+PROTECTED_RAG_PATHS = {
+    "/process-pdf",
+    "/ask",
+    "/ask/stream",
+    "/summarize",
+    "/knowledge-gaps",
+    "/validate-session-write",
+    "/sessions/lookup",
+}
+PROTECTED_RAG_PREFIXES = (
+    "/ask/",
+    "/processing-status/",
+)
 
 
 def internal_token_valid(provided: str | None, expected: str) -> bool:
@@ -231,6 +247,11 @@ PDF_PARSE_TIMEOUT_SECONDS = int(os.getenv("PDF_PARSE_TIMEOUT_SECONDS", "20"))
 MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "200"))
 MAX_PDF_EXTRACT_CHARS = int(os.getenv("MAX_PDF_EXTRACT_CHARS", "400000"))
 
+# Maximum PDF upload size in megabytes. Must match the Express gateway's
+# MAX_UPLOAD_SIZE_MB to avoid rejecting files that pass the gateway check.
+# Default: 50 MB (same as Express gateway default)
+MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "50"))
+
 try:
     from langchain_core.documents import Document  # type: ignore
 except Exception:  # pragma: no cover
@@ -238,6 +259,19 @@ except Exception:  # pragma: no cover
 
 def generate_session_secret() -> str:
     return secrets.token_urlsafe(32)
+
+
+def _hash_secret(secret: str | None) -> str:
+    """Return the SHA-256 hex digest of *secret* for persistent storage.
+
+    Only the hash is written to disk so that a compromised session file does
+    not leak the plaintext secret.  Comparison at authentication time re-hashes
+    the client-supplied value and compares digests.
+    Returns empty string when *secret* is None or empty.
+    """
+    if not secret:
+        return ""
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
 def standard_error_response(status_code: int, detail: str, **extra):
@@ -361,35 +395,21 @@ async def internal_auth_middleware(request: Request, call_next):
       2. Prefix set — covers entire sub-trees so that any future sub-route (e.g.
          /ask/v2/stream) is automatically protected without requiring a code change here.
     """
-    protected_paths = {
-        "/process-pdf",
-        "/ask",
-        "/ask/stream",
-        "/summarize",
-        "/knowledge-gaps",
-        "/validate-session-write",
-        "/sessions/lookup",
-    }
 
-    # Prefix-based guard: any sub-path under these trees is also protected.
-    # This ensures that adding a new streaming variant or versioned route can
-    # never silently bypass auth because a developer forgot to update the set above.
-    protected_prefixes = (
-        "/ask/",
-        "/processing-status/",
-    )
-
-    path = request.url.path
+    raw_path = request.url.path
+    # Normalize one trailing slash (except root) so /process-pdf and /process-pdf/
+    # are protected identically.
+    path = raw_path if raw_path == "/" else raw_path.rstrip("/")
 
     if (
-        path in protected_paths
-        or any(path.startswith(prefix) for prefix in protected_prefixes)
+        path in PROTECTED_RAG_PATHS
+        or any(path.startswith(prefix) for prefix in PROTECTED_RAG_PREFIXES)
     ):
         provided = request.headers.get("X-Internal-Token")
         if not internal_token_valid(provided, INTERNAL_RAG_TOKEN):
             logger.warning(
                 "Internal auth rejected path=%s ip=%s",
-                path,
+                raw_path,
                 request.client.host if request.client else "unknown",
             )
             return standard_error_response(403, "Forbidden")
@@ -435,6 +455,8 @@ generation_lock = threading.Lock()
 # Configurable session TTL and max cap
 SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "43200"))  # 30 days default for persistence
 MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "1000"))
+# How often the background cleanup task sweeps for expired sessions (minutes).
+SESSION_CLEANUP_INTERVAL_MINUTES = max(1, int(os.getenv("SESSION_CLEANUP_INTERVAL_MINUTES", "5")))
 MAX_DOCUMENTS_PER_SESSION = int(os.getenv("MAX_DOCUMENTS_PER_SESSION", "5"))
 MAX_CHUNKS_PER_SESSION = int(os.getenv("MAX_CHUNKS_PER_SESSION", "2000"))
 ASK_RETRIEVAL_CANDIDATES = int(os.getenv("ASK_RETRIEVAL_CANDIDATES", "12"))
@@ -457,6 +479,9 @@ ASK_REQUIRE_CITATIONS = os.getenv("ASK_REQUIRE_CITATIONS", "true").strip().lower
 RETRIEVAL_CACHE_LIMIT = int(os.getenv("RETRIEVAL_CACHE_LIMIT", "25"))
 RETRIEVAL_CACHE_TTL_SECONDS = int(
     os.getenv("RETRIEVAL_CACHE_TTL_SECONDS", "1800")
+)
+SESSION_TOUCH_PERSIST_INTERVAL_SECONDS = int(
+    os.getenv("SESSION_TOUCH_PERSIST_INTERVAL_SECONDS", "300")
 )
 
 # ── Semantic Chunking Config ─────────────────────────────────────────────────
@@ -529,7 +554,7 @@ def cleanup_retrieval_cache(retrieval_cache):
 
         cached_at = value.get("cached_at")
 
-        if not cached_at:
+        if not isinstance(cached_at, (int, float)):
             expired_keys.append(key)
             continue
 
@@ -550,10 +575,28 @@ def cleanup_retrieval_cache(retrieval_cache):
 
 
 def ensure_retrieval_cache(session: dict) -> OrderedDict:
-    retrieval_cache = session.setdefault("retrieval_cache", OrderedDict())
+
+    retrieval_cache = session.get("retrieval_cache")
+
     if not isinstance(retrieval_cache, OrderedDict):
-        retrieval_cache = OrderedDict(retrieval_cache)
+
+        normalized_cache = OrderedDict()
+
+        if isinstance(retrieval_cache, dict):
+
+            for key, value in retrieval_cache.items():
+
+                if (
+                    isinstance(value, dict)
+                    and "scored_candidates" in value
+                ):
+                    normalized_cache[key] = value
+
+        retrieval_cache = normalized_cache
         session["retrieval_cache"] = retrieval_cache
+
+    cleanup_retrieval_cache(retrieval_cache)
+
     return retrieval_cache
 
 
@@ -659,7 +702,7 @@ def persist_session_registry_entry(session_id: str, meta: dict):
             "expires_at": session_expires_at(last_accessed),
             "documents": list(meta.get("documents", [])),
             "session_dir": session_dir,
-            "session_secret": meta.get("session_secret"),
+            "hashed_session_secret": meta.get("hashed_session_secret") or _hash_secret(meta.get("session_secret", "")),
         }
         write_session_registry_unlocked(registry)
 
@@ -756,10 +799,18 @@ def _recover_session_unlocked(session_id: str):
         "lock": threading.Lock(),
         "documents": list(entry.get("documents", [])),
         "session_secret": entry.get("session_secret"),
+        "hashed_session_secret": entry.get("hashed_session_secret"),
         "session_dir": session_dir,
         "created_at": float(entry.get("created_at", last_accessed) or last_accessed),
         "last_accessed": last_accessed,
     }
+
+    try:
+        indexed_documents = collect_index_documents(vectorstore)
+        _migrate_session_document_ids(meta, indexed_documents)
+    except Exception:
+        logger.exception("Failed to migrate legacy document_ids session_id=%s", session_id)
+
     sessions[session_id] = meta
     logger.info("Recovered persisted session session_id=%s", session_id)
     return meta
@@ -805,30 +856,55 @@ def cleanup_failed_session(session_id: str):
         )
 def cleanup_expired_sessions():
     """
-    Remove expired sessions and enforce max session cap.
+    Remove expired sessions and enforce the max session cap.
+
+    Lock discipline: acquire sessions_lock only for dict mutation and
+    save_sessions_unlocked. All shutil.rmtree calls happen after the lock
+    is released so that disk I/O never extends the lock hold time.
+    This function is safe to call from a background thread or via
+    asyncio.get_event_loop().run_in_executor.
     """
     expired = []
-    expired_dirs = {}
+    dirs_to_remove: list[str] = []
     evicted_count = 0
     active_sessions = 0
+
     with sessions_lock:
         ttl_seconds = SESSION_TTL_MINUTES * 60
         for sid, meta in list(sessions.items()):
             if now_ts() - meta["last_accessed"] > ttl_seconds:
                 expired.append(sid)
-                expired_dirs[sid] = meta.get("session_dir")
+                session_dir = meta.get("session_dir")
+                if session_dir:
+                    dirs_to_remove.append(session_dir)
         for sid in expired:
             del sessions[sid]
         while len(sessions) > MAX_ACTIVE_SESSIONS:
             oldest = min(sessions.items(), key=lambda x: x[1]["created_at"])[0]
-            expired_dirs[oldest] = sessions[oldest].get("session_dir")
+            session_dir = sessions[oldest].get("session_dir")
+            if session_dir:
+                dirs_to_remove.append(session_dir)
             del sessions[oldest]
             expired.append(oldest)
             evicted_count += 1
         active_sessions = len(sessions)
         if expired or evicted_count:
             save_sessions_unlocked()
-            cleanup_expired_persisted_sessions(expired_dirs)
+
+    # Perform disk cleanup outside the lock so concurrent requests are not
+    # blocked while rmtree traverses the filesystem.
+    if dirs_to_remove or expired:
+        cleanup_expired_persisted_sessions({sid: None for sid in expired})
+        for session_dir in dirs_to_remove:
+            try:
+                target_path = Path(session_dir).resolve()
+                if target_path.is_dir() and PERSIST_PATH in target_path.parents:
+                    shutil.rmtree(target_path)
+            except Exception:
+                logger.exception(
+                    "Background cleanup failed to remove session dir path=%s", session_dir
+                )
+
     if expired or evicted_count:
         logger.info(
             "Session cleanup completed expired=%s evicted=%s active=%s",
@@ -836,6 +912,51 @@ def cleanup_expired_sessions():
             evicted_count,
             active_sessions,
         )
+
+
+async def _background_cleanup_loop() -> None:
+    """
+    Asyncio background task: run cleanup_expired_sessions on a configurable
+    interval without blocking the event loop.
+
+    shutil.rmtree is I/O-bound and runs in a thread pool executor so the
+    event loop stays responsive. asyncio.sleep yields control between runs.
+    """
+    loop = asyncio.get_event_loop()
+    interval_seconds = SESSION_CLEANUP_INTERVAL_MINUTES * 60
+    logger.info(
+        "Background session cleanup started interval_minutes=%s",
+        SESSION_CLEANUP_INTERVAL_MINUTES,
+    )
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            await loop.run_in_executor(None, cleanup_expired_sessions)
+        except asyncio.CancelledError:
+            logger.info("Background session cleanup task cancelled")
+            break
+        except Exception:
+            logger.exception("Background session cleanup encountered an error")
+
+
+@asynccontextmanager
+async def lifespan(fastapi_app: FastAPI):
+    """Start background tasks on startup and cancel them cleanly on shutdown."""
+    cleanup_task = asyncio.create_task(_background_cleanup_loop())
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
+
+# Wire the lifespan handler into the already-constructed app instance.
+# FastAPI allows this assignment after construction; the lifespan function
+# must be defined after its dependencies (sessions, sessions_lock, etc.) so
+# it cannot be passed to FastAPI() at the call site near the top of the module.
+app.router.lifespan_context = lifespan
 
 
 def _is_session_expired(meta: dict) -> bool:
@@ -852,7 +973,7 @@ def _touch_session_unlocked(session_id: str):
     # Hard-disable legacy sessions created before session secrets existed.
     # These are effectively "session_id-only" capabilities and must be invalidated
     # to avoid cross-user access.
-    if not (meta.get("session_secret") or "").strip():
+    if not (meta.get("session_secret") or meta.get("hashed_session_secret") or "").strip():
         session_dir = meta.get("session_dir")
         try:
             del sessions[session_id]
@@ -867,8 +988,19 @@ def _touch_session_unlocked(session_id: str):
         remove_persisted_session(session_id, session_dir)
         logger.info("Session expired session_id=%s", session_id)
         return None
-    meta["last_accessed"] = now_ts()
-    persist_session_registry_entry(session_id, meta)
+    current_time = now_ts()
+
+    meta["last_accessed"] = current_time
+
+    last_persisted = meta.get("last_persisted_access", 0)
+
+    if (
+        current_time - last_persisted
+        >= SESSION_TOUCH_PERSIST_INTERVAL_SECONDS
+    ):
+        meta["last_persisted_access"] = current_time
+        _dirty_registry_sessions.add(session_id)
+
     return meta
 
 
@@ -886,7 +1018,7 @@ def _peek_session_unlocked(session_id: str):
         meta = _recover_session_unlocked(session_id)
         if not meta:
             return None
-    if not (meta.get("session_secret") or "").strip():
+    if not (meta.get("session_secret") or meta.get("hashed_session_secret") or "").strip():
         session_dir = meta.get("session_dir")
         try:
             del sessions[session_id]
@@ -936,7 +1068,7 @@ def _snapshot_session_for_persistence(meta: dict) -> dict:
         "documents": list(meta.get("documents", [])),
         "chat": list(meta.get("chat", [])),
         "flashcards": list(meta.get("flashcards", [])),
-        "session_secret": meta.get("session_secret"),
+        "hashed_session_secret": meta.get("hashed_session_secret") or _hash_secret(meta.get("session_secret", "")),
     }
 
 
@@ -985,6 +1117,43 @@ def _flush_dirty_sessions() -> None:
         _write_session_meta_file(session_id, data)
     if dirty:
         logger.debug("Flushed metadata for %d dirty session(s)", len(dirty))
+        registry_updates = {}
+
+        with sessions_lock:
+            dirty_registry = set(_dirty_registry_sessions)
+            _dirty_registry_sessions.clear()
+
+            for session_id in dirty_registry:
+                meta = sessions.get(session_id)
+
+                if not meta:
+                    continue
+
+                registry_updates[session_id] = {
+                    "created_at": meta.get("created_at"),
+                    "last_accessed": meta.get("last_accessed"),
+                    "expires_at": session_expires_at(
+                        meta.get("last_accessed", now_ts())
+                    ),
+                    "documents": list(meta.get("documents", [])),
+                    "session_dir": meta.get("session_dir"),
+                    "hashed_session_secret": meta.get("hashed_session_secret") or _hash_secret(meta.get("session_secret", "")),
+                }
+
+        if registry_updates:
+
+            with session_registry_lock():
+
+                registry = read_session_registry_unlocked()
+
+                registry.update(registry_updates)
+
+                write_session_registry_unlocked(registry)
+
+            logger.debug(
+                "Flushed registry metadata for %d session(s)",
+                len(registry_updates),
+            )
 
 
 def _background_flush_loop() -> None:
@@ -1582,9 +1751,30 @@ def build_session_summary(uploaded_documents, indexed_documents):
     document_summaries = []
     grouped_for_insights = {}
     for uploaded_document in uploaded_documents:
-        document_chunks = documents_for_upload(indexed_documents, uploaded_document["document_id"])
+        document_id = uploaded_document.get("document_id")
+        filename = uploaded_document.get("filename")
+        document_chunks = documents_for_upload(indexed_documents, document_id)
+        if not document_chunks and filename:
+            legacy_candidates = [
+                doc for doc in indexed_documents
+                if doc.metadata.get("filename") == filename
+            ]
+            legacy_ids = {
+                doc.metadata.get("document_id")
+                for doc in legacy_candidates
+                if doc.metadata.get("document_id")
+            }
+            if legacy_ids:
+                logger.warning(
+                    "Orphaned document_id detected in session summary filename=%s uploaded_document_id=%s candidate_ids=%s",
+                    filename,
+                    document_id,
+                    sorted(legacy_ids),
+                )
+            if len(legacy_ids) == 1:
+                document_chunks = legacy_candidates
         document_chunks = unique_documents(document_chunks)
-        filename = uploaded_document["filename"]
+        filename = filename or "Unknown Document"
         grouped_for_insights[filename] = document_chunks
         bullets = build_document_summary_bullets(document_chunks)
         document_summaries.append(f"## {filename}\n\n{markdown_bullets(bullets)}")
@@ -1592,6 +1782,55 @@ def build_session_summary(uploaded_documents, indexed_documents):
     if combined_insights:
         document_summaries.append(f"## Combined Insights\n\n{markdown_bullets(combined_insights)}")
     return "\n\n".join(document_summaries)
+
+
+def _migrate_session_document_ids(meta: dict, indexed_documents: list) -> bool:
+    """Best-effort fix for sessions created when process_pdf regenerated document_id.
+
+    If a stored uploaded_document.document_id has no matching indexed chunks, but
+    the filename matches exactly one chunk-level document_id, update the stored
+    id to restore per-document lineage (summary, citations, frontend source jump).
+    """
+    uploaded_documents = meta.get("documents") or []
+    if not uploaded_documents or not indexed_documents:
+        return False
+
+    changed = False
+    by_filename = {}
+    for doc in indexed_documents:
+        fname = doc.metadata.get("filename")
+        if not fname:
+            continue
+        by_filename.setdefault(fname, []).append(doc)
+
+    for uploaded_document in uploaded_documents:
+        stored_id = uploaded_document.get("document_id")
+        fname = uploaded_document.get("filename")
+        if not stored_id or not fname:
+            continue
+        if any(doc.metadata.get("document_id") == stored_id for doc in indexed_documents):
+            continue
+
+        candidates = by_filename.get(fname) or []
+        candidate_ids = {
+            doc.metadata.get("document_id")
+            for doc in candidates
+            if doc.metadata.get("document_id")
+        }
+        if len(candidate_ids) != 1:
+            continue
+
+        new_id = next(iter(candidate_ids))
+        uploaded_document["document_id"] = new_id
+        changed = True
+        logger.warning(
+            "Migrated legacy uploaded document_id filename=%s old_id=%s new_id=%s",
+            fname,
+            stored_id,
+            new_id,
+        )
+
+    return changed
 
 
 def representative_documents_by_source(documents, per_document_limit=2, max_documents=ASK_MAX_CONTEXT_CHUNKS):
@@ -2212,6 +2451,14 @@ def _require_session_secret(session: dict, provided_secret: str | None):
     if not candidate:
         raise HTTPException(status_code=403, detail="Forbidden")
 
+    # Prefer hashed secret comparison (new format).
+    stored_hash = (session.get("hashed_session_secret") or "").strip()
+    if stored_hash:
+        if not secrets.compare_digest(_hash_secret(candidate), stored_hash):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return
+
+    # Fall back to plaintext comparison (legacy sessions).
     expected = (session.get("session_secret") or "").strip()
     if not expected or not secrets.compare_digest(candidate, expected):
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -2219,8 +2466,6 @@ def _require_session_secret(session: dict, provided_secret: str | None):
 
 @app.post("/sessions/lookup")
 def lookup_sessions(data: SessionsLookupRequest):
-    cleanup_expired_sessions()
-
     sessions_out = []
 
     with sessions_lock:
@@ -2276,8 +2521,6 @@ def process_pdf(
     original_filename: str | None = Form(None),
     session_secret: str | None = Form(None)
 ):
-    cleanup_expired_sessions()
-
     # If original_filename is provided, use it for display, otherwise fallback to the file's name (which might be a UUID)
     filename = original_filename or file.filename or "uploaded.pdf"
     if not filename.lower().endswith(".pdf"):
@@ -2311,13 +2554,13 @@ def process_pdf(
             )
         file.file.seek(0)  # Reset stream so we can copy the full file
 
-        max_size = 20 * 1024 * 1024
+        max_size = MAX_UPLOAD_SIZE_MB * 1024 * 1024
         bytes_written = 0
         with open(temp_path, "wb") as f:
             while chunk := file.file.read(65536):
                 bytes_written += len(chunk)
                 if bytes_written > max_size:
-                    raise HTTPException(status_code=413, detail="Uploaded PDF exceeds the maximum size of 20MB.")
+                    raise HTTPException(status_code=413, detail=f"Uploaded PDF exceeds the maximum size of {MAX_UPLOAD_SIZE_MB}MB.")
                 f.write(chunk)
 
         if bytes_written == 0:
@@ -2374,9 +2617,14 @@ def process_pdf(
                 session = _peek_session_unlocked(requested_session_id)
                 if not session:
                     raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-                expected_secret = (session.get("session_secret") or "").strip()
-                if not expected_secret or not requested_session_secret or not secrets.compare_digest(requested_session_secret, expected_secret):
-                    raise HTTPException(status_code=403, detail="Forbidden")
+                stored_hash = (session.get("hashed_session_secret") or "").strip()
+                if stored_hash:
+                    if not requested_session_secret or not secrets.compare_digest(_hash_secret(requested_session_secret), stored_hash):
+                        raise HTTPException(status_code=403, detail="Forbidden")
+                else:
+                    expected_secret = (session.get("session_secret") or "").strip()
+                    if not expected_secret or not requested_session_secret or not secrets.compare_digest(requested_session_secret, expected_secret):
+                        raise HTTPException(status_code=403, detail="Forbidden")
                 if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
                     raise HTTPException(status_code=400, detail="Maximum number of documents per session reached.")
                 current_chunks = sum(doc.get("chunk_count", 0) for doc in session.get("documents", []))
@@ -2388,7 +2636,6 @@ def process_pdf(
             detail=f"PDF is too large to index. A single document may not exceed {MAX_CHUNKS_PER_SESSION} chunks.",
         )
 
-    document_id = str(uuid.uuid4())
     processing_session_id = requested_session_id
     created_placeholder_session = False
 
@@ -2405,6 +2652,7 @@ def process_pdf(
                 "lock": threading.Lock(),
                 "documents": [],
                 "session_secret": new_session_secret,
+                "hashed_session_secret": _hash_secret(new_session_secret),
                 "session_dir": None,
                 "created_at": created_at,
                 "last_accessed": created_at,
@@ -2474,6 +2722,12 @@ def process_pdf(
                 session = _touch_session_unlocked(requested_session_id)
                 if not session:
                     raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
+                # Re-validate quotas inside the merge lock to prevent TOCTOU
+                if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
+                    raise HTTPException(status_code=400, detail="Maximum number of documents per session reached.")
+                current_chunks = sum(doc.get("chunk_count", 0) for doc in session.get("documents", []))
+                if current_chunks + len(chunks) > MAX_CHUNKS_PER_SESSION:
+                    raise HTTPException(status_code=400, detail="Maximum number of chunks per session exceeded.")
                 ensure_retrieval_cache(session)
                 if "lock" not in session:
                     session["lock"] = threading.Lock()
@@ -2521,6 +2775,7 @@ def process_pdf(
                     )
 
                 session_secret = existing_session.get("session_secret")
+                hashed_secret = existing_session.get("hashed_session_secret") or (_hash_secret(session_secret) if session_secret else None)
                 created_at = existing_session.get("created_at", now)
 
             session_dir = persist_vectorstore(session_id, new_vectorstore)
@@ -2537,6 +2792,7 @@ def process_pdf(
                     "lock": threading.Lock(),
                     "documents": [uploaded_document],
                     "session_secret": session_secret,
+                    "hashed_session_secret": hashed_secret,
                     "session_dir": session_dir,
                     "created_at": created_at,
                     "last_accessed": now,
@@ -2584,9 +2840,7 @@ def validate_session_write(data: SessionWriteRequest):
             if not session:
                 raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
 
-            expected_secret = (session.get("session_secret") or "").strip()
-            if not expected_secret or not secrets.compare_digest(provided_secret, expected_secret):
-                raise HTTPException(status_code=403, detail="Forbidden")
+            _require_session_secret(session, provided_secret)
 
     return {"allowed": True}
 
@@ -2594,12 +2848,15 @@ def validate_session_write(data: SessionWriteRequest):
 
 
 @app.get("/processing-status/{session_id}")
-def processing_status(session_id: str, session_secret: str | None = None):
+def processing_status(
+    session_id: str,
+    x_session_secret: str | None = Header(None),
+):
 
     with sessions_lock:
         meta = _touch_session_unlocked(session_id)
         if meta:
-            _require_session_secret(meta, session_secret)
+            _require_session_secret(meta, x_session_secret)
         progress = meta.get("processing_progress") if meta else None
 
     if not progress:
@@ -2614,8 +2871,6 @@ def processing_status(session_id: str, session_secret: str | None = None):
 @app.post("/ask")
 
 def ask_question(data: Question):
-    cleanup_expired_sessions()
-
     question = (data.question or "").strip()
 
     if not question:
@@ -3037,8 +3292,6 @@ def ask_question_stream(data: Question):
     in both `protected_paths` (exact match) and under the `/ask/` prefix guard,
     so it cannot be reached without a valid X-Internal-Token.
     """
-    cleanup_expired_sessions()
-
     question = (data.question or "").strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question is required.")
@@ -3260,6 +3513,19 @@ def ask_question_stream(data: Question):
             full_answer_parts.append(err)
 
         full_answer = "".join(full_answer_parts).strip()
+            generation_thread = threading.Thread(
+                target=_run_generation_locked,
+                args=(model, generate_kwargs),
+                daemon=True,
+            )
+            generation_thread.start()
+
+            full_answer_parts = []
+            for token_text in streamer:
+                if token_text:
+                    full_answer_parts.append(token_text)
+
+            generation_thread.join(timeout=180)
 
         framed = apply_mode_framing(
             full_answer,
@@ -3279,6 +3545,12 @@ def ask_question_stream(data: Question):
 
         with sessions_lock:
             current_session = sessions.get(session_id)
+            yield framed
+
+            citation_sources = [
+                citation_source_for_document(doc, idx)
+                for idx, doc in enumerate(docs)
+            ]
 
             if current_session:
                 ensure_retrieval_cache(current_session)
@@ -3291,7 +3563,13 @@ def ask_question_stream(data: Question):
                     mode,
                 )
 
-            _mark_session_dirty(session_id)
+                    append_chat_exchange(
+                        current_session,
+                        question,
+                        framed,
+                        citation_sources,
+                        mode,
+                    )
 
 
     return StreamingResponse(_generate_and_stream(), media_type="text/plain; charset=utf-8")
@@ -3311,7 +3589,6 @@ def _run_generation_locked(model, generate_kwargs):
 
 @app.post("/summarize")
 def summarize_pdf(data: SummarizeRequest):
-    cleanup_expired_sessions()
     session_id = str(data.session_id)
     with sessions_lock:
         session = _touch_session_unlocked(session_id)

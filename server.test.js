@@ -1,20 +1,37 @@
 const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const http = require("node:http");
+const { spawnSync } = require("node:child_process");
 const axios = require("axios");
 const { Blob } = require("node:buffer");
 
-process.env.INTERNAL_RAG_TOKEN =
-  process.env.INTERNAL_RAG_TOKEN || "test-internal-rag-token";
+const originalInternalRagToken = process.env.INTERNAL_RAG_TOKEN;
+const originalJwtSecret = process.env.JWT_SECRET;
 
-process.env.JWT_SECRET =
-  process.env.JWT_SECRET || "test-secret-for-ci";
+before(() => {
+  process.env.INTERNAL_RAG_TOKEN = process.env.INTERNAL_RAG_TOKEN || "test-internal-rag-token";
+  process.env.JWT_SECRET = process.env.JWT_SECRET || "test-jwt-secret";
+});
+
+after(() => {
+  if (originalInternalRagToken === undefined) {
+    delete process.env.INTERNAL_RAG_TOKEN;
+  } else {
+    process.env.INTERNAL_RAG_TOKEN = originalInternalRagToken;
+  }
+
+  if (originalJwtSecret === undefined) {
+    delete process.env.JWT_SECRET;
+  } else {
+    process.env.JWT_SECRET = originalJwtSecret;
+  }
+});
 
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
 let app, askSchema, summarizeSchema, extractServiceDetails, ragAuthHeaders;
 let clientIpFromRequest, normalizeIp;
-test("module loads without error", () => {
+before(() => {
   process.env.JWT_SECRET = "test-secret-for-ci";
   const mod = require("./server.js");
   app = mod.app;
@@ -24,26 +41,55 @@ test("module loads without error", () => {
   ragAuthHeaders = mod.ragAuthHeaders;
 
   ({ clientIpFromRequest, normalizeIp } = require("./security/ip"));
+});
 
+test("module loads without error", () => {
   assert.ok(typeof app === "function", "app should be an Express app");
   assert.ok(typeof askSchema.safeParse === "function", "askSchema should be a Zod schema");
   assert.ok(typeof summarizeSchema.safeParse === "function", "summarizeSchema should be a Zod schema");
   assert.ok(typeof extractServiceDetails === "function", "extractServiceDetails should be exported for tests");
 });
 
-test("ragAuthHeaders requires and forwards the internal token", () => {
-  assert.deepEqual(ragAuthHeaders(), { "X-Internal-Token": process.env.INTERNAL_RAG_TOKEN });
+test("ragAuthHeaders forwards the internal token", () => {
+  assert.deepEqual(ragAuthHeaders(), { "X-Internal-Token": process.env.INTERNAL_RAG_TOKEN.trim() });
 });
 
-test("ragAuthHeaders throws when the internal token is blank", () => {
-  const originalToken = process.env.INTERNAL_RAG_TOKEN;
+test("server module can be imported when INTERNAL_RAG_TOKEN is unset", () => {
+  const result = spawnSync(
+    process.execPath,
+    ["-e", "require('./server.js')"],
+    {
+      cwd: __dirname,
+      env: {
+        ...process.env,
+        INTERNAL_RAG_TOKEN: "",
+        JWT_SECRET: "test-jwt-secret",
+      },
+      encoding: "utf8",
+    },
+  );
 
-  try {
-    process.env.INTERNAL_RAG_TOKEN = "   ";
-    assert.throws(() => ragAuthHeaders());
-  } finally {
-    process.env.INTERNAL_RAG_TOKEN = originalToken;
-  }
+  assert.equal(result.status, 0);
+});
+
+test("server startup fails when INTERNAL_RAG_TOKEN is unset", () => {
+  const result = spawnSync(
+    process.execPath,
+    ["server.js"],
+    {
+      cwd: __dirname,
+      env: {
+        ...process.env,
+        INTERNAL_RAG_TOKEN: "",
+        JWT_SECRET: "test-jwt-secret",
+      },
+      encoding: "utf8",
+      timeout: 5000,
+    },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stderr}${result.stdout}`, /INTERNAL_RAG_TOKEN must be configured/);
 });
 
 const createPdfUploadBody = ({ sessionId = null, sessionSecret = null } = {}) => {
