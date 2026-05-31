@@ -497,12 +497,26 @@ const SESSION_SECRET_COOKIE_PREFIX = "pdfqa_session_secret_";
 const getSessionSecretCookieName = (sessionId) =>
   `${SESSION_SECRET_COOKIE_PREFIX}${sessionId}`;
 
-// In-memory short-lived token store mapping cookie tokens -> encrypted secrets.
-// To avoid storing session secrets in clear text (CodeQL / CodeQL rule), we
-// encrypt the secret server-side with an operator-provided symmetric key
-// before keeping it in memory. The cookie holds only an opaque token.
-const SESSION_SECRET_MAP = new Map(); // token -> { encrypted: string, expiry }
 const SESSION_SECRET_TTL_MS = (parseInt(process.env.SESSION_SECRET_COOKIE_TTL_DAYS || "7", 10) || 7) * 24 * 60 * 60 * 1000;
+const SESSION_SECRET_REDIS_URL = process.env.SESSION_SECRET_REDIS_URL || RATE_LIMIT_REDIS_URL || process.env.REDIS_URL || "";
+const SESSION_SECRET_REDIS_PREFIX = "session-secret:";
+const SESSION_SECRET_MEMORY_MAP = new Map(); // token -> { encrypted: string, expiry }
+
+let sessionSecretRedisClient = null;
+let sessionSecretRedisConnectPromise = null;
+
+if (SESSION_SECRET_REDIS_URL) {
+  if (redisClient) {
+    sessionSecretRedisClient = redisClient;
+  } else {
+    ({ client: sessionSecretRedisClient, connectPromise: sessionSecretRedisConnectPromise } = createRedisClient(SESSION_SECRET_REDIS_URL));
+  }
+  if (sessionSecretRedisConnectPromise) {
+    void sessionSecretRedisConnectPromise.catch((err) => {
+      console.warn("[session-secret] redis connect failed:", err?.message || err);
+    });
+  }
+}
 
 // Encryption key must be provided via env var as base64-encoded 32 bytes.
 // If not present, generate a runtime-only key (lost on restart) and log a warning.
@@ -556,25 +570,85 @@ const _decryptSecret = (blob) => {
   }
 };
 
-const _storeSessionSecret = (sessionSecret) => {
+const _sessionSecretRedisKey = (token) => `${SESSION_SECRET_REDIS_PREFIX}${token}`;
+
+const _storeSessionSecretInRedis = async (token, encrypted, expiry) => {
+  if (!sessionSecretRedisClient) {
+    return false;
+  }
+
+  try {
+    await sessionSecretRedisClient.set(
+      _sessionSecretRedisKey(token),
+      JSON.stringify({ encrypted, expiry }),
+      { PX: SESSION_SECRET_TTL_MS },
+    );
+    return true;
+  } catch (err) {
+    console.warn("[session-secret] redis write failed:", err?.message || err);
+    return false;
+  }
+};
+
+const _readSessionSecretFromRedis = async (token) => {
+  if (!sessionSecretRedisClient) {
+    return null;
+  }
+
+  try {
+    const raw = await sessionSecretRedisClient.get(_sessionSecretRedisKey(token));
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed.encrypted !== "string") {
+      return null;
+    }
+
+    if (typeof parsed.expiry === "number" && parsed.expiry <= Date.now()) {
+      return null;
+    }
+
+    return parsed.encrypted;
+  } catch (err) {
+    console.warn("[session-secret] redis read failed:", err?.message || err);
+    return null;
+  }
+};
+
+const _storeSessionSecret = async (sessionSecret) => {
   if (!sessionSecret) return null;
   const token = crypto.randomUUID();
   const expiry = Date.now() + SESSION_SECRET_TTL_MS;
   const encrypted = _encryptSecret(sessionSecret);
-  SESSION_SECRET_MAP.set(token, { encrypted, expiry });
-  // Schedule cleanup
-  setTimeout(() => {
-    SESSION_SECRET_MAP.delete(token);
+
+  if (sessionSecretRedisClient) {
+    await _storeSessionSecretInRedis(token, encrypted, expiry);
+  }
+
+  SESSION_SECRET_MEMORY_MAP.set(token, { encrypted, expiry });
+  const timeout = setTimeout(() => {
+    SESSION_SECRET_MEMORY_MAP.delete(token);
   }, SESSION_SECRET_TTL_MS + 1000);
+  if (typeof timeout.unref === "function") {
+    timeout.unref();
+  }
   return token;
 };
 
-const _lookupSessionSecret = (token) => {
+const _lookupSessionSecret = async (token) => {
   if (!token) return null;
-  const entry = SESSION_SECRET_MAP.get(token);
+
+  const encryptedFromRedis = await _readSessionSecretFromRedis(token);
+  if (encryptedFromRedis) {
+    return _decryptSecret(encryptedFromRedis);
+  }
+
+  const entry = SESSION_SECRET_MEMORY_MAP.get(token);
   if (!entry) return null;
   if (entry.expiry <= Date.now()) {
-    SESSION_SECRET_MAP.delete(token);
+    SESSION_SECRET_MEMORY_MAP.delete(token);
     return null;
   }
   return _decryptSecret(entry.encrypted);
@@ -609,7 +683,7 @@ const readRequestCookies = (req) => {
   }, {});
 };
 
-const getSessionSecretFromCookie = (req, sessionId) => {
+const getSessionSecretFromCookie = async (req, sessionId) => {
   if (!sessionId) {
     return null;
   }
@@ -617,19 +691,19 @@ const getSessionSecretFromCookie = (req, sessionId) => {
   const cookies = readRequestCookies(req);
   const token = normalizeSessionSecret(cookies[getSessionSecretCookieName(sessionId)]);
   if (!token) return null;
-  return _lookupSessionSecret(token);
+  return await _lookupSessionSecret(token);
 };
 
-const resolveSessionSecret = (req, sessionId, providedSecret) =>
+const resolveSessionSecret = async (req, sessionId, providedSecret) =>
   normalizeSessionSecret(providedSecret) || getSessionSecretFromCookie(req, sessionId);
 
-const setSessionSecretCookie = (res, sessionId, sessionSecret) => {
+const setSessionSecretCookie = async (res, sessionId, sessionSecret) => {
   if (!sessionId || !sessionSecret) {
     return;
   }
 
   // Store the real secret server-side and put only a random token in the cookie.
-  const token = _storeSessionSecret(sessionSecret);
+  const token = await _storeSessionSecret(sessionSecret);
   if (!token) return;
 
   res.cookie(getSessionSecretCookieName(sessionId), token, {
@@ -641,20 +715,20 @@ const setSessionSecretCookie = (res, sessionId, sessionSecret) => {
   });
 };
 
-const attachSessionSecrets = (req, sessions) => {
+const attachSessionSecrets = async (req, sessions) => {
   if (!Array.isArray(sessions)) {
     return [];
   }
 
-  return sessions.map((session) => {
+  return Promise.all(sessions.map(async (session) => {
     const sessionId = session?.session_id;
-    const sessionSecret = resolveSessionSecret(req, sessionId, session?.session_secret);
+    const sessionSecret = await resolveSessionSecret(req, sessionId, session?.session_secret);
 
     return {
       ...session,
       session_secret: sessionSecret,
     };
-  });
+  }));
 };
 
 // ─── Multer Error Handler ───────────────────────────────────────────────────────
@@ -766,7 +840,7 @@ app.post("/upload", uploadLimiter, upload.single("file"), multerErrorHandler, as
     ? path.join(UPLOADS_DIR, path.basename(uploadedFilePath))
     : null;
   const sessionId = req.body?.session_id || null;
-  const sessionSecret = resolveSessionSecret(req, sessionId, req.body?.session_secret);
+  const sessionSecret = await resolveSessionSecret(req, sessionId, req.body?.session_secret);
 
   try {
     if (!req.file) {
@@ -866,7 +940,7 @@ if (signatureBuffer.toString() !== "%PDF") {
     // the raw PDF without supplying a session_secret.
     await cleanupFile(uploadedFilePath);
 
-    setSessionSecretCookie(res, response.data.session_id || sessionId, response.data.session_secret || sessionSecret);
+    await setSessionSecretCookie(res, response.data.session_id || sessionId, response.data.session_secret || sessionSecret);
 
     return res.json({
       message: "PDF uploaded & processed successfully!",
@@ -988,7 +1062,7 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
     form.append("original_filename", safeFilename);
 
     // Optionally extend an existing session
-    const resolvedSessionSecret = resolveSessionSecret(req, session_id, session_secret);
+    const resolvedSessionSecret = await resolveSessionSecret(req, session_id, session_secret);
     if (session_id && resolvedSessionSecret) {
       form.append("session_id", session_id);
       form.append("session_secret", resolvedSessionSecret);
@@ -1005,7 +1079,7 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
       }
     );
 
-    setSessionSecretCookie(res, ragResponse.data.session_id || session_id, ragResponse.data.session_secret || resolvedSessionSecret);
+    await setSessionSecretCookie(res, ragResponse.data.session_id || session_id, ragResponse.data.session_secret || resolvedSessionSecret);
 
     return res.json({
       message: "PDF processed and indexed successfully.",
@@ -1027,9 +1101,10 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
 });
 
 app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+  const resolvedSessionSecret = await resolveSessionSecret(req, req.body?.session_id, req.body?.session_secret);
   const validation = askSchema.safeParse({
     ...req.body,
-    session_secret: resolveSessionSecret(req, req.body?.session_id, req.body?.session_secret),
+    session_secret: resolvedSessionSecret,
   });
 
   if (!validation.success) {
@@ -1071,9 +1146,10 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
   }
 });
 app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+  const resolvedSessionSecret = await resolveSessionSecret(req, req.body?.session_id, req.body?.session_secret);
   const validation = askSchema.safeParse({
     ...req.body,
-    session_secret: resolveSessionSecret(req, req.body?.session_id, req.body?.session_secret),
+    session_secret: resolvedSessionSecret,
   });
 
   if (!validation.success) {
@@ -1125,9 +1201,10 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
 });
 
 app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+  const resolvedSessionSecret = await resolveSessionSecret(req, req.body?.session_id, req.body?.session_secret);
   const validation = summarizeSchema.safeParse({
     ...req.body,
-    session_secret: resolveSessionSecret(req, req.body?.session_id, req.body?.session_secret),
+    session_secret: resolvedSessionSecret,
   });
 
   if (!validation.success) {
@@ -1158,9 +1235,10 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
 });
 
 app.post("/knowledge-gaps", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+  const resolvedSessionSecret = await resolveSessionSecret(req, req.body?.session_id, req.body?.session_secret);
   const validation = knowledgeGapsSchema.safeParse({
     ...req.body,
-    session_secret: resolveSessionSecret(req, req.body?.session_id, req.body?.session_secret),
+    session_secret: resolvedSessionSecret,
   });
 
   if (!validation.success) {
@@ -1199,7 +1277,7 @@ app.get("/sessions", async (req, res) => {
 app.post("/sessions/lookup", async (req, res) => {
   const validation = sessionsLookupSchema.safeParse({
     ...req.body,
-    sessions: attachSessionSecrets(req, req.body?.sessions),
+    sessions: await attachSessionSecrets(req, req.body?.sessions),
   });
 
   if (!validation.success) {
