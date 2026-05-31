@@ -49,8 +49,8 @@ const FAQ = () => {
           {faqs.map((faq, index) => {
           const isOpen = openIndex === index;
           return (
-            <div 
-              key={index} 
+            <div
+              key={index}
               className={`faq-item ${isOpen ? 'active' : ''}`}
               onClick={() => toggleFAQ(index)}
             >
