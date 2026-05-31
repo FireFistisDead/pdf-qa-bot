@@ -280,6 +280,8 @@ function MainApp() {
           "Network error. Please check if the backend server is running.";
       } else if (e.response?.status === 413) {
         message = "File too large. Please choose a file under 20MB.";
+        } else if (e.response?.status === 404) {
+        message = "Session expired or no PDF loaded. Please re-upload your PDF to continue.";
       } else if (e.response?.status === 500) {
         message = "Server error. Please try again later.";
       } else {
