@@ -1,4 +1,6 @@
-fastapi
+fastapi>=0.104.0
+starlette>=0.27.0
+httpx
 uvicorn
 python-dotenv
 pydantic
