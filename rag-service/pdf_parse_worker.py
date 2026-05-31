@@ -6,28 +6,24 @@ def _extract_pdf_text_worker(
 ):
     """
     Lightweight PDF parser worker used by multiprocessing spawn.
-
-    Keep this module free of FastAPI, LangChain, Torch, and Transformers imports.
-    On Windows, spawn imports the target function's module in the child process;
-    pointing at main.py would load the full RAG stack before parsing starts.
+    Switched to PyMuPDF (fitz) for vastly superior text extraction, 
+    especially for difficult PDFs like Windows battery reports.
     """
     try:
-        from pypdf import PdfReader
+        import fitz  # PyMuPDF
 
-        reader = PdfReader(pdf_path, strict=False)
+        doc = fitz.open(pdf_path)
 
-        if getattr(reader, "is_encrypted", False):
-            try:
-                reader.decrypt("")
-            except Exception:
+        if doc.needs_pass:
+            if not doc.authenticate(""):
                 out_queue.put({"ok": False, "error": "Unable to read this PDF. It may be encrypted."})
                 return
 
-        pages = getattr(reader, "pages", [])
-        page_count = len(pages)
+        page_count = len(doc)
         if page_count == 0:
             out_queue.put({"ok": False, "error": "No readable pages were found in the PDF."})
             return
+            
         if page_count > max_pages:
             out_queue.put(
                 {
@@ -40,20 +36,25 @@ def _extract_pdf_text_worker(
 
         extracted = []
         used = 0
-        for idx, page in enumerate(pages):
-            if idx >= max_pages:
-                break
-            text = page.extract_text() or ""
+        
+        for idx in range(min(page_count, max_pages)):
+            page = doc[idx]
+            text = page.get_text() or ""
+            
             if not text.strip():
                 continue
 
             remaining = max_chars - used
             if remaining <= 0:
                 break
+                
             if len(text) > remaining:
                 text = text[:remaining]
+                
             used += len(text)
             extracted.append({"page": idx, "text": text})
+
+        doc.close()
 
         if not extracted:
             out_queue.put({"ok": False, "error": "No readable text was found in the PDF."})

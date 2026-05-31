@@ -497,6 +497,35 @@ const SESSION_SECRET_COOKIE_PREFIX = "pdfqa_session_secret_";
 const getSessionSecretCookieName = (sessionId) =>
   `${SESSION_SECRET_COOKIE_PREFIX}${sessionId}`;
 
+// In-memory short-lived token store mapping cookie tokens -> real session secrets.
+// We store a random token in the cookie and keep the actual secret server-side
+// to avoid writing clear-text secrets into cookies (addresses CodeQL CWE-312).
+const SESSION_SECRET_MAP = new Map(); // token -> { secret, expiry }
+const SESSION_SECRET_TTL_MS = (parseInt(process.env.SESSION_SECRET_COOKIE_TTL_DAYS || "7", 10) || 7) * 24 * 60 * 60 * 1000;
+
+const _storeSessionSecret = (sessionSecret) => {
+  if (!sessionSecret) return null;
+  const token = crypto.randomUUID();
+  const expiry = Date.now() + SESSION_SECRET_TTL_MS;
+  SESSION_SECRET_MAP.set(token, { secret: sessionSecret, expiry });
+  // Schedule cleanup
+  setTimeout(() => {
+    SESSION_SECRET_MAP.delete(token);
+  }, SESSION_SECRET_TTL_MS + 1000);
+  return token;
+};
+
+const _lookupSessionSecret = (token) => {
+  if (!token) return null;
+  const entry = SESSION_SECRET_MAP.get(token);
+  if (!entry) return null;
+  if (entry.expiry <= Date.now()) {
+    SESSION_SECRET_MAP.delete(token);
+    return null;
+  }
+  return entry.secret;
+};
+
 const readRequestCookies = (req) => {
   const header = req.headers.cookie;
   if (!header || typeof header !== "string") {
@@ -532,7 +561,9 @@ const getSessionSecretFromCookie = (req, sessionId) => {
   }
 
   const cookies = readRequestCookies(req);
-  return normalizeSessionSecret(cookies[getSessionSecretCookieName(sessionId)]);
+  const token = normalizeSessionSecret(cookies[getSessionSecretCookieName(sessionId)]);
+  if (!token) return null;
+  return _lookupSessionSecret(token);
 };
 
 const resolveSessionSecret = (req, sessionId, providedSecret) =>
@@ -543,11 +574,16 @@ const setSessionSecretCookie = (res, sessionId, sessionSecret) => {
     return;
   }
 
-  res.cookie(getSessionSecretCookieName(sessionId), sessionSecret, {
+  // Store the real secret server-side and put only a random token in the cookie.
+  const token = _storeSessionSecret(sessionSecret);
+  if (!token) return;
+
+  res.cookie(getSessionSecretCookieName(sessionId), token, {
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
     path: "/",
+    maxAge: SESSION_SECRET_TTL_MS,
   });
 };
 
@@ -750,11 +786,24 @@ if (signatureBuffer.toString() !== "%PDF") {
       formData.session_secret = sessionSecret;
     }
 
+    const controller = new AbortController();
+    const onClientDisconnect = () => {
+      controller.abort();
+      cleanupFile(uploadedFilePath);
+    };
+    req.on("close", onClientDisconnect);
+
     const response = await axios.postForm(
       `${RAG_SERVICE_URL}/process-pdf`,
       formData,
-      { headers: ragAuthHeaders() },
+      {
+        headers: ragAuthHeaders(),
+        timeout: 120000,
+        signal: controller.signal,
+      },
     );
+
+    req.off("close", onClientDisconnect);
 
     // Delete the temp file immediately after the RAG service has fully read and
     // indexed it. The frontend uses URL.createObjectURL for the in-browser viewer
@@ -772,6 +821,10 @@ if (signatureBuffer.toString() !== "%PDF") {
       documents: response.data.documents || [],
     });
   } catch (err) {
+    if (err.name === "CanceledError" || err.code === "ERR_CANCELED") {
+      return;
+    }
+
     await cleanupFile(uploadedFilePath);
 
     const statusCode =
