@@ -33,6 +33,8 @@ function MainApp() {
   const [selectedPdf, setSelectedPdf] = useState(null);
   const [pdfJumpTarget, setPdfJumpTarget] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+const [isReady, setIsReady] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
   const [rightPanelTab, setRightPanelTab] = useState("chat");
   const [savedNotes, setSavedNotes] = useState(() => loadSavedNotes());
@@ -224,7 +226,9 @@ function MainApp() {
     }
 
     setUploading(true);
-    const loadingToast = toast.loading("Uploading PDF...");
+    setIsProcessing(true);
+    setIsReady(false);
+    const loadingToast = toast.loading("Uploading and processing your PDF, please wait...");
 
     try {
       const currentPdfForUpload = pdfs.find(p => p.id === selectedPdf);
@@ -269,6 +273,8 @@ function MainApp() {
       toast.success("PDF uploaded successfully!", {
         id: loadingToast,
       });
+      setIsReady(true);
+      setIsProcessing(false);
     } catch (e) {
       let message = "Upload failed. Please try again.";
 
@@ -291,6 +297,7 @@ function MainApp() {
       });
     } finally {
       setUploading(false);
+      setIsProcessing(false);
     }
   };
 
@@ -582,11 +589,25 @@ const handleOpenSource = (source) => {
       >
         <Navbar darkMode={darkMode} setDarkMode={setDarkMode} />
         <Container>
-          <UploadCard
+         <UploadCard
             uploading={uploading}
             darkMode={darkMode}
             onUpload={handleUpload}
           />
+          {isProcessing && (
+            <div style={{
+              textAlign: "center",
+              padding: "12px",
+              marginBottom: "12px",
+              background: "rgba(139, 92, 246, 0.1)",
+              borderRadius: "12px",
+              color: "#8B5CF6",
+              fontWeight: 600,
+              fontSize: "14px",
+            }}>
+              ⏳ Processing your PDF, please wait...
+            </div>
+          )}
           {/* PDF LIST */}
           {pdfs.length > 0 && (
             <div style={{ marginBottom: "16px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
