@@ -215,14 +215,13 @@ function MainApp() {
     }
 
     // Validate file size (20MB limit)
-    const maxSize = 20 * 1024 * 1024; // 20MB in bytes
+   const maxSize = 20 * 1024 * 1024; // 20MB in bytes
     if (file.size > maxSize) {
       toast.error(
-        "File size exceeds 20MB limit. Please choose a smaller file.",
+        "File too large. Maximum allowed size is 20MB. Please choose a smaller PDF file.",
       );
       return;
     }
-
     setUploading(true);
     const loadingToast = toast.loading("Uploading PDF...");
 
