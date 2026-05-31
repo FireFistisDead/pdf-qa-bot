@@ -32,6 +32,9 @@ load_dotenv()
 
 
 PERSIST_DIR = "faiss_store"
+FAISS_INDEX_DIR = os.path.join(PERSIST_DIR, "sessions")
+os.makedirs(FAISS_INDEX_DIR, exist_ok=True)
+
 # ── Logger (must be defined before exception handlers that use it) ─────────────
 logger = logging.getLogger("pdf_qa_rag")
 logging.basicConfig(
@@ -1264,6 +1267,13 @@ def process_pdf(
     except Exception as exc:
         logger.exception("Failed to create vectorstore filename=%s", filename)
         raise HTTPException(status_code=500, detail="Failed to index the uploaded PDF.")
+    # Save vectorstore to disk
+    session_persist_path = os.path.join(FAISS_INDEX_DIR, document_id)
+    try:
+        new_vectorstore.save_local(session_persist_path)
+        logger.info("FAISS index saved to disk path=%s", session_persist_path)
+    except Exception as e:
+        logger.warning("Could not persist FAISS index to disk: %s", e)
 
     with sessions_lock:
         if requested_session_id:
@@ -1283,6 +1293,7 @@ def process_pdf(
             session_lock = threading.Lock()
             sessions[session_id] = {
                 "vectorstore": new_vectorstore,
+                "persist_path": session_persist_path,
                 "lock": session_lock,
                 "documents": [uploaded_document],
                 "created_at": now,
@@ -1633,7 +1644,40 @@ def summarize_pdf(data: SummarizeRequest):
     )
 
     return {"summary": build_session_summary(uploaded_documents, indexed_documents)}
-
+@app.on_event("startup")
+def load_persisted_sessions():
+    """Reload FAISS indexes from disk on server startup."""
+    if not os.path.exists(FAISS_INDEX_DIR):
+        logger.info("No persisted sessions found, starting fresh.")
+        return
+    loaded = 0
+    for session_folder in os.listdir(FAISS_INDEX_DIR):
+        session_path = os.path.join(FAISS_INDEX_DIR, session_folder)
+        index_file = os.path.join(session_path, "index.faiss")
+        if not os.path.isdir(session_path) or not os.path.exists(index_file):
+            continue
+        try:
+            vectorstore = FAISS.load_local(
+                session_path,
+                embedding_model,
+                allow_dangerous_deserialization=True
+            )
+            now = now_ts()
+            session_id = session_folder
+            sessions[session_id] = {
+                "vectorstore": vectorstore,
+                "persist_path": session_path,
+                "lock": threading.Lock(),
+                "documents": [],
+                "created_at": now,
+                "last_accessed": now,
+                "retrieval_cache": {},
+            }
+            loaded += 1
+            logger.info("Restored session from disk session_id=%s", session_id)
+        except Exception as e:
+            logger.warning("Failed to restore session from disk path=%s error=%s", session_path, e)
+    logger.info("Startup restore complete total_loaded=%s", loaded)
 if __name__ == "__main__":
     is_production = os.getenv("ENVIRONMENT", "development").lower() == "production"
     host = os.getenv("HOST", "0.0.0.0")
