@@ -1,4 +1,5 @@
 # PDF Q&A Bot
+[![Docker](https://img.shields.io/badge/docker-supported-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/get-docker/)
 
 ![PDF Q&A Bot Logo](logo.svg)
 
