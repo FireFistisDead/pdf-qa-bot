@@ -57,7 +57,7 @@ jobs:
       - name: Run Python SAST (Bandit)
         run: |
           cd rag-service
-          bandit -r . -ll -ii
+          bandit -r . -l -i
 
       - name: Run RAG tests
         run: |
