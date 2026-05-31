@@ -73,6 +73,7 @@ const HowItWorks = () => {
               className={`carousel-3d-slide ${getSlideClass(index)}`}
               style={{ background: 'transparent', border: 'none', padding: 0, textAlign: 'left', cursor: 'pointer', display: 'block' }}
               onClick={() => setActive(index)}
+              aria-label={`${slide.title} slide`}
             >
               <div className="slide-content-3d glass-panel">
                 <div className="slide-number-bg">{slide.id}</div>

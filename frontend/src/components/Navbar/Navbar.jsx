@@ -108,6 +108,7 @@ const Navbar = ({ darkMode, setDarkMode }) => {
                   cursor: 'pointer',
                 }}
                 title="Sign Out"
+                aria-label="Sign Out"
               >
                 {user.email ? user.email.charAt(0).toUpperCase() : 'U'}
               </button>

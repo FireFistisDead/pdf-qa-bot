@@ -18,7 +18,7 @@ class ErrorBoundary extends React.Component {
   render() {
     if (this.state.hasError) {
       return (
-        <div style={{ padding: '2rem', textAlign: 'center', fontFamily: 'sans-serif' }}>
+        <div style={{ padding: '2rem', textAlign: 'center', fontFamily: 'sans-serif' }} role="alert" aria-live="assertive">
           <h2>Oops! Something went wrong.</h2>
           <p>We apologize for the inconvenience. Please try refreshing the page.</p>
           {process.env.NODE_ENV === 'development' && (
