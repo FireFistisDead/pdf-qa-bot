@@ -86,28 +86,84 @@ export const askStream = (sessionId, sessionSecret, question, onChunk, onDone, o
         throw new Error(data.error || `Ask failed (HTTP ${res.status})`);
       }
 
+      if (!res.body) {
+        throw new Error('Streaming response is unavailable.');
+      }
+
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
+      let buffer = '';
+      let completed = false;
+
+      const handleEvent = (eventText) => {
+        if (!eventText) return;
+
+        let eventName = 'message';
+        const dataLines = [];
+
+        for (const rawLine of eventText.split('\n')) {
+          const line = rawLine.replace(/\r$/, '');
+          if (!line || line.startsWith(':')) {
+            continue;
+          }
+          if (line.startsWith('event:')) {
+            eventName = line.slice(6).trim();
+            continue;
+          }
+          if (line.startsWith('data:')) {
+            dataLines.push(line.slice(5).replace(/^ /, ''));
+          }
+        }
+
+        const data = dataLines.join('\n');
+
+        if (!data) {
+          return;
+        }
+
+        if (eventName === 'error') {
+          completed = true;
+          onError(data || 'Stream error');
+          return;
+        }
+
+        if (data === '[DONE]') {
+          completed = true;
+          onDone();
+          return;
+        }
+
+        onChunk(data);
+      };
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          break;
+        }
 
-        const chunk = decoder.decode(value, { stream: true });
-        // SSE format: "data: <text>\n\n"
-        const lines = chunk.split('\n');
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const text = line.slice(6);
-            if (text === '[DONE]') {
-              onDone();
-              return;
-            }
-            onChunk(text);
+        buffer += decoder.decode(value, { stream: true });
+
+        let separatorIndex = buffer.indexOf('\n\n');
+        while (separatorIndex !== -1) {
+          const eventText = buffer.slice(0, separatorIndex);
+          buffer = buffer.slice(separatorIndex + 2);
+          handleEvent(eventText);
+          if (completed) {
+            return;
           }
+          separatorIndex = buffer.indexOf('\n\n');
         }
       }
-      onDone();
+
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        handleEvent(buffer);
+      }
+
+      if (!completed) {
+        onDone();
+      }
     } catch (err) {
       if (err.name !== 'AbortError') {
         onError(err.message || 'Stream error');

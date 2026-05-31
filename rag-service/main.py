@@ -3244,8 +3244,8 @@ def ask_question(data: Question):
 @app.post("/ask/stream")
 def ask_question_stream(data: Question):
     """
-    Streaming variant of /ask. Returns the generated answer as a plain-text
-    chunked response so the frontend can render tokens progressively.
+    Streaming variant of /ask. Returns the generated answer as SSE so the
+    frontend can render tokens progressively.
 
     Retrieval and evidence-gating are identical to /ask. Generation is run in
     a background thread using TextIteratorStreamer so the HTTP response can
@@ -3255,6 +3255,18 @@ def ask_question_stream(data: Question):
     in both `protected_paths` (exact match) and under the `/ask/` prefix guard,
     so it cannot be reached without a valid X-Internal-Token.
     """
+    def _sse_frame(text: str, event: str | None = None) -> str:
+        parts = []
+        if event:
+            parts.append(f"event: {event}")
+        normalized_text = str(text).replace("\r\n", "\n").replace("\r", "\n")
+        for line in normalized_text.split("\n"):
+            parts.append(f"data: {line}")
+        return "\n".join(parts) + "\n\n"
+
+    def _sse_done() -> str:
+        return "data: [DONE]\n\n"
+
     question = (data.question or "").strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question is required.")
@@ -3368,9 +3380,10 @@ def ask_question_stream(data: Question):
             _mark_session_dirty(session_id)
 
         def _refuse_stream():
-            yield INSUFFICIENT_CONTEXT_MESSAGE
+            yield _sse_frame(INSUFFICIENT_CONTEXT_MESSAGE)
+            yield _sse_done()
 
-        return StreamingResponse(_refuse_stream(), media_type="text/plain; charset=utf-8")
+        return StreamingResponse(_refuse_stream(), media_type="text/event-stream; charset=utf-8")
 
     context = format_context(docs)
 
@@ -3405,9 +3418,10 @@ def ask_question_stream(data: Question):
             _mark_session_dirty(session_id)
 
         def _grounded_stream():
-            yield framed
+            yield _sse_frame(framed)
+            yield _sse_done()
 
-        return StreamingResponse(_grounded_stream(), media_type="text/plain; charset=utf-8")
+        return StreamingResponse(_grounded_stream(), media_type="text/event-stream; charset=utf-8")
 
     # LLM generation path — run in a background thread so we can stream tokens
     # back to the caller as they are produced rather than waiting for the full
@@ -3470,7 +3484,7 @@ def ask_question_stream(data: Question):
             for token_text in streamer:
                 if token_text:
                     full_answer_parts.append(token_text)
-                    yield token_text
+                    yield _sse_frame(token_text)
 
             generation_thread.join(timeout=180)
 
@@ -3507,11 +3521,13 @@ def ask_question_stream(data: Question):
                     )
 
                 _mark_session_dirty(session_id)
+
+            yield _sse_done()
         except Exception:
             logger.exception("Stream generation failed session_id=%s", session_id)
-            yield "\n[Generation error. Please try again.]"
+            yield _sse_frame("Generation error. Please try again.", event="error")
 
-    return StreamingResponse(_generate_and_stream(), media_type="text/plain; charset=utf-8")
+    return StreamingResponse(_generate_and_stream(), media_type="text/event-stream; charset=utf-8")
 
 
 def _run_generation_locked(model, generate_kwargs):
