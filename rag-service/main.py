@@ -3411,12 +3411,7 @@ def ask_question_stream(data: Question):
 
     context = format_context(docs)
 
-    grounded_answer = build_answer_from_documents(
-        question,
-        docs,
-        intent,
-        source_id_by_key={document_dedupe_key(doc): idx + 1 for idx, doc in enumerate(docs)},
-    )
+    grounded_answer = None  # Disabled to force LLM usage
 
     # For grounded (non-LLM) answers, stream the result directly without
     # spinning up a generation thread — there are no tokens to generate.
@@ -3472,82 +3467,85 @@ def ask_question_stream(data: Question):
     )
 
     def _generate_and_stream():
+        groq_api_key = os.environ.get("GROQ_API_KEY")
+        if not groq_api_key:
+            err = "Groq API Key is missing! Please provide your GROQ_API_KEY in the environment."
+            yield err
+            return
+
+        full_answer_parts = []
         try:
-            tokenizer, model, is_encoder_decoder = load_generation_model()
-            model_device = next(model.parameters()).device
-            encoded = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
-            encoded = {k: v.to(model_device) for k, v in encoded.items()}
-            pad_token_id = (
-                tokenizer.pad_token_id
-                if tokenizer.pad_token_id is not None
-                else tokenizer.eos_token_id
-            )
-            streamer = TextIteratorStreamer(
-                tokenizer,
-                skip_prompt=True,
-                skip_special_tokens=True,
-            )
-
-            generate_kwargs = {
-                **encoded,
-                "max_new_tokens": 256,
-                "do_sample": False,
-                "pad_token_id": pad_token_id,
-                "streamer": streamer,
+            import urllib.request
+            import json
+            
+            url = "https://api.groq.com/openai/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {groq_api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
             }
+            payload = json.dumps({
+                "model": "llama-3.1-8b-instant",
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": True,
+                "temperature": 0
+            }).encode("utf-8")
+            
+            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                for line in resp:
+                    decoded = line.decode('utf-8').strip()
+                    if decoded.startswith('data: '):
+                        data_str = decoded[6:]
+                        if data_str == '[DONE]':
+                            break
+                        try:
+                            data = json.loads(data_str)
+                            token = data['choices'][0]['delta'].get('content', '')
+                            if token:
+                                full_answer_parts.append(token)
+                                yield token
+                        except Exception:
+                            pass
+        except Exception as e:
+            err = f"Groq API Error: {str(e)}"
+            yield err
+            full_answer_parts.append(err)
 
-            generation_thread = threading.Thread(
-                target=_run_generation_locked,
-                args=(model, generate_kwargs),
-                daemon=True,
-            )
-            generation_thread.start()
+        full_answer = "".join(full_answer_parts).strip()
 
-            full_answer_parts = []
-            for token_text in streamer:
-                if token_text:
-                    full_answer_parts.append(token_text)
+        framed = apply_mode_framing(
+            full_answer,
+            question,
+            mode,
+            docs,
+            context,
+        )
 
-            generation_thread.join(timeout=180)
+        if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
+            framed = full_answer
 
-            full_answer = "".join(full_answer_parts).strip()
+        citation_sources = [
+            citation_source_for_document(doc, idx)
+            for idx, doc in enumerate(docs)
+        ]
 
-            framed = apply_mode_framing(
-                full_answer,
-                question,
-                mode,
-                docs,
-                context,
-            )
+        # stream the final framed answer once at the end
+        yield framed
 
-            if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
-                framed = full_answer
+        with sessions_lock:
+            current_session = sessions.get(session_id)
+            if current_session:
+                ensure_retrieval_cache(current_session)
+                append_chat_exchange(
+                    current_session,
+                    question,
+                    framed,
+                    citation_sources,
+                    mode,
+                )
+            _mark_session_dirty(session_id)
 
-            yield framed
-
-            citation_sources = [
-                citation_source_for_document(doc, idx)
-                for idx, doc in enumerate(docs)
-            ]
-
-            with sessions_lock:
-                current_session = sessions.get(session_id)
-
-                if current_session:
-                    ensure_retrieval_cache(current_session)
-
-                    append_chat_exchange(
-                        current_session,
-                        question,
-                        framed,
-                        citation_sources,
-                        mode,
-                    )
-
-                _mark_session_dirty(session_id)
-        except Exception:
-            logger.exception("Stream generation failed session_id=%s", session_id)
-            yield "\n[Generation error. Please try again.]"
 
     return StreamingResponse(_generate_and_stream(), media_type="text/plain; charset=utf-8")
 

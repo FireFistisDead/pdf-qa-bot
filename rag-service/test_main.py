@@ -190,13 +190,13 @@ def test_normalize_session_id_returns_canonical_uuid():
 
 
 def test_extract_pdf_text_worker_enforces_page_limit(tmp_path):
-    from pypdf import PdfWriter
+    import fitz
 
     pdf_path = tmp_path / "hello.pdf"
-    writer = PdfWriter()
-    writer.add_blank_page(width=300, height=144)
-    with pdf_path.open("wb") as fp:
-        writer.write(fp)
+    doc = fitz.open()
+    doc.new_page(width=300, height=144)
+    doc.save(str(pdf_path))
+    doc.close()
 
     # Use a local queue and call the worker directly (no subprocess) to validate limit logic.
     q = multiprocessing.Queue(maxsize=1)
