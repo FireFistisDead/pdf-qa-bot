@@ -519,6 +519,15 @@ const isAllowedSupabaseHostname = (hostname) => {
   });
 };
 
+const getTrustedSupabaseOrigin = (hostname) => {
+  const normalizedHostname = normalizeHostnameForAllowlist(hostname);
+  if (!normalizedHostname) return null;
+
+  if (!isAllowedSupabaseHostname(normalizedHostname)) return null;
+
+  return `https://${normalizedHostname}`;
+};
+
 // ─── Multer Error Handler ───────────────────────────────────────────────────────
 // Catches file size violations (413 Payload Too Large) and other multer errors.
 // CWE-209 Mitigation: Sanitizes error messages to prevent leaking internal implementation
@@ -787,12 +796,10 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
     return res.status(400).json({ error: "Only HTTPS URLs are allowed." });
   }
 
-  const normalizedHostname = normalizeHostnameForAllowlist(parsedUrl.hostname);
-  if (!isAllowedSupabaseHostname(normalizedHostname)) {
+  const trustedSupabaseOrigin = getTrustedSupabaseOrigin(parsedUrl.hostname);
+  if (!trustedSupabaseOrigin) {
     return res.status(403).json({ error: "URL host is not allowed." });
   }
-
-  parsedUrl.hostname = normalizedHostname;
 
   if (!filename || typeof filename !== "string") {
     return res.status(400).json({ error: "Missing or invalid 'filename' field." });
@@ -808,7 +815,9 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
     // Download the PDF from the remote URL into a Buffer
     let pdfBuffer;
     try {
-      const dlResponse = await axios.get(parsedUrl.toString(), {
+      const downloadPath = `${parsedUrl.pathname}${parsedUrl.search}` || "/";
+      const dlResponse = await axios.get(downloadPath, {
+        baseURL: trustedSupabaseOrigin,
         responseType: "arraybuffer",
         timeout: 30000,
         maxContentLength: 50 * 1024 * 1024, // 50 MB cap
