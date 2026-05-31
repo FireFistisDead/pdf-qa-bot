@@ -144,6 +144,7 @@ const Navbar = ({ darkMode, setDarkMode }) => {
 
           <IconButton
             onClick={() => setDarkMode(!darkMode)}
+            aria-label="Toggle dark mode"
             sx={{
               color: darkMode ? "#fff" : "#111",
               border: darkMode

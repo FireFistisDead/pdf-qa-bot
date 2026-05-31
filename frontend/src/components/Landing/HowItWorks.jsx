@@ -67,9 +67,11 @@ const HowItWorks = () => {
 
         <div className="carousel-3d-container">
           {slides.map((slide, index) => (
-            <div 
+            <button 
+              type="button"
               key={slide.id} 
               className={`carousel-3d-slide ${getSlideClass(index)}`}
+              style={{ background: 'transparent', border: 'none', padding: 0, textAlign: 'left', cursor: 'pointer', display: 'block' }}
               onClick={() => setActive(index)}
             >
               <div className="slide-content-3d glass-panel">
@@ -128,7 +130,7 @@ const HowItWorks = () => {
                   </div>
                 </div>
               </div>
-            </div>
+            </button>
           ))}
         </div>
 
@@ -139,9 +141,12 @@ const HowItWorks = () => {
 
       <div className="carousel-progress">
         {slides.map((_, i) => (
-          <span 
+          <button 
+            type="button"
             key={i} 
+            aria-label={`Slide ${i + 1}`}
             className={`progress-dot ${i === active ? 'active' : ''}`}
+            style={{ background: 'transparent', border: 'none', padding: 0, cursor: 'pointer' }}
             onClick={() => setActive(i)}
           />
         ))}
