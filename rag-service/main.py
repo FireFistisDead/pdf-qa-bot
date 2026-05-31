@@ -3169,6 +3169,20 @@ def ask_question(data: Question):
             _mark_session_dirty(session_id)
         return result
 
+    followup_instructions = ""
+    if mode in ["tutor", "socratic"]:
+        followup_instructions = (
+            "You MUST append an interactive <FOLLOWUP> multiple-choice question to test their understanding. "
+            "Format it exactly like this at the very end of your response:\n"
+            "<FOLLOWUP>\nQuestion: [Question text]\nOptions:\n- [Option A]\n- [Option B]\n</FOLLOWUP>\n\n"
+        )
+    elif mode in ["default", "eli5"]:
+        followup_instructions = (
+            "If there is a deterministic follow-up question that would be helpful, you MAY append an interactive <FOLLOWUP> block. "
+            "Format it exactly like this at the very end of your response:\n"
+            "<FOLLOWUP>\nQuestion: [Question text]\nOptions:\n- [Option A]\n- [Option B]\n</FOLLOWUP>\n\n"
+        )
+
     prompt = (
         "You are a careful assistant answering questions over one or more uploaded PDF documents. "
         "Use only the provided context. The context may include excerpts from multiple PDFs. "
@@ -3183,6 +3197,7 @@ def ask_question(data: Question):
         "Do not return raw PDF text or chunks.\n"
         "Summarize properly in readable sentences.\n\n"
 
+        f"{followup_instructions}"
         f"Context:\n{context}\n\n"
         f"Question: {question}\n"
         "Answer:"
@@ -3444,6 +3459,20 @@ def ask_question_stream(data: Question):
     # LLM generation path — run in a background thread so we can stream tokens
     # back to the caller as they are produced rather than waiting for the full
     # completion before sending anything.
+    followup_instructions = ""
+    if mode in ["tutor", "socratic"]:
+        followup_instructions = (
+            "You MUST append an interactive <FOLLOWUP> multiple-choice question to test their understanding. "
+            "Format it exactly like this at the very end of your response:\n"
+            "<FOLLOWUP>\nQuestion: [Question text]\nOptions:\n- [Option A]\n- [Option B]\n</FOLLOWUP>\n\n"
+        )
+    elif mode in ["default", "eli5"]:
+        followup_instructions = (
+            "If there is a deterministic follow-up question that would be helpful, you MAY append an interactive <FOLLOWUP> block. "
+            "Format it exactly like this at the very end of your response:\n"
+            "<FOLLOWUP>\nQuestion: [Question text]\nOptions:\n- [Option A]\n- [Option B]\n</FOLLOWUP>\n\n"
+        )
+
     prompt = (
         "You are a careful assistant answering questions over one or more uploaded PDF documents. "
         "Use only the provided context. The context may include excerpts from multiple PDFs. "
@@ -3455,6 +3484,7 @@ def ask_question_stream(data: Question):
         "Give clear, conversational, human-friendly answers.\n"
         "Do not return raw PDF text or chunks.\n"
         "Summarize properly in readable sentences.\n\n"
+        f"{followup_instructions}"
         f"Context:\n{context}\n\n"
         f"Question: {question}\n"
         "Answer:"
