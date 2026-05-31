@@ -61,6 +61,7 @@ app.use(helmet());
 app.use(cors({
   origin: process.env.ALLOWED_ORIGIN || "http://localhost:3000",
   methods: ["GET", "POST"],
+  credentials: true,
 }));
 
 // ─── Body Size Limit ─────────────────────────────────────────────────────────
@@ -491,6 +492,81 @@ const ragAuthHeaders = () => {
 const normalizeSessionSecret = (value) =>
   typeof value === "string" ? value.trim() || null : null;
 
+const SESSION_SECRET_COOKIE_PREFIX = "pdfqa_session_secret_";
+
+const getSessionSecretCookieName = (sessionId) =>
+  `${SESSION_SECRET_COOKIE_PREFIX}${sessionId}`;
+
+const readRequestCookies = (req) => {
+  const header = req.headers.cookie;
+  if (!header || typeof header !== "string") {
+    return {};
+  }
+
+  return header.split(";").reduce((cookies, pair) => {
+    const separatorIndex = pair.indexOf("=");
+    if (separatorIndex === -1) {
+      return cookies;
+    }
+
+    const rawName = pair.slice(0, separatorIndex).trim();
+    const rawValue = pair.slice(separatorIndex + 1).trim();
+
+    if (!rawName) {
+      return cookies;
+    }
+
+    try {
+      cookies[rawName] = decodeURIComponent(rawValue);
+    } catch (_) {
+      cookies[rawName] = rawValue;
+    }
+
+    return cookies;
+  }, {});
+};
+
+const getSessionSecretFromCookie = (req, sessionId) => {
+  if (!sessionId) {
+    return null;
+  }
+
+  const cookies = readRequestCookies(req);
+  return normalizeSessionSecret(cookies[getSessionSecretCookieName(sessionId)]);
+};
+
+const resolveSessionSecret = (req, sessionId, providedSecret) =>
+  normalizeSessionSecret(providedSecret) || getSessionSecretFromCookie(req, sessionId);
+
+const setSessionSecretCookie = (res, sessionId, sessionSecret) => {
+  if (!sessionId || !sessionSecret) {
+    return;
+  }
+
+  res.cookie(getSessionSecretCookieName(sessionId), sessionSecret, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+  });
+};
+
+const attachSessionSecrets = (req, sessions) => {
+  if (!Array.isArray(sessions)) {
+    return [];
+  }
+
+  return sessions.map((session) => {
+    const sessionId = session?.session_id;
+    const sessionSecret = resolveSessionSecret(req, sessionId, session?.session_secret);
+
+    return {
+      ...session,
+      session_secret: sessionSecret,
+    };
+  });
+};
+
 // ─── Multer Error Handler ───────────────────────────────────────────────────────
 // Catches file size violations (413 Payload Too Large) and other multer errors.
 // CWE-209 Mitigation: Sanitizes error messages to prevent leaking internal implementation
@@ -600,7 +676,7 @@ app.post("/upload", uploadLimiter, upload.single("file"), multerErrorHandler, as
     ? path.join(UPLOADS_DIR, path.basename(uploadedFilePath))
     : null;
   const sessionId = req.body?.session_id || null;
-  const sessionSecret = normalizeSessionSecret(req.body?.session_secret);
+  const sessionSecret = resolveSessionSecret(req, sessionId, req.body?.session_secret);
 
   try {
     if (!req.file) {
@@ -687,10 +763,11 @@ if (signatureBuffer.toString() !== "%PDF") {
     // the raw PDF without supplying a session_secret.
     await cleanupFile(uploadedFilePath);
 
+    setSessionSecretCookie(res, response.data.session_id || sessionId, response.data.session_secret || sessionSecret);
+
     return res.json({
       message: "PDF uploaded & processed successfully!",
       session_id: response.data.session_id,
-      session_secret: response.data.session_secret,
       document: response.data.document,
       documents: response.data.documents || [],
     });
@@ -804,9 +881,10 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
     form.append("original_filename", safeFilename);
 
     // Optionally extend an existing session
-    if (session_id && session_secret) {
+    const resolvedSessionSecret = resolveSessionSecret(req, session_id, session_secret);
+    if (session_id && resolvedSessionSecret) {
       form.append("session_id", session_id);
-      form.append("session_secret", session_secret);
+      form.append("session_secret", resolvedSessionSecret);
     }
 
     const ragResponse = await axios.post(
@@ -820,10 +898,11 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
       }
     );
 
+    setSessionSecretCookie(res, ragResponse.data.session_id || session_id, ragResponse.data.session_secret || resolvedSessionSecret);
+
     return res.json({
       message: "PDF processed and indexed successfully.",
       session_id: ragResponse.data.session_id,
-      session_secret: ragResponse.data.session_secret,
       document: ragResponse.data.document,
       documents: ragResponse.data.documents || [],
     });
@@ -841,7 +920,10 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
 });
 
 app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
-  const validation = askSchema.safeParse(req.body);
+  const validation = askSchema.safeParse({
+    ...req.body,
+    session_secret: resolveSessionSecret(req, req.body?.session_id, req.body?.session_secret),
+  });
 
   if (!validation.success) {
     return res.status(400).json({
@@ -882,7 +964,10 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
   }
 });
 app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) => {
-  const validation = askSchema.safeParse(req.body);
+  const validation = askSchema.safeParse({
+    ...req.body,
+    session_secret: resolveSessionSecret(req, req.body?.session_id, req.body?.session_secret),
+  });
 
   if (!validation.success) {
     return res.status(400).json({
@@ -933,7 +1018,10 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
 });
 
 app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => {
-  const validation = summarizeSchema.safeParse(req.body);
+  const validation = summarizeSchema.safeParse({
+    ...req.body,
+    session_secret: resolveSessionSecret(req, req.body?.session_id, req.body?.session_secret),
+  });
 
   if (!validation.success) {
     return res.status(400).json({
@@ -963,7 +1051,10 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
 });
 
 app.post("/knowledge-gaps", inferenceSlowDown, inferenceLimiter, async (req, res) => {
-  const validation = knowledgeGapsSchema.safeParse(req.body);
+  const validation = knowledgeGapsSchema.safeParse({
+    ...req.body,
+    session_secret: resolveSessionSecret(req, req.body?.session_id, req.body?.session_secret),
+  });
 
   if (!validation.success) {
     return res.status(400).json({
@@ -999,7 +1090,10 @@ app.get("/sessions", async (req, res) => {
 });
 
 app.post("/sessions/lookup", async (req, res) => {
-  const validation = sessionsLookupSchema.safeParse(req.body);
+  const validation = sessionsLookupSchema.safeParse({
+    ...req.body,
+    sessions: attachSessionSecrets(req, req.body?.sessions),
+  });
 
   if (!validation.success) {
     return res.status(400).json({

@@ -464,7 +464,8 @@ describe("route error responses", () => {
 
       assert.equal(res.status, 200);
       const data = await res.json();
-      assert.equal(data.session_secret, "session-secret-123");
+      assert.equal(Object.prototype.hasOwnProperty.call(data, "session_secret"), false);
+      assert.ok(res.headers.get("set-cookie")?.includes("pdfqa_session_secret_"));
       assert.equal(validatedBody.url.endsWith("/validate-session-write"), true);
       assert.equal(validatedBody.body.session_id, "550e8400-e29b-41d4-a716-446655440000");
       assert.equal(validatedBody.body.session_secret, "session-secret-123");
@@ -555,7 +556,7 @@ describe("route error responses", () => {
         "Upload response must not include a 'url' field — files are deleted after indexing",
       );
       assert.equal(data.session_id, "550e8400-e29b-41d4-a716-446655440000");
-      assert.equal(data.session_secret, "test-secret-abc");
+      assert.equal(Object.prototype.hasOwnProperty.call(data, "session_secret"), false);
       assert.ok(data.document, "Upload response must include document metadata");
     } finally {
       axios.postForm = originalPostForm;
@@ -596,7 +597,7 @@ describe("route error responses", () => {
 
       assert.equal(data.message, "PDF uploaded & processed successfully!");
       assert.equal(data.session_id, "aaaabbbb-cccc-1234-dddd-eeeeeeeeeeee");
-      assert.equal(data.session_secret, "super-secret-value");
+      assert.equal(Object.prototype.hasOwnProperty.call(data, "session_secret"), false);
       assert.equal(data.document.filename, "report.pdf");
       assert.ok(Array.isArray(data.documents));
       // Confirm url is absent — files are never kept on server after indexing
@@ -607,6 +608,36 @@ describe("route error responses", () => {
       );
     } finally {
       axios.postForm = originalPostForm;
+    }
+  });
+
+  test("POST /ask accepts session_secret from the session cookie fallback", async () => {
+    const originalPost = axios.post;
+    let forwardedBody = null;
+
+    axios.post = async (url, body) => {
+      forwardedBody = { url, body };
+      return { data: { answer: "ok", sources: [], mode: "default" } };
+    };
+
+    try {
+      const res = await fetch(`${baseUrl}/ask`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: "pdfqa_session_secret_550e8400-e29b-41d4-a716-446655440000=cookie-secret-123",
+        },
+        body: JSON.stringify({
+          question: "What is this?",
+          session_id: "550e8400-e29b-41d4-a716-446655440000",
+          mode: "default",
+        }),
+      });
+
+      assert.equal(res.status, 200);
+      assert.equal(forwardedBody.body.session_secret, "cookie-secret-123");
+    } finally {
+      axios.post = originalPost;
     }
   });
 

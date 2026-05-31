@@ -1,16 +1,14 @@
 /**
  * App.test.js — regression tests for session credential storage.
  *
- * Issue #234: session_secret was stored in localStorage, which is readable by
- * any JavaScript executing on the page (XSS risk). These tests enforce that:
+ * Issue #234: session_secret should no longer be required for browser storage.
+ * These tests enforce that:
  *
- *   1. Credentials are written to sessionStorage, not localStorage.
- *   2. The pdfqa_sessions key is absent from localStorage after a successful
- *      upload cycle (one-time migration removes any pre-existing value).
- *   3. The migration from localStorage → sessionStorage works correctly and
- *      always removes the value from localStorage regardless of outcome.
- *   4. Non-credential UI preferences (pdfqa_preferred_mode) are unaffected and
- *      continue to use localStorage as before.
+ *   1. Session identifiers are written to sessionStorage, not localStorage.
+ *   2. Session entries can be retained without persisting a secret.
+ *   3. The migration from localStorage → sessionStorage still removes the
+ *      legacy localStorage key.
+ *   4. Non-credential UI preferences (pdfqa_preferred_mode) are unaffected.
  */
 
 // ── Storage isolation helpers ────────────────────────────────────────────────
@@ -71,13 +69,18 @@ function loadKnownSessions() {
   }
 }
 
-function upsertKnownSession(sessionId, sessionSecret) {
-  if (!sessionId || !sessionSecret) return;
-  if (typeof sessionId !== "string" || typeof sessionSecret !== "string") return;
+function upsertKnownSession(sessionId, sessionSecret = null) {
+  if (!sessionId || typeof sessionId !== "string") return;
+  if (sessionSecret !== null && typeof sessionSecret !== "string") return;
   const existing = loadKnownSessions();
+  const normalizedSessionId = sessionId.trim();
+  const normalizedSessionSecret =
+    typeof sessionSecret === "string" && sessionSecret.trim() !== ""
+      ? sessionSecret.trim()
+      : null;
   const next = [
-    { session_id: sessionId.trim(), session_secret: sessionSecret.trim() },
-    ...existing.filter((s) => s.session_id !== sessionId.trim()),
+    { session_id: normalizedSessionId, session_secret: normalizedSessionSecret },
+    ...existing.filter((s) => s.session_id !== normalizedSessionId),
   ];
   sessionStorage.setItem(SESSION_KEY, encodePayload(next.slice(0, 50)));
 }
@@ -97,16 +100,22 @@ function migrateCredentialsFromLocalStorage() {
       (s) =>
         s &&
         typeof s.session_id === "string" &&
-        s.session_id.trim() !== "" &&
-        typeof s.session_secret === "string" &&
-        s.session_secret.trim() !== "",
+        s.session_id.trim() !== "",
     );
     if (valid.length > 0) {
       const existing = loadKnownSessions();
       const existingIds = new Set(existing.map((s) => s.session_id));
       const merged = [
         ...existing,
-        ...valid.filter((s) => !existingIds.has(s.session_id.trim())),
+        ...valid
+          .filter((s) => !existingIds.has(s.session_id.trim()))
+          .map((s) => ({
+            session_id: s.session_id.trim(),
+            session_secret:
+              typeof s.session_secret === "string" && s.session_secret.trim() !== ""
+                ? s.session_secret.trim()
+                : null,
+          })),
       ].slice(0, 50);
       sessionStorage.setItem(SESSION_KEY, encodePayload(merged));
     }
@@ -163,10 +172,13 @@ test("upsertKnownSession is a no-op when session_id is falsy", () => {
   expect(sessionStorage.getItem(SESSION_KEY)).toBeNull();
 });
 
-test("upsertKnownSession is a no-op when session_secret is falsy", () => {
+test("upsertKnownSession keeps session identifiers even without a secret", () => {
   upsertKnownSession("550e8400-e29b-41d4-a716-446655440000", null);
-  upsertKnownSession("550e8400-e29b-41d4-a716-446655440000", "");
-  expect(sessionStorage.getItem(SESSION_KEY)).toBeNull();
+  upsertKnownSession("550e8400-e29b-41d4-a716-446655440001", "");
+
+  const sessions = loadKnownSessions();
+  expect(sessions).toHaveLength(2);
+  expect(sessions[0].session_secret).toBeNull();
 });
 
 test("loadKnownSessions filters entries with missing or blank session_id", () => {
@@ -195,8 +207,9 @@ test("loadKnownSessions filters entries with missing or blank session_secret", (
   );
 
   const sessions = loadKnownSessions();
-  expect(sessions).toHaveLength(1);
-  expect(sessions[0].session_id).toBe("550e8400-e29b-41d4-a716-446655440002");
+  expect(sessions).toHaveLength(3);
+  expect(sessions[0].session_secret).toBeNull();
+  expect(sessions[2].session_secret).toBe("good-secret");
 });
 
 test("loadKnownSessions handles corrupt data without throwing", () => {
