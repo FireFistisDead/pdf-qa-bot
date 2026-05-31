@@ -34,6 +34,19 @@ exports.signup = async (req, res) => {
         message: "Email and password are required",
       });
     }
+
+    if (typeof email !== "string" || typeof password !== "string") {
+      return res.status(400).json({ message: "Invalid input types" });
+    }
+    
+    if (email.length > 255 || password.length > 1024) {
+      return res.status(400).json({ message: "Input exceeds maximum allowed length" });
+    }
+    
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ message: "Invalid email format" });
+    }
     
     email = normalizeEmail(email);
 
@@ -89,6 +102,14 @@ exports.login = async (req, res) => {
       return res.status(400).json({
         message: "Email and password are required",
       });
+    }
+
+    if (typeof email !== "string" || typeof password !== "string") {
+      return res.status(400).json({ message: "Invalid input types" });
+    }
+
+    if (email.length > 255 || password.length > 1024) {
+      return res.status(400).json({ message: "Input exceeds maximum allowed length" });
     }
     
     email = normalizeEmail(email);

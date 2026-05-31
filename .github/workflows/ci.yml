@@ -22,6 +22,9 @@ jobs:
       - name: Install backend dependencies
         run: npm ci
 
+      - name: Run backend security audit
+        run: npm audit --audit-level=high || true
+
       - name: Run backend tests
         run: npm test
 
@@ -49,7 +52,12 @@ jobs:
         run: |
           cd rag-service
           pip install -r requirements.txt
-          pip install pytest
+          pip install pytest bandit
+
+      - name: Run Python SAST (Bandit)
+        run: |
+          cd rag-service
+          bandit -r . -ll -ii || true
 
       - name: Run RAG tests
         run: |
@@ -73,6 +81,11 @@ jobs:
         run: |
           cd frontend
           npm ci
+
+      - name: Run frontend security audit
+        run: |
+          cd frontend
+          npm audit --audit-level=high || true
 
       - name: Build frontend
         run: |

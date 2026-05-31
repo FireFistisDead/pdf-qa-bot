@@ -10,7 +10,26 @@ import {
 } from "react-bootstrap";
 
 import ReactMarkdown from "react-markdown";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import SmartToyIcon from "@mui/icons-material/SmartToy";
+
+const MARKDOWN_SANITIZE_SCHEMA = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    a: [
+      ...(defaultSchema.attributes?.a ?? []).filter((attr) => attr !== "href"),
+      ["href", /^https?:\/\//i, /^mailto:/i],
+    ],
+    "*": [
+      ...(defaultSchema.attributes?.["*"] ?? []).filter(
+        (attr) =>
+          typeof attr !== "string" ||
+          !attr.startsWith("on"),
+      ),
+    ],
+  },
+};
 
 const ChatSection = ({
   darkMode,
@@ -214,7 +233,7 @@ useEffect(() => {
         >
           {msg.role === "bot" ? (
             <>
-              <ReactMarkdown>{msg.text}</ReactMarkdown>
+              <ReactMarkdown rehypePlugins={[[rehypeSanitize, MARKDOWN_SANITIZE_SCHEMA]]}>{msg.text}</ReactMarkdown>
               {msg.sources && msg.sources.length > 0 && (
                 <div
                   style={{
