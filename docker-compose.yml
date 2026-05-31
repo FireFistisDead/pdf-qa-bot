@@ -1,12 +1,34 @@
-version: '3.8'
+version: "3.8"
 
 services:
+  # Optional distributed rate-limit / ban store. Enable by setting:
+  #   RATE_LIMIT_STORE=redis
+  #   RATE_LIMIT_REDIS_URL=redis://redis:6379
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    profiles: ["redis"]
+
   rag-service:
     build:
       context: ./rag-service
-    # Do NOT publish the RAG service to the host network by default.
-    # It is an internal dependency of the API gateway and publishing it allows
-    # bypassing gateway rate-limits / bans by calling FastAPI endpoints directly.
+    # ── Security: RAG service is intentionally NOT exposed to the host ──────────
+    # There is no `ports:` entry here. The service is reachable only from other
+    # containers on the default Compose bridge network (via http://rag-service:5000).
+    #
+    # Why this matters: all inference endpoints — including /ask, /ask/stream,
+    # /summarize, and /process-pdf — consume significant compute. Publishing port
+    # 5000 to the host (e.g. "5000:5000") would let any network client invoke the
+    # LLM pipeline directly, bypassing every rate limiter, slow-down delay, and IP
+    # ban that the Express gateway enforces.
+    #
+    # The INTERNAL_RAG_TOKEN environment variable provides a second layer of
+    # defence (the RAG service rejects requests without the correct header), but
+    # port isolation is the primary control — set INTERNAL_RAG_TOKEN in .env too.
+    #
+    # If you need to inspect the RAG service during development:
+    #   docker compose exec rag-service curl http://localhost:5000/docs
+    # or add a temporary ports entry and remove it before merging.
     volumes:
       - shared_uploads:/app/uploads
       - hf_cache:/root/.cache/huggingface
@@ -20,6 +42,17 @@ services:
     #         - driver: nvidia
     #           count: 1
     #           capabilities: [gpu]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; response = urllib.request.urlopen('http://localhost:5000/health', timeout=5); response.read(1); response.close()",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   backend:
     build:
@@ -29,12 +62,34 @@ services:
     environment:
       - RAG_SERVICE_URL=http://rag-service:5000
       - INTERNAL_RAG_TOKEN=${INTERNAL_RAG_TOKEN}
+      - PORT=4000
+      # Uncomment (and enable the `redis` profile) for multi-replica deployments.
+      # - RATE_LIMIT_STORE=redis
+      # - RATE_LIMIT_REDIS_URL=redis://redis:6379
     env_file:
       - .env
     volumes:
       - shared_uploads:/app/uploads
     depends_on:
       - rag-service
+      # - redis
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "-T",
+          "10",
+          "-t",
+          "1",
+          "-O",
+          "/dev/null",
+          "http://localhost:4000/health",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   frontend:
     build:
@@ -45,6 +100,8 @@ services:
       # React app runs in the browser, so it accesses the backend via localhost on the user's host machine.
       # The backend container is exposed on port 4000 on the host machine.
       - REACT_APP_API_URL=http://localhost:4000
+      - REACT_APP_SUPABASE_URL=${REACT_APP_SUPABASE_URL}
+      - REACT_APP_SUPABASE_ANON_KEY=${REACT_APP_SUPABASE_ANON_KEY}
     depends_on:
       - backend
 

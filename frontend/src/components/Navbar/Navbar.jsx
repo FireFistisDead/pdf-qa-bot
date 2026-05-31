@@ -10,9 +10,14 @@ import {
 
 import LightModeIcon from "@mui/icons-material/LightMode";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
-import PictureAsPdfIcon from "@mui/icons-material/PictureAsPdf";
+import { useNavigate } from "react-router-dom";
+import { useAuth } from "../../contexts/AuthContext";
+import { supabase } from "../../services/supabaseClient";
+import logo from "./Nav_logo.png";
 
 const Navbar = ({ darkMode, setDarkMode }) => {
+  const navigate = useNavigate();
+  const { user } = useAuth();
   return (
     <AppBar
       position="static"
@@ -31,14 +36,16 @@ const Navbar = ({ darkMode, setDarkMode }) => {
         <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
           
           <Avatar
+            src={logo}
+            alt="Logo"
+            onClick={() => navigate('/')}
             sx={{
-              bgcolor: "#7C4DFF",
               width: 48,
               height: 48,
+              bgcolor: "transparent",
+              cursor: "pointer",
             }}
-          >
-            <PictureAsPdfIcon />
-          </Avatar>
+          />
 
           <Box>
             <Typography
@@ -62,18 +69,93 @@ const Navbar = ({ darkMode, setDarkMode }) => {
           </Box>
         </Box>
 
-        <IconButton
-          onClick={() => setDarkMode(!darkMode)}
-          sx={{
-            color: darkMode ? "#fff" : "#111",
-            border: darkMode
-              ? "1px solid rgba(255,255,255,0.1)"
-              : "1px solid rgba(0,0,0,0.1)",
-            borderRadius: "12px",
-          }}
-        >
-          {darkMode ? <LightModeIcon /> : <DarkModeIcon />}
-        </IconButton>
+        <Box sx={{ display: "flex", gap: 2, alignItems: "center" }}>
+
+          {user ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <button
+                onClick={() => navigate('/dashboard')}
+                style={{
+                  padding: "8px 16px",
+                  borderRadius: "10px",
+                  border: "none",
+                  background: "#eee",
+                  color: "#333",
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                Dashboard
+              </button>
+              <button 
+                onClick={() => supabase.auth.signOut()}
+                style={{
+                  background: '#7C4DFF',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: '50%',
+                  width: '36px',
+                  height: '36px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontWeight: 'bold',
+                  fontFamily: 'monospace',
+                  cursor: 'pointer',
+                }}
+                title="Sign Out"
+              >
+                {user.email ? user.email.charAt(0).toUpperCase() : 'U'}
+              </button>
+            </div>
+          ) : (
+            <>
+              <button
+                onClick={() => navigate('/signin')}
+                style={{
+                  padding: "8px 16px",
+                  borderRadius: "10px",
+                  border: "none",
+                  cursor: "pointer",
+                  fontWeight: 600,
+                  background: 'transparent',
+                  color: darkMode ? "#fff" : "#111",
+                }}
+              >
+                Login
+              </button>
+
+              <button
+                onClick={() => navigate('/signup')}
+                style={{
+                  padding: "8px 16px",
+                  borderRadius: "10px",
+                  border: "none",
+                  background: "#7C4DFF",
+                  color: "#fff",
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                Signup
+              </button>
+            </>
+          )}
+
+          <IconButton
+            onClick={() => setDarkMode(!darkMode)}
+            sx={{
+              color: darkMode ? "#fff" : "#111",
+              border: darkMode
+                ? "1px solid rgba(255,255,255,0.1)"
+                : "1px solid rgba(0,0,0,0.1)",
+              borderRadius: "12px",
+            }}
+          >
+            {darkMode ? <LightModeIcon /> : <DarkModeIcon />}
+          </IconButton>
+
+        </Box>
       </Toolbar>
     </AppBar>
   );

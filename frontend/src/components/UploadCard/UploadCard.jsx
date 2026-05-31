@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import toast from "react-hot-toast";
 
 import {
   Box,
@@ -23,15 +24,27 @@ const handleDragLeave = () => {
   setIsDragging(false);
 };
 
+const isPdfFile = (file) =>
+  file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+
 const handleDrop = (e) => {
   e.preventDefault();
   setIsDragging(false);
-  const droppedFiles = Array.from(e.dataTransfer.files).filter(
-    (file) => file.type === "application/pdf"
-  );
-  if (droppedFiles.length > 0) {
-    setFiles(droppedFiles);
+  const allDropped = Array.from(e.dataTransfer.files);
+  if (allDropped.length === 0) return;
+
+  const validFiles = allDropped.filter(isPdfFile);
+
+  if (validFiles.length === 0) {
+    toast.error("Only PDF files are allowed. Please drop a valid PDF document.");
+    return;
   }
+
+  if (validFiles.length < allDropped.length) {
+    toast.error("Some files were skipped. Only PDF files are accepted.");
+  }
+
+  setFiles(validFiles);
 };
 
   const hasSelectedFiles = files.length > 0;
