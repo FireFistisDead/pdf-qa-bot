@@ -413,8 +413,7 @@ Always restart **RAG → Express → Frontend** after port changes.
 | Immediate 500 on upload | RAG service not running | Start `uvicorn` in `rag-service/` first |
 | `ECONNREFUSED` in Express logs | Wrong host/port | Ensure FastAPI is on `http://localhost:5000` |
 | `Session expired or invalid` in answers | RAG process restarted | Re-upload the PDF to obtain a new `session_id` |
-| Empty or scanned PDF | No extractable text | Use a text-based PDF, not a pure image scan |
-
+| Empty or scanned PDF | No extractable text | Use a text-based PDF, not a pure image scan. Scanned/image-based PDFs return no text — the service will return a 400 error. For scanned documents, use an OCR tool (e.g. Adobe Acrobat, pdf2image + pytesseract) to convert to text-based PDF first |
 ---
 
 ### Slow first request / long “Downloading…” pauses
