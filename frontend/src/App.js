@@ -559,23 +559,6 @@ const handleOpenSource = (source) => {
 
   return (
     <>
-      <Toaster
-        position="top-right"
-        toastOptions={{
-          duration: 3500,
-          style: {
-            background: "#111827",
-            color: "#fff",
-            border: "1px solid rgba(255,255,255,0.08)",
-            borderRadius: "16px",
-            padding: "14px 16px",
-            backdropFilter: "blur(12px)",
-            boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
-          },
-          success: { iconTheme: { primary: "#8B5CF6", secondary: "#fff" } },
-          error: { iconTheme: { primary: "#EF4444", secondary: "#fff" } },
-        }}
-      />
       <div
         className={themeClass}
         style={{ minHeight: "100vh", transition: "background 0.3s" }}
@@ -717,18 +700,37 @@ const handleOpenSource = (source) => {
 
 function App() {
   return (
-    <AuthProvider>
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<LandingPage />} />
-          <Route path="/workspace" element={<MainApp />} />
-          <Route path="/signin" element={<SignIn />} />
-          <Route path="/signup" element={<SignUp />} />
-          <Route path="/dashboard/*" element={<Dashboard />} />
-          <Route path="/studyhub" element={<StudyHub />} />
-        </Routes>
-      </BrowserRouter>
-    </AuthProvider>
+    <>
+      <Toaster
+        position="top-right"
+        toastOptions={{
+          duration: 3500,
+          style: {
+            background: "#111827",
+            color: "#fff",
+            border: "1px solid rgba(255,255,255,0.08)",
+            borderRadius: "16px",
+            padding: "14px 16px",
+            backdropFilter: "blur(12px)",
+            boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
+          },
+          success: { iconTheme: { primary: "#8B5CF6", secondary: "#fff" } },
+          error: { iconTheme: { primary: "#EF4444", secondary: "#fff" } },
+        }}
+      />
+      <AuthProvider>
+        <BrowserRouter>
+          <Routes>
+            <Route path="/" element={<LandingPage />} />
+            <Route path="/workspace" element={<MainApp />} />
+            <Route path="/signin" element={<SignIn />} />
+            <Route path="/signup" element={<SignUp />} />
+            <Route path="/dashboard/*" element={<Dashboard />} />
+            <Route path="/studyhub" element={<StudyHub />} />
+          </Routes>
+        </BrowserRouter>
+      </AuthProvider>
+    </>
   );
 }
 
