@@ -3513,19 +3513,6 @@ def ask_question_stream(data: Question):
             full_answer_parts.append(err)
 
         full_answer = "".join(full_answer_parts).strip()
-            generation_thread = threading.Thread(
-                target=_run_generation_locked,
-                args=(model, generate_kwargs),
-                daemon=True,
-            )
-            generation_thread.start()
-
-            full_answer_parts = []
-            for token_text in streamer:
-                if token_text:
-                    full_answer_parts.append(token_text)
-
-            generation_thread.join(timeout=180)
 
         framed = apply_mode_framing(
             full_answer,
@@ -3543,33 +3530,21 @@ def ask_question_stream(data: Question):
             for idx, doc in enumerate(docs)
         ]
 
+        # stream the final framed answer once at the end
+        yield framed
+
         with sessions_lock:
             current_session = sessions.get(session_id)
-            yield framed
-
-            citation_sources = [
-                citation_source_for_document(doc, idx)
-                for idx, doc in enumerate(docs)
-            ]
-
             if current_session:
                 ensure_retrieval_cache(current_session)
-
                 append_chat_exchange(
                     current_session,
                     question,
-                    full_answer,
+                    framed,
                     citation_sources,
                     mode,
                 )
-
-                    append_chat_exchange(
-                        current_session,
-                        question,
-                        framed,
-                        citation_sources,
-                        mode,
-                    )
+            _mark_session_dirty(session_id)
 
 
     return StreamingResponse(_generate_and_stream(), media_type="text/plain; charset=utf-8")
