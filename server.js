@@ -691,11 +691,24 @@ if (signatureBuffer.toString() !== "%PDF") {
       formData.session_secret = sessionSecret;
     }
 
+    const controller = new AbortController();
+    const onClientDisconnect = () => {
+      controller.abort();
+      cleanupFile(uploadedFilePath);
+    };
+    req.on("close", onClientDisconnect);
+
     const response = await axios.postForm(
       `${RAG_SERVICE_URL}/process-pdf`,
       formData,
-      { headers: ragAuthHeaders() },
+      {
+        headers: ragAuthHeaders(),
+        timeout: 120000,
+        signal: controller.signal,
+      },
     );
+
+    req.off("close", onClientDisconnect);
 
     // Delete the temp file immediately after the RAG service has fully read and
     // indexed it. The frontend uses URL.createObjectURL for the in-browser viewer
@@ -712,6 +725,10 @@ if (signatureBuffer.toString() !== "%PDF") {
       documents: response.data.documents || [],
     });
   } catch (err) {
+    if (err.name === "CanceledError" || err.code === "ERR_CANCELED") {
+      return;
+    }
+
     await cleanupFile(uploadedFilePath);
 
     const statusCode =

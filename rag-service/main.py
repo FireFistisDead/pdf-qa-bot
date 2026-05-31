@@ -1,4 +1,5 @@
 from fastapi import Depends, FastAPI, Request, HTTPException, File, UploadFile, Form
+from fastapi import FastAPI, Request, HTTPException, File, UploadFile, Form, Header
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.exceptions import RequestValidationError
 from contextlib import asynccontextmanager
@@ -21,6 +22,7 @@ import torch
 import multiprocessing
 import os
 import secrets
+import hashlib
 import shutil
 import urllib.request
 import urllib.error
@@ -176,7 +178,7 @@ def save_sessions_unlocked():
                 "retrieval_cache": {},  # Do not persist retrieval cache (contains Document objects)
                 "chat": meta.get("chat", []),
                 "flashcards": meta.get("flashcards", []),
-                "session_secret": meta.get("session_secret"),
+                "hashed_session_secret": meta.get("hashed_session_secret") or _hash_secret(meta.get("session_secret", "")),
             }
 
         with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
@@ -246,6 +248,11 @@ PDF_PARSE_TIMEOUT_SECONDS = int(os.getenv("PDF_PARSE_TIMEOUT_SECONDS", "20"))
 MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "200"))
 MAX_PDF_EXTRACT_CHARS = int(os.getenv("MAX_PDF_EXTRACT_CHARS", "400000"))
 
+# Maximum PDF upload size in megabytes. Must match the Express gateway's
+# MAX_UPLOAD_SIZE_MB to avoid rejecting files that pass the gateway check.
+# Default: 50 MB (same as Express gateway default)
+MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "50"))
+
 try:
     from langchain_core.documents import Document  # type: ignore
 except Exception:  # pragma: no cover
@@ -253,6 +260,19 @@ except Exception:  # pragma: no cover
 
 def generate_session_secret() -> str:
     return secrets.token_urlsafe(32)
+
+
+def _hash_secret(secret: str | None) -> str:
+    """Return the SHA-256 hex digest of *secret* for persistent storage.
+
+    Only the hash is written to disk so that a compromised session file does
+    not leak the plaintext secret.  Comparison at authentication time re-hashes
+    the client-supplied value and compares digests.
+    Returns empty string when *secret* is None or empty.
+    """
+    if not secret:
+        return ""
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
 def standard_error_response(status_code: int, detail: str, **extra):
@@ -791,7 +811,7 @@ def persist_session_registry_entry(session_id: str, meta: dict):
             "expires_at": session_expires_at(last_accessed),
             "documents": list(meta.get("documents", [])),
             "session_dir": session_dir,
-            "session_secret": meta.get("session_secret"),
+            "hashed_session_secret": meta.get("hashed_session_secret") or _hash_secret(meta.get("session_secret", "")),
         }
         write_session_registry_unlocked(registry)
 
@@ -888,6 +908,7 @@ def _recover_session_unlocked(session_id: str):
         "lock": threading.Lock(),
         "documents": list(entry.get("documents", [])),
         "session_secret": entry.get("session_secret"),
+        "hashed_session_secret": entry.get("hashed_session_secret"),
         "session_dir": session_dir,
         "created_at": float(entry.get("created_at", last_accessed) or last_accessed),
         "last_accessed": last_accessed,
@@ -1061,7 +1082,7 @@ def _touch_session_unlocked(session_id: str):
     # Hard-disable legacy sessions created before session secrets existed.
     # These are effectively "session_id-only" capabilities and must be invalidated
     # to avoid cross-user access.
-    if not (meta.get("session_secret") or "").strip():
+    if not (meta.get("session_secret") or meta.get("hashed_session_secret") or "").strip():
         session_dir = meta.get("session_dir")
         try:
             del sessions[session_id]
@@ -1106,7 +1127,7 @@ def _peek_session_unlocked(session_id: str):
         meta = _recover_session_unlocked(session_id)
         if not meta:
             return None
-    if not (meta.get("session_secret") or "").strip():
+    if not (meta.get("session_secret") or meta.get("hashed_session_secret") or "").strip():
         session_dir = meta.get("session_dir")
         try:
             del sessions[session_id]
@@ -1156,7 +1177,7 @@ def _snapshot_session_for_persistence(meta: dict) -> dict:
         "documents": list(meta.get("documents", [])),
         "chat": list(meta.get("chat", [])),
         "flashcards": list(meta.get("flashcards", [])),
-        "session_secret": meta.get("session_secret"),
+        "hashed_session_secret": meta.get("hashed_session_secret") or _hash_secret(meta.get("session_secret", "")),
     }
 
 
@@ -1225,7 +1246,7 @@ def _flush_dirty_sessions() -> None:
                     ),
                     "documents": list(meta.get("documents", [])),
                     "session_dir": meta.get("session_dir"),
-                    "session_secret": meta.get("session_secret"),
+                    "hashed_session_secret": meta.get("hashed_session_secret") or _hash_secret(meta.get("session_secret", "")),
                 }
 
         if registry_updates:
@@ -2539,6 +2560,14 @@ def _require_session_secret(session: dict, provided_secret: str | None):
     if not candidate:
         raise HTTPException(status_code=403, detail="Forbidden")
 
+    # Prefer hashed secret comparison (new format).
+    stored_hash = (session.get("hashed_session_secret") or "").strip()
+    if stored_hash:
+        if not secrets.compare_digest(_hash_secret(candidate), stored_hash):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return
+
+    # Fall back to plaintext comparison (legacy sessions).
     expected = (session.get("session_secret") or "").strip()
     if not expected or not secrets.compare_digest(candidate, expected):
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -2635,13 +2664,13 @@ def process_pdf(
             )
         file.file.seek(0)  # Reset stream so we can copy the full file
 
-        max_size = 20 * 1024 * 1024
+        max_size = MAX_UPLOAD_SIZE_MB * 1024 * 1024
         bytes_written = 0
         with open(temp_path, "wb") as f:
             while chunk := file.file.read(65536):
                 bytes_written += len(chunk)
                 if bytes_written > max_size:
-                    raise HTTPException(status_code=413, detail="Uploaded PDF exceeds the maximum size of 20MB.")
+                    raise HTTPException(status_code=413, detail=f"Uploaded PDF exceeds the maximum size of {MAX_UPLOAD_SIZE_MB}MB.")
                 f.write(chunk)
 
         if bytes_written == 0:
@@ -2698,9 +2727,14 @@ def process_pdf(
                 session = _peek_session_unlocked(requested_session_id)
                 if not session:
                     raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
-                expected_secret = (session.get("session_secret") or "").strip()
-                if not expected_secret or not requested_session_secret or not secrets.compare_digest(requested_session_secret, expected_secret):
-                    raise HTTPException(status_code=403, detail="Forbidden")
+                stored_hash = (session.get("hashed_session_secret") or "").strip()
+                if stored_hash:
+                    if not requested_session_secret or not secrets.compare_digest(_hash_secret(requested_session_secret), stored_hash):
+                        raise HTTPException(status_code=403, detail="Forbidden")
+                else:
+                    expected_secret = (session.get("session_secret") or "").strip()
+                    if not expected_secret or not requested_session_secret or not secrets.compare_digest(requested_session_secret, expected_secret):
+                        raise HTTPException(status_code=403, detail="Forbidden")
                 if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
                     raise HTTPException(status_code=400, detail="Maximum number of documents per session reached.")
                 current_chunks = sum(doc.get("chunk_count", 0) for doc in session.get("documents", []))
@@ -2728,6 +2762,7 @@ def process_pdf(
                 "lock": threading.Lock(),
                 "documents": [],
                 "session_secret": new_session_secret,
+                "hashed_session_secret": _hash_secret(new_session_secret),
                 "session_dir": None,
                 "created_at": created_at,
                 "last_accessed": created_at,
@@ -2850,6 +2885,7 @@ def process_pdf(
                     )
 
                 session_secret = existing_session.get("session_secret")
+                hashed_secret = existing_session.get("hashed_session_secret") or (_hash_secret(session_secret) if session_secret else None)
                 created_at = existing_session.get("created_at", now)
 
             session_dir = persist_vectorstore(session_id, new_vectorstore)
@@ -2866,6 +2902,7 @@ def process_pdf(
                     "lock": threading.Lock(),
                     "documents": [uploaded_document],
                     "session_secret": session_secret,
+                    "hashed_session_secret": hashed_secret,
                     "session_dir": session_dir,
                     "created_at": created_at,
                     "last_accessed": now,
@@ -2913,9 +2950,7 @@ def validate_session_write(data: SessionWriteRequest):
             if not session:
                 raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
 
-            expected_secret = (session.get("session_secret") or "").strip()
-            if not expected_secret or not secrets.compare_digest(provided_secret, expected_secret):
-                raise HTTPException(status_code=403, detail="Forbidden")
+            _require_session_secret(session, provided_secret)
 
     return {"allowed": True}
 
@@ -2923,12 +2958,15 @@ def validate_session_write(data: SessionWriteRequest):
 
 
 @app.get("/processing-status/{session_id}")
-def processing_status(session_id: str, session_secret: str | None = None):
+def processing_status(
+    session_id: str,
+    x_session_secret: str | None = Header(None),
+):
 
     with sessions_lock:
         meta = _touch_session_unlocked(session_id)
         if meta:
-            _require_session_secret(meta, session_secret)
+            _require_session_secret(meta, x_session_secret)
         progress = meta.get("processing_progress") if meta else None
 
     if not progress:
@@ -3582,7 +3620,6 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
             for token_text in streamer:
                 if token_text:
                     full_answer_parts.append(token_text)
-                    yield token_text
 
             generation_thread.join(timeout=180)
 
@@ -3599,6 +3636,8 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
             if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
                 framed = full_answer
 
+            yield framed
+
             citation_sources = [
                 citation_source_for_document(doc, idx)
                 for idx, doc in enumerate(docs)
@@ -3613,7 +3652,7 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
                     append_chat_exchange(
                         current_session,
                         question,
-                        full_answer,
+                        framed,
                         citation_sources,
                         mode,
                     )
