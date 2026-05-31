@@ -134,7 +134,7 @@ source venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
-
+> **Important:** Before running the RAG service, copy the environment file from the repository root. Without this step, the Hugging Face model override and other required variables will not be loaded:
 Copy environment configuration from the repository root:
 
 ```bash
@@ -153,7 +153,15 @@ cd ..          # repository root (parent of rag-service/)
 npm install
 ```
 
-Multer writes uploads to an `uploads/` directory at runtime; it is created automatically on first upload.
+Multer writes uploads to an `uploads/` directory at runtime. If it does not exist after a fresh clone, create it manually before starting the server:
+
+```bash
+# macOS / Linux
+mkdir -p uploads
+
+# Windows (PowerShell)
+New-Item -ItemType Directory -Force -Path uploads
+```
 
 ### 3. React frontend (`frontend/`)
 
@@ -421,8 +429,8 @@ Always restart **RAG → Express → Frontend** after port changes.
 
 | Cause | What to do |
 |-------|------------|
-| First-time Hugging Face model fetch | Wait for completion; verify disk space (~1–2 GB for defaults) |
-| Slow or restricted network | Pre-download models (see below) or use `flan-t5-small` |
+| First-time Hugging Face model fetch | Wait for completion; verify disk space (~1–2 GB for defaults). **An active internet connection is required at runtime** (not just install time) for the initial model download |
+| Slow or restricted network | Pre-download models (see below) or use `flan-t5-small`. On restricted networks, the request will hang silently with no error — pre-downloading models offline is strongly recommended |
 | CPU-only inference | Expect slower Q&A; use a smaller `HF_GENERATION_MODEL` |
 | Large PDFs | More chunks → longer embedding and search; try smaller files first |
 
