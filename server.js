@@ -497,17 +497,71 @@ const SESSION_SECRET_COOKIE_PREFIX = "pdfqa_session_secret_";
 const getSessionSecretCookieName = (sessionId) =>
   `${SESSION_SECRET_COOKIE_PREFIX}${sessionId}`;
 
-// In-memory short-lived token store mapping cookie tokens -> real session secrets.
-// We store a random token in the cookie and keep the actual secret server-side
-// to avoid writing clear-text secrets into cookies (addresses CodeQL CWE-312).
-const SESSION_SECRET_MAP = new Map(); // token -> { secret, expiry }
+// In-memory short-lived token store mapping cookie tokens -> encrypted secrets.
+// To avoid storing session secrets in clear text (CodeQL / CodeQL rule), we
+// encrypt the secret server-side with an operator-provided symmetric key
+// before keeping it in memory. The cookie holds only an opaque token.
+const SESSION_SECRET_MAP = new Map(); // token -> { encrypted: string, expiry }
 const SESSION_SECRET_TTL_MS = (parseInt(process.env.SESSION_SECRET_COOKIE_TTL_DAYS || "7", 10) || 7) * 24 * 60 * 60 * 1000;
+
+// Encryption key must be provided via env var as base64-encoded 32 bytes.
+// If not present, generate a runtime-only key (lost on restart) and log a warning.
+let ENC_KEY = null;
+const _initEncKey = () => {
+  if (ENC_KEY) return;
+  const fromEnv = (process.env.SESSION_SECRET_ENC_KEY || "").trim();
+  if (fromEnv) {
+    try {
+      const buf = Buffer.from(fromEnv, "base64");
+      if (buf.length === 32) {
+        ENC_KEY = buf;
+      } else {
+        console.warn("SESSION_SECRET_ENC_KEY must be 32 bytes base64; falling back to runtime key");
+      }
+    } catch (_) {
+      console.warn("Invalid SESSION_SECRET_ENC_KEY; falling back to runtime key");
+    }
+  }
+  if (!ENC_KEY) {
+    ENC_KEY = crypto.randomBytes(32);
+    console.warn("No SESSION_SECRET_ENC_KEY provided — generated runtime-only key (won't persist across restarts)");
+  }
+};
+
+const _encryptSecret = (secret) => {
+  _initEncKey();
+  const iv = crypto.randomBytes(12); // recommended IV size for AES-GCM
+  const cipher = crypto.createCipheriv("aes-256-gcm", ENC_KEY, iv);
+  const ciphertext = Buffer.concat([cipher.update(secret, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  // Store as base64 segments iv:ciphertext:tag
+  return `${iv.toString("base64")}:${ciphertext.toString("base64")}:${tag.toString("base64")}`;
+};
+
+const _decryptSecret = (blob) => {
+  if (!blob) return null;
+  _initEncKey();
+  try {
+    const [ivB64, ctB64, tagB64] = blob.split(":");
+    const iv = Buffer.from(ivB64, "base64");
+    const ct = Buffer.from(ctB64, "base64");
+    const tag = Buffer.from(tagB64, "base64");
+    const decipher = crypto.createDecipheriv("aes-256-gcm", ENC_KEY, iv);
+    decipher.setAuthTag(tag);
+    const decrypted = Buffer.concat([decipher.update(ct), decipher.final()]);
+    return decrypted.toString("utf8");
+  } catch (e) {
+    console.warn("Failed to decrypt session secret token:", e?.message || e);
+    return null;
+  }
+};
 
 const _storeSessionSecret = (sessionSecret) => {
   if (!sessionSecret) return null;
   const token = crypto.randomUUID();
   const expiry = Date.now() + SESSION_SECRET_TTL_MS;
-  SESSION_SECRET_MAP.set(token, { secret: sessionSecret, expiry });
+  const encrypted = _encryptSecret(sessionSecret);
+  SESSION_SECRET_MAP.set(token, { encrypted, expiry });
   // Schedule cleanup
   setTimeout(() => {
     SESSION_SECRET_MAP.delete(token);
@@ -523,7 +577,7 @@ const _lookupSessionSecret = (token) => {
     SESSION_SECRET_MAP.delete(token);
     return null;
   }
-  return entry.secret;
+  return _decryptSecret(entry.encrypted);
 };
 
 const readRequestCookies = (req) => {
