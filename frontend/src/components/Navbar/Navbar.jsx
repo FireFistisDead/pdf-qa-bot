@@ -35,17 +35,21 @@ const Navbar = ({ darkMode, setDarkMode }) => {
         
         <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
           
-          <Avatar
-            src={logo}
-            alt="Logo"
+          <IconButton 
             onClick={() => navigate('/')}
-            sx={{
-              width: 48,
-              height: 48,
-              bgcolor: "transparent",
-              cursor: "pointer",
-            }}
-          />
+            sx={{ p: 0 }}
+            aria-label="Go to home"
+          >
+            <Avatar
+              src={logo}
+              alt="Logo"
+              sx={{
+                width: 48,
+                height: 48,
+                bgcolor: "transparent",
+              }}
+            />
+          </IconButton>
 
           <Box>
             <Typography

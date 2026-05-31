@@ -49,7 +49,7 @@ const DashboardLayout = ({ children }) => {
       <aside className={`dash-side-extreme ${collapsed ? 'collapsed' : ''}`}>
         <div className="dash-side-glow" />
         
-        <button type="button" className="dash-logo-container" onClick={() => navigate('/dashboard')} style={{ background: 'transparent', border: 'none', padding: 0, textAlign: 'left', cursor: 'pointer', width: '100%', display: 'flex' }}>
+        <button type="button" className="dash-logo-container" aria-label={collapsed ? "Go to Dashboard" : undefined} onClick={() => navigate('/dashboard')} style={{ background: 'transparent', border: 'none', padding: 0, textAlign: 'left', cursor: 'pointer', width: '100%', display: 'flex' }}>
           <div className="crazy-logo-box">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
               <path d="M7 18h10M7 14h10M7 10h6"/>
