@@ -7,6 +7,7 @@ const fs = require("fs");
 const fsPromises = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
+const { domainToASCII } = require("url");
 const { rateLimit } = require("express-rate-limit");
 const slowDown = require("express-slow-down");
 const helmet = require("helmet");
@@ -491,6 +492,33 @@ const ragAuthHeaders = () => {
 const normalizeSessionSecret = (value) =>
   typeof value === "string" ? value.trim() || null : null;
 
+const SUPABASE_ALLOWED_HOST_SUFFIXES = new Set(["supabase.co", "supabase.in"]);
+
+const normalizeHostnameForAllowlist = (hostname) => {
+  if (typeof hostname !== "string") return null;
+
+  const normalizedHostname = hostname.trim().toLowerCase().replace(/\.$/, "");
+  if (!normalizedHostname) return null;
+
+  const asciiHostname = domainToASCII(normalizedHostname);
+  if (!asciiHostname) return null;
+
+  return asciiHostname.toLowerCase().replace(/\.$/, "");
+};
+
+const isAllowedSupabaseHostname = (hostname) => {
+  const normalizedHostname = normalizeHostnameForAllowlist(hostname);
+  if (!normalizedHostname) return false;
+
+  const hostnameLabels = normalizedHostname.split(".");
+  return Array.from(SUPABASE_ALLOWED_HOST_SUFFIXES).some((suffix) => {
+    const suffixLabels = suffix.split(".");
+    if (hostnameLabels.length < suffixLabels.length + 1) return false;
+
+    return hostnameLabels.slice(-suffixLabels.length).join(".") === suffix;
+  });
+};
+
 // ─── Multer Error Handler ───────────────────────────────────────────────────────
 // Catches file size violations (413 Payload Too Large) and other multer errors.
 // CWE-209 Mitigation: Sanitizes error messages to prevent leaking internal implementation
@@ -747,10 +775,10 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
     return res.status(400).json({ error: "Missing or invalid 'url' field." });
   }
   
-  // SSRF Protection: Validate URL format, protocol, and hostname
+  // SSRF Protection: Validate URL format, protocol, and hostname.
   let parsedUrl;
   try {
-    parsedUrl = new URL(url);
+    parsedUrl = new URL(url.trim());
   } catch (err) {
     return res.status(400).json({ error: "Invalid URL format." });
   }
@@ -759,12 +787,12 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
     return res.status(400).json({ error: "Only HTTPS URLs are allowed." });
   }
 
-  const allowedHosts = [".supabase.co", ".supabase.in"];
-  const isAllowedHost = allowedHosts.some(host => parsedUrl.hostname.endsWith(host));
-  
-  if (!isAllowedHost) {
+  const normalizedHostname = normalizeHostnameForAllowlist(parsedUrl.hostname);
+  if (!isAllowedSupabaseHostname(normalizedHostname)) {
     return res.status(403).json({ error: "URL host is not allowed." });
   }
+
+  parsedUrl.hostname = normalizedHostname;
 
   if (!filename || typeof filename !== "string") {
     return res.status(400).json({ error: "Missing or invalid 'filename' field." });
@@ -780,7 +808,7 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
     // Download the PDF from the remote URL into a Buffer
     let pdfBuffer;
     try {
-      const dlResponse = await axios.get(url, {
+      const dlResponse = await axios.get(parsedUrl.toString(), {
         responseType: "arraybuffer",
         timeout: 30000,
         maxContentLength: 50 * 1024 * 1024, // 50 MB cap
@@ -1091,4 +1119,6 @@ module.exports = {
   extractServiceDetails,
   ragAuthHeaders,
   requireInternalRagToken,
+  normalizeHostnameForAllowlist,
+  isAllowedSupabaseHostname,
 };

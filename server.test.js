@@ -29,7 +29,13 @@ after(() => {
 
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
-let app, askSchema, summarizeSchema, extractServiceDetails, ragAuthHeaders;
+let app,
+  askSchema,
+  summarizeSchema,
+  extractServiceDetails,
+  ragAuthHeaders,
+  normalizeHostnameForAllowlist,
+  isAllowedSupabaseHostname;
 let clientIpFromRequest, normalizeIp;
 before(() => {
   process.env.JWT_SECRET = "test-secret-for-ci";
@@ -39,6 +45,8 @@ before(() => {
   summarizeSchema = mod.summarizeSchema;
   extractServiceDetails = mod.extractServiceDetails;
   ragAuthHeaders = mod.ragAuthHeaders;
+  normalizeHostnameForAllowlist = mod.normalizeHostnameForAllowlist;
+  isAllowedSupabaseHostname = mod.isAllowedSupabaseHostname;
 
   ({ clientIpFromRequest, normalizeIp } = require("./security/ip"));
 });
@@ -52,6 +60,24 @@ test("module loads without error", () => {
 
 test("ragAuthHeaders forwards the internal token", () => {
   assert.deepEqual(ragAuthHeaders(), { "X-Internal-Token": process.env.INTERNAL_RAG_TOKEN.trim() });
+});
+
+describe("Supabase URL allowlist", () => {
+  test("normalizes hostname case and trailing dot", () => {
+    assert.equal(normalizeHostnameForAllowlist("XyZ.SUPABASE.CO."), "xyz.supabase.co");
+  });
+
+  test("accepts valid Supabase project hostnames", () => {
+    assert.equal(isAllowedSupabaseHostname("xyz.supabase.co"), true);
+    assert.equal(isAllowedSupabaseHostname("xyz.supabase.in"), true);
+    assert.equal(isAllowedSupabaseHostname("XYZ.SUPABASE.CO."), true);
+  });
+
+  test("rejects lookalike and unrelated hostnames", () => {
+    assert.equal(isAllowedSupabaseHostname("supabase.co"), false);
+    assert.equal(isAllowedSupabaseHostname("evil.com"), false);
+    assert.equal(isAllowedSupabaseHostname("xyz.supabase.co.evil.com"), false);
+  });
 });
 
 test("server module can be imported when INTERNAL_RAG_TOKEN is unset", () => {
