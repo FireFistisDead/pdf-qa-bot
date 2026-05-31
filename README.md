@@ -144,7 +144,15 @@ copy ..\.env.example .env  # Windows (cmd)
 Copy-Item ..\.env.example .env  # Windows (PowerShell)
 ```
 
-Edit `.env` if you want a smaller or faster generation model (see [Configuration](#configuration)).
+Edit `.env` and set `INTERNAL_RAG_TOKEN` to a strong random value.
+
+> **⚠️ Critical:** The root `.env` and `rag-service/.env` **must have the same value** for
+> `INTERNAL_RAG_TOKEN`. A mismatch causes all PDF processing requests to fail with `403 Forbidden`.
+> Generate a shared secret and paste it into both files:
+>
+> ```bash
+> openssl rand -hex 32
+> ```
 
 ### 2. Express API (repository root)
 
@@ -163,6 +171,26 @@ npm install
 ```
 
 The frontend `package.json` sets `"proxy": "http://localhost:4000"`, so development requests to `/upload`, `/ask`, and `/summarize` are forwarded to Express without CORS configuration in the browser.
+
+> **⚠️ Note:** After editing `frontend/.env`, you **must** stop and restart `npm start`.
+> React does not hot-reload environment variables — the running process continues using the
+> old values until restarted.
+
+### 4. Supabase schema (first-time only)
+
+If you are using the **Dashboard** (`/dashboard/*`) routes, you need to bootstrap the
+database schema in your Supabase project once before the Documents page will work.
+
+Run the migration in the **Supabase SQL Editor** (Dashboard → SQL Editor → New query):
+
+```bash
+# The migration file is at:
+supabase/migrations/001_init_documents.sql
+```
+
+Paste its contents into the SQL Editor and click **Run**. This creates the `documents`
+table and the `documents` storage bucket. Without this step, uploads appear to succeed
+but the Documents page will always show **0 FILES**.
 
 ---
 
