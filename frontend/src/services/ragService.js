@@ -94,17 +94,8 @@ export const askStream = (sessionId, sessionSecret, question, onChunk, onDone, o
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
-        // SSE format: "data: <text>\n\n"
-        const lines = chunk.split('\n');
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const text = line.slice(6);
-            if (text === '[DONE]') {
-              onDone();
-              return;
-            }
-            onChunk(text);
-          }
+        if (chunk) {
+          onChunk(chunk);
         }
       }
       onDone();

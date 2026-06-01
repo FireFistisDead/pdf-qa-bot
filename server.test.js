@@ -152,6 +152,30 @@ const consumeUploadStream = (formData) =>
     stream.resume();
   });
 
+const runIsolatedGatewayScript = (script, extraEnv = {}) => {
+  const result = spawnSync(process.execPath, ["-e", script], {
+    cwd: __dirname,
+    env: {
+      ...process.env,
+      INTERNAL_RAG_TOKEN: "test-internal-rag-token",
+      JWT_SECRET: "test-jwt-secret",
+      ...extraEnv,
+    },
+    encoding: "utf8",
+    timeout: 20000,
+  });
+
+  assert.equal(
+    result.status,
+    0,
+    `Isolated gateway script failed:\nSTDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`,
+  );
+
+  const lines = result.stdout.trim().split(/\r?\n/).filter(Boolean);
+  assert.ok(lines.length > 0, "Expected JSON output from isolated gateway script");
+  return JSON.parse(lines.at(-1));
+};
+
 describe("IP normalization", () => {
   test("normalizeIp strips IPv4-mapped IPv6 prefix", () => {
     assert.equal(normalizeIp("::ffff:127.0.0.1"), "127.0.0.1");
@@ -409,6 +433,158 @@ describe("route error responses", () => {
     const data = await res.json();
     assert.equal(data.error, "Validation failed");
     assert.deepEqual(data.details.fieldErrors.session_id, ["session_id is required."]);
+  });
+
+  test("POST /ask returns 429 JSON when the gateway rate limit is exceeded", () => {
+    const result = runIsolatedGatewayScript(`
+      const http = require("node:http");
+      const axios = require("axios");
+      const { app } = require("./server.js");
+
+      axios.post = async () => ({
+        data: {
+          answer: "ok",
+          sources: [],
+          mode: "default",
+        },
+      });
+
+      const server = http.createServer(app);
+      server.listen(0, async () => {
+        const { port } = server.address();
+        const baseUrl = "http://127.0.0.1:" + port;
+        const body = JSON.stringify({
+          question: "What is this PDF about?",
+          session_id: "550e8400-e29b-41d4-a716-446655440000",
+          session_secret: "session-secret-123",
+        });
+
+        const first = await fetch(baseUrl + "/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+        });
+
+        const second = await fetch(baseUrl + "/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+        });
+
+        const firstJson = await first.json();
+        const secondJson = await second.json();
+
+        console.log(JSON.stringify({
+          firstStatus: first.status,
+          firstJson,
+          secondStatus: second.status,
+          secondJson,
+        }));
+
+        await new Promise((resolve) => server.close(resolve));
+      });
+    `, {
+      RATE_LIMIT_MAX: "1",
+      RATE_LIMIT_WINDOW_MS: "60000",
+    });
+
+    assert.equal(result.firstStatus, 200);
+    assert.equal(result.secondStatus, 429);
+    assert.match(result.secondJson.error, /too many requests/i);
+  });
+
+  test("POST /upload returns 429 JSON when concurrent uploads exceed the cap", () => {
+    const result = runIsolatedGatewayScript(`
+      const http = require("node:http");
+      const axios = require("axios");
+      const { app } = require("./server.js");
+
+      let releaseFirstUpload;
+      const holdFirstUpload = new Promise((resolve) => {
+        releaseFirstUpload = resolve;
+      });
+
+      let firstPostFormReached;
+      const firstPostFormReachedPromise = new Promise((resolve) => {
+        firstPostFormReached = resolve;
+      });
+
+      let postFormCalls = 0;
+      axios.postForm = async () => {
+        postFormCalls += 1;
+        if (postFormCalls === 1) {
+          firstPostFormReached();
+          await holdFirstUpload;
+        }
+
+        return {
+          data: {
+            session_id: "550e8400-e29b-41d4-a716-446655440000",
+            session_secret: "session-secret-123",
+            document: { filename: "sample.pdf" },
+            documents: [],
+          },
+        };
+      };
+
+      const server = http.createServer(app);
+      server.listen(0, async () => {
+        const { port } = server.address();
+        const baseUrl = "http://127.0.0.1:" + port;
+
+        const firstRequest = fetch(baseUrl + "/upload", {
+          method: "POST",
+          body: (() => {
+            const formData = new FormData();
+            formData.append(
+              "file",
+              new Blob([Buffer.from("%PDF-1.4\\n%%EOF")], { type: "application/pdf" }),
+              "sample.pdf",
+            );
+            return formData;
+          })(),
+        });
+
+        await firstPostFormReachedPromise;
+
+        const second = await fetch(baseUrl + "/upload", {
+          method: "POST",
+          body: (() => {
+            const formData = new FormData();
+            formData.append(
+              "file",
+              new Blob([Buffer.from("%PDF-1.4\\n%%EOF")], { type: "application/pdf" }),
+              "sample.pdf",
+            );
+            return formData;
+          })(),
+        });
+
+        const secondJson = await second.json();
+        releaseFirstUpload();
+
+        const first = await firstRequest;
+        const firstJson = await first.json();
+
+        console.log(JSON.stringify({
+          firstStatus: first.status,
+          firstJson,
+          secondStatus: second.status,
+          secondJson,
+        }));
+
+        await new Promise((resolve) => server.close(resolve));
+      });
+    `, {
+      RATE_LIMIT_MAX: "60",
+      RATE_LIMIT_WINDOW_MS: "60000",
+      UPLOAD_MAX_CONCURRENT_PER_IP: "1",
+      UPLOAD_MAX_FILE_SIZE_BYTES: "20000000",
+    });
+
+    assert.equal(result.firstStatus, 200);
+    assert.equal(result.secondStatus, 429);
+    assert.match(result.secondJson.error, /too many concurrent uploads/i);
   });
 
   test("POST /upload without file returns 400", async () => {
