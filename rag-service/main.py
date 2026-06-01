@@ -136,8 +136,43 @@ def hash_value(value) -> str:
     return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()[:16]
 
 
+_LOG_RECORD_RESERVED_FIELDS = {
+    "name",
+    "msg",
+    "args",
+    "levelname",
+    "levelno",
+    "pathname",
+    "filename",
+    "module",
+    "exc_info",
+    "exc_text",
+    "stack_info",
+    "lineno",
+    "funcName",
+    "created",
+    "msecs",
+    "relativeCreated",
+    "thread",
+    "threadName",
+    "processName",
+    "process",
+    "message",
+}
+
+
+def _sanitize_audit_fields(fields):
+    sanitized = {}
+    for key, value in fields.items():
+        if key in _LOG_RECORD_RESERVED_FIELDS or key.startswith("_"):
+            sanitized[f"audit_{key}"] = value
+        else:
+            sanitized[key] = value
+    return sanitized
+
+
 def audit_event(event: str, **fields):
-    logger.info(event, extra=fields)
+    logger.info(event, extra=_sanitize_audit_fields(fields))
 
 app = FastAPI()
 
