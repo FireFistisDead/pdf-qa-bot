@@ -86,7 +86,7 @@ jobs:
       - name: Lint frontend code
         run: |
           cd frontend
-          npx eslint src/
+          npx eslint src/ --ext .js,.jsx
 
       - name: Build frontend
         run: |
