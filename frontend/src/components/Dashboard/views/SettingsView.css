@@ -1,4 +1,12 @@
-/* SettingsView.css - Brutalist Glassmorphism Theme */
+/* ═══════════════════════════════════════════════════════════
+   SettingsView.css — Brutalist Neon Dark
+   Palette: #000 bg, #c8ff00 accent, #1c1c1c borders
+   ═══════════════════════════════════════════════════════════ */
+
+:root {
+  --settings-accent: #c8ff00;
+  --settings-danger: #ef4444;
+}
 
 .settings-layout-wrap {
   position: relative;
@@ -7,6 +15,53 @@
   color: var(--text, #e8e6e3);
   font-family: 'Space Grotesk', sans-serif;
   overflow-y: auto;
+  background: #000;
+  perspective: 1000px; /* For 3D hover effects */
+}
+
+/* ── ANIMATED BACKGROUND ── */
+.settings-bg-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(200, 255, 0, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(200, 255, 0, 0.025) 1px, transparent 1px);
+  background-size: 50px 50px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.settings-bg-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(120px);
+  pointer-events: none;
+  z-index: 0;
+  animation: orbFloat 12s ease-in-out infinite alternate;
+}
+.settings-bg-orb-1 {
+  width: 500px; height: 500px;
+  background: rgba(200, 255, 0, 0.06);
+  top: -100px; right: -100px;
+}
+.settings-bg-orb-2 {
+  width: 400px; height: 400px;
+  background: rgba(100, 0, 255, 0.04);
+  bottom: -150px; left: 10%;
+  animation-delay: -6s;
+}
+
+@keyframes orbFloat {
+  0% { transform: translate(0, 0) scale(1); }
+  100% { transform: translate(-40px, 60px) scale(1.15); }
+}
+
+/* ── CONTENT WRAPPER ── */
+.settings-content-z {
+  position: relative;
+  z-index: 10;
+  max-width: 1200px;
+  margin: 0 auto;
 }
 
 /* Header */
@@ -19,6 +74,8 @@
   letter-spacing: -1px;
   margin: 0;
   text-transform: uppercase;
+  font-family: 'Syne', sans-serif;
+  text-shadow: 0 0 20px rgba(200, 255, 0, 0.2);
 }
 
 /* Grid Layout */
@@ -26,23 +83,24 @@
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 40px;
-  max-width: 1200px;
 }
 
-/* Panels */
+/* ── PANELS (BRUTALIST HOVER EFFECTS) ── */
 .settings-panel {
   position: relative;
-  background: rgba(10, 10, 10, 0.6);
-  backdrop-filter: blur(12px);
+  background: rgba(5, 5, 5, 0.8);
+  backdrop-filter: blur(20px);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 12px;
   padding: 30px;
-  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  transform-style: preserve-3d;
 }
 .settings-panel:hover {
-  transform: translateY(-5px);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-  border-color: rgba(255, 255, 255, 0.2);
+  transform: translateY(-8px) translateZ(20px);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.8),
+              0 0 30px rgba(200, 255, 0, 0.05);
+  border-color: rgba(200, 255, 0, 0.3);
 }
 
 /* Panel Header */
@@ -56,9 +114,7 @@
   gap: 12px;
   text-transform: uppercase;
   letter-spacing: 1px;
-}
-.settings-panel h2 svg {
-  color: rgba(255, 255, 255, 0.6);
+  color: var(--settings-accent);
 }
 
 /* Profile Section */
@@ -71,23 +127,27 @@
 .profile-avatar-large {
   width: 80px;
   height: 80px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, #8B5CF6, #EC4899);
+  border-radius: 12px;
+  background: rgba(200, 255, 0, 0.1);
+  border: 1px solid var(--settings-accent);
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 2rem;
   font-weight: 700;
-  color: white;
-  border: 2px solid rgba(255, 255, 255, 0.2);
+  color: var(--settings-accent);
+  box-shadow: inset 0 0 20px rgba(200, 255, 0, 0.1);
 }
 .profile-details h3 {
   margin: 0 0 5px 0;
   font-size: 1.5rem;
+  font-family: 'Syne', sans-serif;
 }
 .profile-details p {
   margin: 0;
   color: rgba(255, 255, 255, 0.6);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9rem;
 }
 
 /* Buttons */
@@ -95,12 +155,12 @@
   background: transparent;
   border: 1px solid rgba(255, 255, 255, 0.2);
   color: #fff;
-  padding: 10px 20px;
-  border-radius: 6px;
+  padding: 12px 20px;
+  border-radius: 8px;
   font-weight: 600;
   font-family: 'Space Grotesk', sans-serif;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
   text-transform: uppercase;
   letter-spacing: 1px;
   width: 100%;
@@ -108,29 +168,60 @@
   align-items: center;
   justify-content: center;
   gap: 10px;
+  position: relative;
+  overflow: hidden;
+}
+.btn-crazy-outline::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; width: 100%; height: 100%;
+  background: var(--settings-accent);
+  transform: translateX(-100%);
+  transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  z-index: -1;
 }
 .btn-crazy-outline:hover {
-  background: rgba(255, 255, 255, 0.1);
-  border-color: rgba(255, 255, 255, 0.4);
+  color: #000;
+  border-color: var(--settings-accent);
+  box-shadow: 0 0 20px rgba(200, 255, 0, 0.4);
 }
-.btn-crazy-danger {
-  background: rgba(239, 68, 68, 0.1);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  color: #ef4444;
+.btn-crazy-outline:hover::before {
+  transform: translateX(0);
 }
-.btn-crazy-danger:hover {
-  background: rgba(239, 68, 68, 0.2);
-  border-color: rgba(239, 68, 68, 0.6);
-  box-shadow: 0 0 15px rgba(239, 68, 68, 0.3);
+.btn-crazy-outline svg {
+  transition: transform 0.3s ease;
+}
+.btn-crazy-outline:hover svg {
+  transform: translateX(4px);
 }
 
-/* Toggle Switches */
+.btn-crazy-danger {
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: var(--settings-danger);
+}
+.btn-crazy-danger::before {
+  background: var(--settings-danger);
+}
+.btn-crazy-danger:hover {
+  color: #fff;
+  border-color: var(--settings-danger);
+  box-shadow: 0 0 30px rgba(239, 68, 68, 0.6);
+}
+
+/* Toggle Switches & Rows */
 .setting-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
   padding: 16px 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  transition: background 0.2s ease;
+}
+.setting-row:hover {
+  background: rgba(255, 255, 255, 0.02);
+  padding-left: 8px;
+  padding-right: 8px;
+  border-radius: 4px;
 }
 .setting-row:last-child {
   border-bottom: none;
@@ -145,18 +236,41 @@
   color: rgba(255, 255, 255, 0.5);
 }
 
+.toggle-switch-mock {
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: rgba(200, 255, 0, 0.1);
+  border: 1px solid rgba(200, 255, 0, 0.3);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8rem;
+  letter-spacing: 1px;
+}
+
+/* Danger Panel Specifics */
+.panel-danger {
+  border-color: rgba(239, 68, 68, 0.3);
+}
+.panel-danger:hover {
+  border-color: rgba(239, 68, 68, 0.8);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.8),
+              0 0 40px rgba(239, 68, 68, 0.15);
+}
+.panel-danger h2 {
+  color: var(--settings-danger);
+}
+
 /* Entrance Animations */
 .animate-on-load {
   opacity: 0;
-  transform: translateY(20px);
+  transform: translateY(30px) scale(0.98);
 }
 .fade-in-up {
-  animation: fadeSlideUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: fadeSlideUpCrazy 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
-@keyframes fadeSlideUp {
-  from { opacity: 0; transform: translateY(20px); }
-  to { opacity: 1; transform: translateY(0); }
+@keyframes fadeSlideUpCrazy {
+  from { opacity: 0; transform: translateY(30px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 @media (max-width: 900px) {
