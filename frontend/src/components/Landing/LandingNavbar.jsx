@@ -22,23 +22,28 @@ const LandingNavbar = () => {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-   useEffect(() => {
-    const sections = ['features', 'how-it-works', 'pricing', 'faq'];
-    const observers = [];
+  useEffect(() => {
+  const sections = ['features', 'how-it-works', 'pricing', 'faq'];
+  const observer = new IntersectionObserver(
+    (entries) => {
+      const visible = entries
+        .filter((e) => e.isIntersecting)
+        .sort((a, b) => b.intersectionRatio - a.intersectionRatio);
 
-    sections.forEach((id) => {
-      const el = document.getElementById(id);
-      if (!el) return;
-      const observer = new IntersectionObserver(
-        ([entry]) => { if (entry.isIntersecting) setActiveSection(id); },
-        { threshold: 0.4 }
-      );
-      observer.observe(el);
-      observers.push(observer);
-    });
+      if (visible.length > 0) {
+        setActiveSection(visible[0].target.id);
+      }
+    },
+    { threshold: 0.4 }
+  );
 
-    return () => observers.forEach((o) => o.disconnect());
-  }, []);
+  sections.forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) observer.observe(el);
+  });
+
+  return () => observer.disconnect();
+}, []);
 
   return (
     <nav className="navbar" id="landing-navbar">
