@@ -45,14 +45,21 @@ const SettingsView = () => {
 
   return (
     <div className="settings-layout-wrap">
-      <div className="settings-header-box animate-on-load">
-        <h1>SETTINGS MODULE</h1>
-        <p style={{ color: 'rgba(255,255,255,0.6)', marginTop: '8px' }}>
-          Configure your DocuMind OS preferences and manage your account.
-        </p>
-      </div>
+      {/* Animated Background */}
+      <div className="settings-bg-grid" />
+      <div className="settings-bg-orb settings-bg-orb-1" />
+      <div className="settings-bg-orb settings-bg-orb-2" />
 
-      <div className="settings-grid">
+      {/* Content wrapper to float above background */}
+      <div className="settings-content-z">
+        <div className="settings-header-box animate-on-load">
+          <h1>SETTINGS MODULE</h1>
+          <p style={{ color: 'rgba(255,255,255,0.6)', marginTop: '8px' }}>
+            Configure your DocuMind OS preferences and manage your account.
+          </p>
+        </div>
+
+        <div className="settings-grid">
         {/* Left Column */}
         <div className="settings-column">
           {/* Profile Panel */}
@@ -147,7 +154,7 @@ const SettingsView = () => {
           </div>
 
           {/* Danger Zone */}
-          <div className="settings-panel animate-on-load" style={{ border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+          <div className="settings-panel panel-danger animate-on-load">
             <h2 style={{ color: '#ef4444' }}>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
@@ -168,6 +175,7 @@ const SettingsView = () => {
             </button>
           </div>
         </div>
+      </div>
       </div>
     </div>
   );
