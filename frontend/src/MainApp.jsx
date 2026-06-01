@@ -158,26 +158,31 @@ function MainApp() {
         const sessions = await getSessionsApi(knownSessions);
         if (sessions && sessions.length > 0) {
           const secretById = new Map(knownSessions.map((s) => [s.session_id, s.session_secret]));
-          const formattedPdfs = sessions.map(s => {
-            const doc = s.documents?.[0];
-            // Uploaded files are deleted from the server immediately after
-            // indexing — no server-side URL is available for historical sessions.
-            // The PdfViewer handles a null url gracefully with an informational
-            // empty state. Chat and summarization continue to work normally
-            // because they rely on the FAISS index, not the raw file.
-            return {
-              id: doc?.document_id || s.session_id,
-              name: doc?.filename || "Unknown PDF",
-              document_id: doc?.document_id || null,
+          const formattedPdfs = sessions.flatMap(s => {
+            if (!s.documents || s.documents.length === 0) {
+              return [{
+                id: s.session_id,
+                name: "Unknown PDF",
+                document_id: null,
+                url: null,
+                chat: normalizeChatHistory(s.chat || [], s.session_id, s.session_id),
+                session_id: s.session_id,
+                session_secret: secretById.get(s.session_id) || null,
+              }];
+            }
+            return s.documents.map(doc => ({
+              id: doc.document_id || s.session_id,
+              name: doc.filename || "Unknown PDF",
+              document_id: doc.document_id || null,
               url: null,
               chat: normalizeChatHistory(
                 s.chat || [],
                 s.session_id,
-                doc?.document_id || s.session_id,
+                doc.document_id || s.session_id,
               ),
               session_id: s.session_id,
               session_secret: secretById.get(s.session_id) || null,
-            };
+            }));
           });
           setPdfs(formattedPdfs);
           setSelectedPdf(formattedPdfs[0].id);
