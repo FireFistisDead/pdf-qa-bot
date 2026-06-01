@@ -446,32 +446,20 @@ const startUploadsCleanup = () => {
 };
 
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, UPLOADS_DIR);
-  },
-  filename: (req, file, cb) => {
-    cb(null, `${crypto.randomUUID()}.pdf`);
-  },
+  destination: (req, file, cb) => cb(null, 'uploads/'),
+  filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname),
 });
 
-const upload = multer({
-  storage,
-  limits: {
-    fileSize: MAX_PDF_SIZE_BYTES,
-    // Additional limits to prevent abuse
-    files: 1, // Only allow one file per request
-  },
-  fileFilter: (req, file, cb) => {
-    const isPdfMime = file.mimetype === "application/pdf";
-    const isPdfExtension = file.originalname.toLowerCase().endsWith(".pdf");
-
-    if (!isPdfMime || !isPdfExtension) {
-      return cb(new Error("Only PDF files are allowed."));
-    }
-
+const fileFilter = (req, file, cb) => {
+  const ext = path.extname(file.originalname).toLowerCase();
+  if (file.mimetype === 'application/pdf' && ext === '.pdf') {
     cb(null, true);
-  },
-});
+  } else {
+    cb(new Error('Only PDF files are allowed.'), false);
+  }
+};
+
+const upload = multer({ storage, fileFilter });
 
 const cleanupFile = async (filePath) => {
   if (!filePath) return;
@@ -1127,6 +1115,13 @@ app.post("/sessions/lookup", async (req, res) => {
 
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
+});
+
+app.use((err, req, res, next) => {
+  if (err.message === 'Only PDF files are allowed.') {
+    return res.status(400).json({ error: err.message });
+  }
+  next(err);
 });
 
 app.use((req, res, next) => {
