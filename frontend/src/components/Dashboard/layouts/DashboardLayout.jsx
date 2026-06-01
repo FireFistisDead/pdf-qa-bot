@@ -49,7 +49,7 @@ const DashboardLayout = ({ children }) => {
       <aside className={`dash-side-extreme ${collapsed ? 'collapsed' : ''}`}>
         <div className="dash-side-glow" />
         
-        <div className="dash-logo-container" onClick={() => navigate('/dashboard')}>
+        <div role="button" tabIndex={0} onKeyDown={(e) => { if(e.key === 'Enter' || e.key === ' ') navigate('/dashboard'); }} className="dash-logo-container" onClick={() => navigate('/dashboard')}>
           <div className="crazy-logo-box">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
               <path d="M7 18h10M7 14h10M7 10h6"/>
@@ -93,7 +93,7 @@ const DashboardLayout = ({ children }) => {
         </div>
 
         {/* Collapse Toggle */}
-        <button className="crazy-collapse-btn" onClick={() => setCollapsed(!collapsed)}>
+        <button aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} className="crazy-collapse-btn" onClick={() => setCollapsed(!collapsed)}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             {collapsed ? <polyline points="9 18 15 12 9 6"/> : <polyline points="15 18 9 12 15 6"/>}
           </svg>

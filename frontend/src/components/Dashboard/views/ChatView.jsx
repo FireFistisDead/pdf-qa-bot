@@ -142,7 +142,7 @@ const ChatView = () => {
             </div>
             {sidebarOpen && <span className="csb-title">NEURAL_DOCS</span>}
           </div>
-          <button className="csb-toggle" onClick={() => setSidebarOpen(p => !p)}>
+          <button aria-label={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"} className="csb-toggle" onClick={() => setSidebarOpen(p => !p)}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
               {sidebarOpen
                 ? <polyline points="15 18 9 12 15 6" />
@@ -258,9 +258,9 @@ const ChatView = () => {
               <p className="cis-sub">Neural link active — <strong style={{ color: '#fff' }}>{activeDoc.name}</strong></p>
               <p className="cis-sub" style={{ marginTop: 4, opacity: 0.5 }}>Start your interrogation below</p>
               <div className="cis-hints">
-                <div className="cis-hint" onClick={() => setInputText('Summarize this document in 3 bullet points')}>→ Summarize in 3 points</div>
-                <div className="cis-hint" onClick={() => setInputText('What are the key findings?')}>→ Key findings</div>
-                <div className="cis-hint" onClick={() => setInputText('What are the main conclusions?')}>→ Main conclusions</div>
+                <div role="button" tabIndex={0} onKeyDown={(e) => { if(e.key === 'Enter' || e.key === ' ') setInputText('Summarize this document in 3 bullet points'); }} className="cis-hint" onClick={() => setInputText('Summarize this document in 3 bullet points')}>→ Summarize in 3 points</div>
+                <div role="button" tabIndex={0} onKeyDown={(e) => { if(e.key === 'Enter' || e.key === ' ') setInputText('What are the key findings?'); }} className="cis-hint" onClick={() => setInputText('What are the key findings?')}>→ Key findings</div>
+                <div role="button" tabIndex={0} onKeyDown={(e) => { if(e.key === 'Enter' || e.key === ' ') setInputText('What are the main conclusions?'); }} className="cis-hint" onClick={() => setInputText('What are the main conclusions?')}>→ Main conclusions</div>
               </div>
             </div>
           ) : (
