@@ -677,15 +677,21 @@ app.post(
   const absoluteFilePath = uploadedFilePath
     ? path.join(UPLOADS_DIR, path.basename(uploadedFilePath))
     : null;
-  const rawSessionId = req.body?.session_id;
-  const rawSessionSecret = req.body?.session_secret;
+  const hasSessionId = Object.prototype.hasOwnProperty.call(req.body || {}, 'session_id');
+  const hasSessionSecret = Object.prototype.hasOwnProperty.call(req.body || {}, 'session_secret');
   
-  let sessionId = null;
-  let sessionSecret = null;
+  if (hasSessionId || hasSessionSecret) {
+    if (!(hasSessionId && hasSessionSecret)) {
+      if (uploadedFilePath) await cleanupFile(uploadedFilePath);
+      return sendUploadError(
+        res,
+        403,
+        "session_id and session_secret must be provided together to extend an existing session."
+      );
+    }
 
-  if (rawSessionId || rawSessionSecret) {
-    const idValidation = uuidSchema.safeParse(rawSessionId);
-    const secretValidation = sessionSecretSchema.safeParse(rawSessionSecret);
+    const idValidation = uuidSchema.safeParse(req.body.session_id);
+    const secretValidation = sessionSecretSchema.safeParse(req.body.session_secret);
     
     if (!idValidation.success || !secretValidation.success) {
       if (uploadedFilePath) await cleanupFile(uploadedFilePath);
@@ -748,18 +754,7 @@ app.post(
         "Invalid file type. Only real PDF documents are accepted.",
       );
     }
-    // Validate session credential pairing before opening the file stream.
-    // Creating fs.createReadStream before this check would leave a dangling
-    // open handle on the file if the request is rejected and cleanupFile
-    // deletes the file before the stream is ever consumed.
-    if ((sessionId || sessionSecret) && !(sessionId && sessionSecret)) {
-      await cleanupFile(uploadedFilePath);
-      return sendUploadError(
-        res,
-        403,
-        "session_id and session_secret must be provided together to extend an existing session.",
-      );
-    }
+    // Validate session credential pairing was already handled above.
 
     // All validation passed — safe to open the file stream for forwarding.
     const formData = {
@@ -865,12 +860,19 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
     return res.status(400).json({ error: "Missing or invalid 'url' field." });
   }
 
+  const hasSessionId = Object.prototype.hasOwnProperty.call(req.body || {}, 'session_id');
+  const hasSessionSecret = Object.prototype.hasOwnProperty.call(req.body || {}, 'session_secret');
+
   let session_id = null;
   let session_secret = null;
 
-  if (rawSessionId || rawSessionSecret) {
-    const idValidation = uuidSchema.safeParse(rawSessionId);
-    const secretValidation = sessionSecretSchema.safeParse(rawSessionSecret);
+  if (hasSessionId || hasSessionSecret) {
+    if (!(hasSessionId && hasSessionSecret)) {
+      return res.status(403).json({ error: "session_id and session_secret must be provided together to extend an existing session." });
+    }
+
+    const idValidation = uuidSchema.safeParse(req.body.session_id);
+    const secretValidation = sessionSecretSchema.safeParse(req.body.session_secret);
     
     if (!idValidation.success || !secretValidation.success) {
       return res.status(400).json({ error: "Validation failed for session credentials." });
