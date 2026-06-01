@@ -307,7 +307,19 @@ curl -X POST http://localhost:4000/upload \
 
 ## Configuration
 
-Environment variables are read from `rag-service/.env` (create from `.env.example` at the repo root).
+Environment variables are read from the root `.env` for Express and from `rag-service/.env` for the RAG service (create both from `.env.example` at the repo root).
+
+### Express gateway security
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RATE_LIMIT_WINDOW_MS` | `60000` | Sliding window for the Express request limiter on `/upload`, `/ask`, and `/summarize` |
+| `RATE_LIMIT_MAX` | `60` | Maximum requests per IP within `RATE_LIMIT_WINDOW_MS` before a JSON `429` |
+| `UPLOAD_MAX_FILE_SIZE_BYTES` | `20000000` | Maximum PDF size per upload in bytes |
+| `UPLOAD_MAX_CONCURRENT_PER_IP` | `2` | Maximum in-flight `/upload` requests allowed per IP |
+| `RATE_LIMIT_SLOWDOWN_AFTER` | `10` | Number of free inference requests before the slow-down delay starts |
+
+`MAX_UPLOAD_SIZE_MB` is still accepted for compatibility, but `UPLOAD_MAX_FILE_SIZE_BYTES` is preferred.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
