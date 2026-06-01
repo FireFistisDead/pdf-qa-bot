@@ -4,7 +4,10 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
 const { validatePassword } = require("../utils/passwordValidator");
-
+const {
+  signupSchema,
+  loginSchema,
+} = require("../../validators/schemas");
 const usersFile = path.join(__dirname, "../data/users.json");
 
 const SECRET = process.env.JWT_SECRET;
@@ -27,23 +30,25 @@ const normalizeEmail = (email) => {
 
 exports.signup = async (req, res) => {
   try {
-    let { email, password } = req.body;
+    const validation = signupSchema.safeParse(req.body);
 
-    if (!email || !password) {
-      return res.status(400).json({
-        message: "Email and password are required",
-      });
-    }
+if (!validation.success) {
+  return res.status(400).json({
+    message: validation.error.issues[0].message,
+  });
+}
+
+let { email, password } = validation.data;
     
     email = normalizeEmail(email);
 
-    const validation = validatePassword(password);
+    const passwordValidation = validatePassword(password);
 
-    if (!validation.valid) {
-      return res.status(400).json({
-        message: validation.message,
-      });
-    }
+    if (!passwordValidation.valid) {
+  return res.status(400).json({
+    message: passwordValidation.message,
+  });
+}
 
     const users = getUsers();
 
@@ -84,12 +89,15 @@ exports.signup = async (req, res) => {
 
 exports.login = async (req, res) => {
   try {
-    let { email, password } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({
-        message: "Email and password are required",
-      });
-    }
+    const validation = loginSchema.safeParse(req.body);
+
+if (!validation.success) {
+  return res.status(400).json({
+    message: validation.error.issues[0].message,
+  });
+}
+
+let { email, password } = validation.data;
     
     email = normalizeEmail(email);
 

@@ -50,6 +50,26 @@ const sessionSecretSchema = z.preprocess(
   z.string().trim().min(1, "session_secret is required."),
 );
 
+const emailSchema = z.preprocess(
+  (val) => (typeof val === "string" ? val : ""),
+  z.string().trim().email("Valid email is required."),
+);
+
+const passwordSchema = z.preprocess(
+  (val) => (typeof val === "string" ? val : ""),
+  z.string().min(1, "Password is required."),
+);
+
+const signupSchema = z.object({
+  email: emailSchema,
+  password: passwordSchema,
+});
+
+const loginSchema = z.object({
+  email: emailSchema,
+  password: passwordSchema,
+});
+
 const askSchema = z.object({
   question: questionSchema,
   session_id: uuidSchema,
@@ -101,4 +121,6 @@ module.exports = {
   sessionsLookupSchema,
   generateFlashcardsSchema,
   updateFlashcardProgressSchema,
+  signupSchema,
+  loginSchema,
 };
