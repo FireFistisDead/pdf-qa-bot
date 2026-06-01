@@ -81,13 +81,16 @@ class AdaptiveTextSplitter:
         while start_idx < text_len:
             end_idx = min(start_idx + self.chunk_size, text_len)
             
+           # 2. Smart Boundary Detection
             if end_idx < text_len:
-                search_space = text[end_idx - 100 : end_idx]
+                # CodeRabbit Patch: Prevent negative slicing if chunk_size < 100
+                lookback = min(100, end_idx)
+                search_space = text[end_idx - lookback : end_idx]
                 boundary_pos = -1
                 for marker in ["\n\n", "\n", ". ", "? ", "! "]:
                     pos = search_space.rfind(marker)
                     if pos != -1:
-                        boundary_pos = (end_idx - 100) + pos + len(marker)
+                        boundary_pos = (end_idx - lookback) + pos + len(marker)
                         break
                 
                 if boundary_pos != -1:
