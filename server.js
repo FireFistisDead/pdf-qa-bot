@@ -702,9 +702,8 @@ const _readSessionSecretFromRedis = async (token) => {
   }
 };
 
-const _storeSessionSecret = async (sessionSecret) => {
-  if (!sessionSecret) return null;
-  const token = crypto.randomUUID();
+const _storeSessionSecret = async (token, sessionSecret) => {
+  if (!token || !sessionSecret) return false;
   const expiry = Date.now() + SESSION_SECRET_TTL_MS;
   const encrypted = _encryptSecret(sessionSecret);
 
@@ -724,7 +723,7 @@ const _storeSessionSecret = async (sessionSecret) => {
       timeout.unref();
     }
   }
-  return token;
+  return true;
 };
 
 const _lookupSessionSecret = async (token) => {
@@ -807,8 +806,11 @@ const setSessionSecretCookie = async (res, sessionId, sessionSecret) => {
   }
 
   // Store the real secret server-side and put only a random token in the cookie.
-  const token = await _storeSessionSecret(sessionSecret);
-  if (!token) return;
+  // Generate the token outside the storage helper so cookie data never flows
+  // from a function that accepts the sensitive plaintext secret.
+  const token = crypto.randomUUID();
+  const stored = await _storeSessionSecret(token, sessionSecret);
+  if (!stored) return;
 
   // Respect operator-configured SameSite. If operators explicitly request
   // 'none', ensure the Secure flag is set (browsers require this for None).
