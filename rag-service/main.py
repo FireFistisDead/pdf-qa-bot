@@ -3562,6 +3562,13 @@ def ask_question_stream(data: Question):
         except Exception:
             logger.exception("Stream generation failed session_id=%s", session_id)
             yield _sse_frame("Generation error. Please try again.", event="error")
+            # Emit an explicit done marker after the error so SSE clients
+            # that rely on an in-band completion token can handle the
+            # terminal state deterministically.
+            try:
+                yield _sse_done()
+            except Exception:
+                pass
 
     return StreamingResponse(_generate_and_stream(), media_type="text/event-stream; charset=utf-8")
 

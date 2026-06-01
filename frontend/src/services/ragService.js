@@ -141,8 +141,12 @@ export const askStream = (sessionId, sessionSecret, question, onChunk, onDone, o
         if (done) {
           break;
         }
-
         buffer += decoder.decode(value, { stream: true });
+
+        // Normalize CRLF line endings to LF so frames using CRLF are
+        // detected correctly (\r\n -> \n). This also tolerates mixed
+        // line endings from various servers.
+        buffer = buffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
         let separatorIndex = buffer.indexOf('\n\n');
         while (separatorIndex !== -1) {
@@ -150,6 +154,12 @@ export const askStream = (sessionId, sessionSecret, question, onChunk, onDone, o
           buffer = buffer.slice(separatorIndex + 2);
           handleEvent(eventText);
           if (completed) {
+            // Cancel the reader to release the connection promptly.
+            try {
+              await reader.cancel();
+            } catch (cancelErr) {
+              // ignore
+            }
             return;
           }
           separatorIndex = buffer.indexOf('\n\n');

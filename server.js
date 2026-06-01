@@ -1032,14 +1032,25 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
     ragResponse.data.pipe(res);
 
     ragResponse.data.on("error", (err) => {
+      // Ensure we always clean up the upstream stream/abort state so the
+      // upstream request is destroyed promptly and background resources
+      // are released even when headers have already been sent.
+      try {
+        cleanup();
+      } catch (cleanupErr) {
+        // Ignore cleanup errors; still proceed to notify the client.
+      }
+
       if (upstreamAbort.signal.aborted || req.aborted) {
         return;
       }
+
       console.error("Stream error from RAG service:", err.message);
       if (!res.headersSent) {
         res.status(502).json({ error: "Streaming response failed." });
       } else {
         res.write("event: error\ndata: Streaming response failed.\n\n");
+        // End the response after signalling the error to the client.
         res.end();
       }
     });
