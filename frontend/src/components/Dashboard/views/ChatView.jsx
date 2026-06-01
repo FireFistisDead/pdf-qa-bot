@@ -258,9 +258,9 @@ const ChatView = () => {
               <p className="cis-sub">Neural link active — <strong style={{ color: '#fff' }}>{activeDoc.name}</strong></p>
               <p className="cis-sub" style={{ marginTop: 4, opacity: 0.5 }}>Start your interrogation below</p>
               <div className="cis-hints">
-                <div role="button" tabIndex={0} onKeyDown={(e) => { if(e.key === 'Enter' || e.key === ' ') setInputText('Summarize this document in 3 bullet points'); }} className="cis-hint" onClick={() => setInputText('Summarize this document in 3 bullet points')}>→ Summarize in 3 points</div>
-                <div role="button" tabIndex={0} onKeyDown={(e) => { if(e.key === 'Enter' || e.key === ' ') setInputText('What are the key findings?'); }} className="cis-hint" onClick={() => setInputText('What are the key findings?')}>→ Key findings</div>
-                <div role="button" tabIndex={0} onKeyDown={(e) => { if(e.key === 'Enter' || e.key === ' ') setInputText('What are the main conclusions?'); }} className="cis-hint" onClick={() => setInputText('What are the main conclusions?')}>→ Main conclusions</div>
+                <div role="button" tabIndex={0} onKeyDown={(e) => { if(e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setInputText('Summarize this document in 3 bullet points'); } }} className="cis-hint" onClick={() => setInputText('Summarize this document in 3 bullet points')}>→ Summarize in 3 points</div>
+                <div role="button" tabIndex={0} onKeyDown={(e) => { if(e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setInputText('What are the key findings?'); } }} className="cis-hint" onClick={() => setInputText('What are the key findings?')}>→ Key findings</div>
+                <div role="button" tabIndex={0} onKeyDown={(e) => { if(e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setInputText('What are the main conclusions?'); } }} className="cis-hint" onClick={() => setInputText('What are the main conclusions?')}>→ Main conclusions</div>
               </div>
             </div>
           ) : (

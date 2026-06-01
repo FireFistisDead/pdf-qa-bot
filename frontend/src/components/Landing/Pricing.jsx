@@ -57,7 +57,7 @@ const Pricing = () => {
 
       <div className="billing-toggle-container">
         <span className={`toggle-label ${!isYearly ? 'active' : ''}`}>Monthly</span>
-        <div role="switch" aria-checked={isYearly} tabIndex={0} onKeyDown={(e) => { if(e.key === 'Enter' || e.key === ' ') setIsYearly(!isYearly); }} className="toggle-switch" onClick={() => setIsYearly(!isYearly)}>
+        <div role="switch" aria-checked={isYearly} tabIndex={0} onKeyDown={(e) => { if(e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsYearly(!isYearly); } }} className="toggle-switch" onClick={() => setIsYearly(!isYearly)}>
           <div className={`toggle-knob ${isYearly ? 'yearly' : ''}`}></div>
         </div>
         <span className={`toggle-label ${isYearly ? 'active' : ''}`}>

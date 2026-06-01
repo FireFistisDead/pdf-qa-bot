@@ -49,7 +49,7 @@ const DashboardLayout = ({ children }) => {
       <aside className={`dash-side-extreme ${collapsed ? 'collapsed' : ''}`}>
         <div className="dash-side-glow" />
         
-        <div role="button" tabIndex={0} onKeyDown={(e) => { if(e.key === 'Enter' || e.key === ' ') navigate('/dashboard'); }} className="dash-logo-container" onClick={() => navigate('/dashboard')}>
+        <div role="button" aria-label="Go to dashboard" tabIndex={0} onKeyDown={(e) => { if(e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate('/dashboard'); } }} className="dash-logo-container" onClick={() => navigate('/dashboard')}>
           <div className="crazy-logo-box">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
               <path d="M7 18h10M7 14h10M7 10h6"/>
