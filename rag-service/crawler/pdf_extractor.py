@@ -83,8 +83,12 @@ def extract_pdf_text(
 # Patterns marking natural boundary points, in priority order:
 #   1. Paragraph break (blank line) — preferred split
 #   2. Sentence terminal (`.`, `?`, `!` followed by whitespace)
-# The boundary search walks right-to-left within a lookahead window so the
-# chunk ends as close to `chunk_size` as possible without slicing a sentence.
+# The boundary search extends the chunk end *forward* from `naive_end` by
+# up to `chunk_size // 2` characters, picking the *latest* match of the
+# highest-priority pattern in that lookahead window. This keeps each
+# chunk's *start* aligned with the `chunk_size` cadence while snapping
+# the *end* to a natural break — see the docstring on
+# ``chunk_text_with_overlap`` for the full sizing semantics.
 # NB: `\s` includes `\n`, so a naive `\n\s*\n` will greedily eat the second
 # newline — use a literal `\n{2,}` for a blank-line break instead.
 _DEFAULT_BOUNDARY_PATTERNS: tuple[str, ...] = (
@@ -144,8 +148,11 @@ def chunk_text_with_overlap(
             the chunk stays close to the target size.
 
     Returns:
-        List of non-empty stripped text chunks. The first chunk starts
-        at the beginning of the input; the last chunk absorbs any
+        List of non-empty text chunks with leading whitespace removed
+        (via ``str.lstrip``). Trailing whitespace is preserved so the
+        boundary that was used to align the chunk end is kept verbatim
+        for the next chunk's overlap window. The first chunk starts at
+        the beginning of the input; the last chunk absorbs any
         remaining text up to the end of the input.
 
     Raises:
