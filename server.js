@@ -13,11 +13,13 @@ const helmet = require("helmet");
 const { askSchema, summarizeSchema, knowledgeGapsSchema, sessionsLookupSchema } = require("./validators/schemas");
 const { clientIpFromRequest } = require("./security/ip");
 const { createRedisClient } = require("./security/redis");
+const { createAuditLogger, hashValue } = require("./src/utils/auditLogger");
 const authRoutes = require("./src/routes/authRoutes");
 
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
 const getInternalRagToken = () => (process.env.INTERNAL_RAG_TOKEN || "").trim();
 const PORT = process.env.PORT || 4000;
+const auditLogger = createAuditLogger("gateway");
 
 const app = express();
 
@@ -91,7 +93,12 @@ const recordOffence = (ip) => {
   const durationIndex = Math.min(offences - 1, BAN_DURATIONS_MS.length - 1);
   const until = Date.now() + BAN_DURATIONS_MS[durationIndex];
   bannedIPs.set(ip, { until, offences });
-  console.warn(`[BAN] IP=${ip} offences=${offences} banned until=${new Date(until).toISOString()}`);
+  auditLogger.warn("rate_limit_ban", {
+    ip,
+    offences,
+    banned_until: new Date(until).toISOString(),
+    storage: "memory",
+  });
 };
 
 const recordOffenceDistributed = async (ip) => {
@@ -127,12 +134,18 @@ return { offences, until }
     const offences = Array.isArray(res) ? Number(res[0]) : NaN;
     const until = Array.isArray(res) ? Number(res[1]) : NaN;
     if (Number.isFinite(offences) && Number.isFinite(until)) {
-      console.warn(
-        `[BAN] IP=${ip} offences=${offences} banned until=${new Date(until).toISOString()} (redis)`,
-      );
+      auditLogger.warn("rate_limit_ban", {
+        ip,
+        offences,
+        banned_until: new Date(until).toISOString(),
+        storage: "redis",
+      });
     }
   } catch (err) {
-    console.warn("[BAN] redis ban write failed:", err?.message || err);
+    auditLogger.error("rate_limit_ban_write_failed", {
+      ip,
+      error: err,
+    });
   }
 };
 
@@ -170,7 +183,10 @@ const banGuard = async (req, res, next) => {
       }
     } catch (err) {
       // Fail-open: don't take the whole API down if Redis is transiently unavailable.
-      console.warn("[BAN] redis ban read failed:", err?.message || err);
+      auditLogger.error("rate_limit_ban_read_failed", {
+        ip,
+        error: err,
+      });
     }
 
     return next();
@@ -355,9 +371,11 @@ const uploadConcurrencyGuard = (req, res, next) => {
   const currentCount = activeUploadsByIp.get(ip) || 0;
 
   if (currentCount >= UPLOAD_MAX_CONCURRENT_PER_IP) {
-    console.warn(
-      `[upload] concurrent upload limit reached for IP=${ip} active=${currentCount} cap=${UPLOAD_MAX_CONCURRENT_PER_IP}`,
-    );
+    auditLogger.warn("upload_concurrency_limit_reached", {
+      ip,
+      active_uploads: currentCount,
+      cap: UPLOAD_MAX_CONCURRENT_PER_IP,
+    });
     return res.status(429).json({
       error: "Too many concurrent uploads. Please wait for an active upload to finish.",
     });
@@ -426,17 +444,24 @@ const startUploadsCleanup = () => {
           if (now - stats.birthtimeMs > FILE_RETENTION_MS) {
             await fsPromises.unlink(filePath);
             if (isDevelopment) {
-              console.log(`[cleanup] safety-net deleted orphaned file: ${path.basename(filePath)}`);
+                auditLogger.info("cleanup_orphaned_file_deleted", {
+                  filename: path.basename(filePath),
+                });
             }
           }
         } catch (err) {
           if (err.code !== "ENOENT") {
-            console.error(`[cleanup] failed to remove ${path.basename(filePath)}:`, err.message);
+              auditLogger.error("cleanup_orphaned_file_failed", {
+                filename: path.basename(filePath),
+                error: err,
+              });
           }
         }
       }
     } catch (err) {
-      console.error("[cleanup] failed to read uploads directory:", err.message);
+        auditLogger.error("cleanup_read_directory_failed", {
+          error: err,
+        });
     }
   }, CLEANUP_INTERVAL_MS);
 
@@ -480,18 +505,27 @@ const cleanupFile = async (filePath) => {
     const safePath = path.join(UPLOADS_DIR, path.basename(filePath));
     await fsPromises.unlink(safePath);
     if (isDevelopment) {
-      console.log(`[upload] deleted temp file: ${path.basename(safePath)}`);
+      auditLogger.info("upload_temp_file_deleted", {
+        filename: path.basename(safePath),
+      });
     }
   } catch (err) {
     // ENOENT means the file was already removed — treat as success.
     if (err.code !== "ENOENT") {
-      console.error(`[upload] failed to delete temp file:`, err.message);
+      auditLogger.error("upload_temp_file_delete_failed", {
+        filename: path.basename(filePath),
+        error: err,
+      });
     }
   }
 };
 
 const sendUploadError = (res, statusCode, message, details = message) => {
-  console.error("Upload failed:", details);
+  auditLogger.warn("upload_failed", {
+    status_code: statusCode,
+    message,
+    details,
+  });
   return res.status(statusCode).json({
     error: message,
     details,
@@ -575,29 +609,40 @@ const multerErrorHandler = (err, req, res, next) => {
       // CWE-209: Don't expose err.limit or raw Multer internals to client.
       // Multer stops processing immediately when size limit is exceeded, so exact file
       // size is unknown. Log technical details internally; return user-friendly message.
-      console.warn(
-        `[upload] File size limit exceeded. Limit: ${MAX_PDF_SIZE_BYTES} bytes, ` +
-        `Multer error code: ${err.code}, Message: ${err.message}`
-      );
+      auditLogger.warn("upload_rejected", {
+        reason: "file_size_limit",
+        max_bytes: MAX_PDF_SIZE_BYTES,
+        code: err.code,
+      });
       return res.status(413).json({
         error: "File too large",
         message: "Upload failed: File too large",
       });
     } else if (err.code === "LIMIT_FILE_COUNT") {
-      console.warn(`[upload] Multiple files rejected. Multer code: ${err.code}`);
+      auditLogger.warn("upload_rejected", {
+        reason: "multiple_files",
+        code: err.code,
+      });
       return res.status(409).json({
         error: "Too many files",
         message: "Only one PDF file is allowed per upload request.",
       });
     } else if (err.code === "LIMIT_PART_COUNT") {
-      console.warn(`[upload] Too many form parts. Multer code: ${err.code}`);
+      auditLogger.warn("upload_rejected", {
+        reason: "too_many_form_parts",
+        code: err.code,
+      });
       return res.status(409).json({
         error: "Too many parts",
         message: "The form request contains too many fields. Please try again.",
       });
     }
     // Generic multer error: Log technical details, return sanitized message (CWE-209)
-    console.error(`[upload] Multer error: ${err.code} - ${err.message}`);
+    auditLogger.error("upload_rejected", {
+      reason: "multer_error",
+      code: err.code,
+      error: err,
+    });
     return res.status(400).json({
       error: "Upload failed",
       message: "An error occurred while processing your upload. Please try again.",
@@ -605,7 +650,10 @@ const multerErrorHandler = (err, req, res, next) => {
   }
 
   if (err && err.message && err.message.includes("Only PDF files are allowed")) {
-    console.warn(`[upload] Invalid file type attempted: ${err.message}`);
+    auditLogger.warn("upload_rejected", {
+      reason: "invalid_file_type",
+      error: err,
+    });
     return res.status(415).json({
       error: "Invalid file type",
       message: "Only PDF files are allowed. Please upload a valid PDF document.",
@@ -614,10 +662,12 @@ const multerErrorHandler = (err, req, res, next) => {
 
   // Unhandled error: Log for debugging, return safe generic message (CWE-209)
   if (err && isDevelopment) {
-    console.error("[upload] Unhandled error:", err);
+    auditLogger.error("upload_unhandled_error", {
+      error: err,
+    });
   } else if (err) {
     // Production: Log error but don't expose details
-    console.error("[upload] Unhandled upload error");
+    auditLogger.error("upload_unhandled_error", {});
   }
 
   // Pass other errors to Express error handler
@@ -795,7 +845,10 @@ app.post(
     const statusCode =
       err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
     const details = extractServiceDetails(err, "PDF processing failed");
-    console.error("Upload processing failed:", details);
+    auditLogger.error("upload_processing_failed", {
+      status_code: statusCode,
+      error: err,
+    });
 
     return res.status(statusCode).json({
       error: typeof details === "string" ? details : "PDF processing failed",
@@ -886,7 +939,10 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
       });
       pdfBuffer = Buffer.from(dlResponse.data);
     } catch (dlErr) {
-      console.error("Failed to download PDF from URL:", dlErr.message);
+      auditLogger.error("process_from_url_download_failed", {
+        host: parsedUrl.hostname,
+        error: dlErr,
+      });
       return res.status(502).json({ error: "Could not download PDF from the provided URL." });
     }
 
@@ -930,7 +986,10 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
     const statusCode =
       err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
     const details = extractServiceDetails(err, "RAG processing failed");
-    console.error("process-from-url failed:", details);
+    auditLogger.error("process_from_url_failed", {
+      status_code: statusCode,
+      error: err,
+    });
 
     return res.status(statusCode).json({
       error: typeof details === "string" ? details : "PDF processing failed",
@@ -972,7 +1031,11 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
   } catch (err) {
     const statusCode = err.response?.status || 500;
     const details = extractServiceDetails(err, "Error answering question");
-    console.error("Question answering failed:", details);
+    auditLogger.error("ask_failed", {
+      status_code: statusCode,
+      session_id_hash: hashValue(session_id),
+      error: err,
+    });
 
     return res.status(statusCode).json({
       error: typeof details === "string" ? details : "Error answering question",
@@ -1013,7 +1076,10 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
     ragResponse.data.pipe(res);
 
     ragResponse.data.on("error", (err) => {
-      console.error("Stream error from RAG service:", err.message);
+      auditLogger.error("ask_stream_upstream_error", {
+        session_id_hash: hashValue(session_id),
+        error: err,
+      });
       if (!res.headersSent) {
         res.status(502).json({ error: "Streaming response failed." });
       } else {
@@ -1023,7 +1089,11 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
   } catch (err) {
     const statusCode = err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
     const details = extractServiceDetails(err, "Error answering question");
-    console.error("Streaming question answering failed:", details);
+    auditLogger.error("ask_stream_failed", {
+      status_code: statusCode,
+      session_id_hash: hashValue(session_id),
+      error: err,
+    });
     return res.status(statusCode).json({
       error: typeof details === "string" ? details : "Error answering question",
       details: isDevelopment ? details : "Internal processing error",
@@ -1052,7 +1122,11 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
   } catch (err) {
     const statusCode = err.response?.status || 500;
     const details = extractServiceDetails(err, "Error summarizing PDF");
-    console.error("Summarization failed:", details);
+    auditLogger.error("summarize_failed", {
+      status_code: statusCode,
+      session_id_hash: hashValue(validation.data.session_id),
+      error: err,
+    });
 
     return res.status(statusCode).json({
       error: typeof details === "string" ? details : "Error summarizing PDF",
@@ -1082,7 +1156,11 @@ app.post("/knowledge-gaps", inferenceSlowDown, inferenceLimiter, async (req, res
   } catch (err) {
     const statusCode = err.response?.status || 500;
     const details = extractServiceDetails(err, "Error mapping knowledge gaps");
-    console.error("Knowledge gap mapping failed:", details);
+    auditLogger.error("knowledge_gaps_failed", {
+      status_code: statusCode,
+      session_id_hash: hashValue(validation.data.session_id),
+      error: err,
+    });
 
     return res.status(statusCode).json({
       error: typeof details === "string" ? details : "Error mapping knowledge gaps",
@@ -1117,7 +1195,10 @@ app.post("/sessions/lookup", async (req, res) => {
   } catch (err) {
     const statusCode = err.response?.status || 500;
     const details = extractServiceDetails(err);
-    console.error("Failed to lookup sessions:", details);
+    auditLogger.error("sessions_lookup_failed", {
+      status_code: statusCode,
+      error: err,
+    });
     return res.status(statusCode).json({
       error: "Failed to lookup sessions",
       details: isDevelopment ? details : "Internal processing error",
@@ -1148,7 +1229,9 @@ app.use((err, req, res, next) => {
       ? "Internal server error."
       : err.message || "Request failed.";
 
-  console.error("Unhandled Express error:", err.message);
+  auditLogger.error("express_unhandled_error", {
+    error: err,
+  });
 
   return res.status(statusCode).json({
     error: message,
@@ -1162,13 +1245,17 @@ if (require.main === module) {
     requireInternalRagToken();
 
     if (redisConnectPromise) {
-      console.log("[redis] connecting for distributed rate limiting...");
+      auditLogger.info("redis_connecting", {
+        purpose: "distributed_rate_limiting",
+      });
       await redisConnectPromise;
-      console.log("[redis] connected");
+      auditLogger.info("redis_connected", {
+        purpose: "distributed_rate_limiting",
+      });
     }
 
     const server = app.listen(PORT, () =>
-      console.log(`Backend running on port ${PORT}`)
+      auditLogger.info("backend_started", { port: PORT })
     );
 
     // ─── Server-Level Timeouts ───────────────────────────────────────────────
@@ -1178,7 +1265,7 @@ if (require.main === module) {
     server.headersTimeout = 70_000;    // Must be > keepAliveTimeout
     server.requestTimeout = 120_000;   // Max time to fully receive a request (2 min)
   })().catch((err) => {
-    console.error("Backend failed to start:", err?.message || err);
+    auditLogger.error("backend_start_failed", { error: err });
     process.exitCode = 1;
   });
 }

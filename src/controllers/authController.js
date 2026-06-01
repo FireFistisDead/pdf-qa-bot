@@ -4,10 +4,12 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
 const { validatePassword } = require("../utils/passwordValidator");
+const { createAuditLogger, hashValue } = require("../utils/auditLogger");
 
 const usersFile = path.join(__dirname, "../data/users.json");
 
 const SECRET = process.env.JWT_SECRET;
+const auditLogger = createAuditLogger("gateway-auth");
 
 if (!SECRET) {
   throw new Error("JWT_SECRET missing in .env");
@@ -30,6 +32,9 @@ exports.signup = async (req, res) => {
     let { email, password } = req.body;
 
     if (!email || !password) {
+      auditLogger.warn("auth_signup_rejected", {
+        outcome: "missing_credentials",
+      });
       return res.status(400).json({
         message: "Email and password are required",
       });
@@ -40,6 +45,10 @@ exports.signup = async (req, res) => {
     const validation = validatePassword(password);
 
     if (!validation.valid) {
+      auditLogger.warn("auth_signup_rejected", {
+        outcome: "weak_password",
+        email_hash: hashValue(email),
+      });
       return res.status(400).json({
         message: validation.message,
       });
@@ -52,6 +61,10 @@ exports.signup = async (req, res) => {
     );
 
     if (existingUser) {
+      auditLogger.warn("auth_signup_rejected", {
+        outcome: "user_exists",
+        email_hash: hashValue(email),
+      });
       return res.status(400).json({
         message: "User already exists",
       });
@@ -75,7 +88,13 @@ exports.signup = async (req, res) => {
       token,
       message: "Signup successful",
     });
+    auditLogger.info("auth_signup_succeeded", {
+      email_hash: hashValue(email),
+    });
   } catch (error) {
+    auditLogger.error("auth_signup_failed", {
+      error,
+    });
     res.status(500).json({
       message: "Server error",
     });
@@ -86,6 +105,9 @@ exports.login = async (req, res) => {
   try {
     let { email, password } = req.body;
     if (!email || !password) {
+      auditLogger.warn("auth_login_rejected", {
+        outcome: "missing_credentials",
+      });
       return res.status(400).json({
         message: "Email and password are required",
       });
@@ -100,6 +122,10 @@ exports.login = async (req, res) => {
     );
 
     if (!user) {
+      auditLogger.warn("auth_login_rejected", {
+        outcome: "invalid_credentials",
+        email_hash: hashValue(email),
+      });
       return res.status(400).json({
         message: "Invalid credentials",
       });
@@ -111,6 +137,10 @@ exports.login = async (req, res) => {
     );
 
     if (!isMatch) {
+      auditLogger.warn("auth_login_rejected", {
+        outcome: "invalid_credentials",
+        email_hash: hashValue(email),
+      });
       return res.status(400).json({
         message: "Invalid credentials",
       });
@@ -122,7 +152,13 @@ exports.login = async (req, res) => {
       token,
       message: "Login successful",
     });
+    auditLogger.info("auth_login_succeeded", {
+      email_hash: hashValue(user.email),
+    });
   } catch (error) {
+    auditLogger.error("auth_login_failed", {
+      error,
+    });
     res.status(500).json({
       message: "Server error",
     });

@@ -37,6 +37,7 @@ import threading
 import time
 import logging
 import re
+from logging.handlers import RotatingFileHandler
 
 import atexit
 
@@ -53,12 +54,90 @@ except Exception:  # pragma: no cover
 
 load_dotenv()
 
-# ── Logger (must be defined before exception handlers that use it) ─────────────
+# ── Structured logger (must be defined before exception handlers that use it) ─
 logger = logging.getLogger("pdf_qa_rag")
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-)
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        payload = {
+            "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"),
+            "service": "rag-service",
+            "level": record.levelname.lower(),
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+
+        reserved = {
+            "name",
+            "msg",
+            "args",
+            "levelname",
+            "levelno",
+            "pathname",
+            "filename",
+            "module",
+            "exc_info",
+            "exc_text",
+            "stack_info",
+            "lineno",
+            "funcName",
+            "created",
+            "msecs",
+            "relativeCreated",
+            "thread",
+            "threadName",
+            "processName",
+            "process",
+            "message",
+        }
+
+        for key, value in record.__dict__.items():
+            if key not in reserved and not key.startswith("_"):
+                payload[key] = value
+
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+
+        return json.dumps(payload, default=str)
+
+
+def _configure_logging():
+    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logger.setLevel(level)
+    logger.handlers.clear()
+    logger.propagate = False
+
+    formatter = JsonFormatter()
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+
+    audit_log_path = os.getenv("AUDIT_LOG_FILE", "").strip()
+    if audit_log_path:
+        max_bytes = int(os.getenv("AUDIT_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+        backup_count = int(os.getenv("AUDIT_LOG_MAX_FILES", "5"))
+        file_handler = RotatingFileHandler(
+            audit_log_path,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+
+
+_configure_logging()
+
+
+def hash_value(value) -> str:
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()[:16]
+
+
+def audit_event(event: str, **fields):
+    logger.info(event, extra=fields)
 
 app = FastAPI()
 
@@ -407,12 +486,20 @@ async def internal_auth_middleware(request: Request, call_next):
     ):
         provided = request.headers.get("X-Internal-Token")
         if not internal_token_valid(provided, INTERNAL_RAG_TOKEN):
-            logger.warning(
-                "Internal auth rejected path=%s ip=%s",
-                raw_path,
-                request.client.host if request.client else "unknown",
+            audit_event(
+                "internal_auth_rejected",
+                endpoint=raw_path,
+                ip=request.client.host if request.client else "unknown",
+                outcome="rejected",
             )
             return standard_error_response(403, "Forbidden")
+
+        audit_event(
+            "internal_auth_accepted",
+            endpoint=raw_path,
+            ip=request.client.host if request.client else "unknown",
+            outcome="accepted",
+        )
 
     return await call_next(request)
 
@@ -442,7 +529,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    print(f"Unhandled exception: {exc}")
+    logger.exception("Unhandled exception", extra={"endpoint": request.url.path})
     return standard_error_response(500, "Internal server error. Please try again later.")
 
 
@@ -2468,6 +2555,11 @@ def _require_session_secret(session: dict, provided_secret: str | None):
 def lookup_sessions(data: SessionsLookupRequest):
     sessions_out = []
 
+    audit_event(
+        "sessions_lookup_attempt",
+        session_count=len(data.sessions),
+    )
+
     with sessions_lock:
         for item in data.sessions:
             sid = str(item.session_id)
@@ -2495,6 +2587,11 @@ def lookup_sessions(data: SessionsLookupRequest):
                     "chat": session.get("chat", []),
                 }
             )
+
+    audit_event(
+        "sessions_lookup_succeeded",
+        session_count=len(sessions_out),
+    )
 
     return sessions_out
 
@@ -2532,6 +2629,13 @@ def process_pdf(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid session ID format.")
     requested_session_secret = (session_secret or "").strip() or None
+
+    audit_event(
+        "process_pdf_attempt",
+        filename=filename,
+        has_session_extension=bool(requested_session_id),
+        session_id_hash=hash_value(requested_session_id) if requested_session_id else None,
+    )
 
     logger.info(
         "Processing PDF filename=%s existing_session=%s",
@@ -2762,6 +2866,12 @@ def process_pdf(
                     len(session["documents"]),
                     len(chunks),
                 )
+                audit_event(
+                    "process_pdf_succeeded",
+                    outcome="merged",
+                    filename=filename,
+                    session_id_hash=hash_value(session_id),
+                )
     else:
         session_id = processing_session_id
 
@@ -2808,6 +2918,12 @@ def process_pdf(
                 filename,
                 len(chunks),
             )
+            audit_event(
+                "process_pdf_succeeded",
+                outcome="created",
+                filename=filename,
+                session_id_hash=hash_value(session_id),
+            )
 
 
     with sessions_lock:
@@ -2831,6 +2947,11 @@ def validate_session_write(data: SessionWriteRequest):
     session_id = str(data.session_id)
     provided_secret = (data.session_secret or "").strip()
 
+    audit_event(
+        "validate_session_write_attempt",
+        session_id_hash=hash_value(session_id),
+    )
+
     if not provided_secret:
         raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -2841,6 +2962,11 @@ def validate_session_write(data: SessionWriteRequest):
                 raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
 
             _require_session_secret(session, provided_secret)
+
+    audit_event(
+        "validate_session_write_succeeded",
+        session_id_hash=hash_value(session_id),
+    )
 
     return {"allowed": True}
 

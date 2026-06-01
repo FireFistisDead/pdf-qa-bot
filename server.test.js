@@ -1,9 +1,13 @@
 const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const http = require("node:http");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const axios = require("axios");
 const { Blob } = require("node:buffer");
+const { createAuditLogger, hashValue } = require("./src/utils/auditLogger");
 
 const originalInternalRagToken = process.env.INTERNAL_RAG_TOKEN;
 const originalJwtSecret = process.env.JWT_SECRET;
@@ -150,6 +154,26 @@ const runIsolatedGatewayScript = (script, extraEnv = {}) => {
   return JSON.parse(lines.at(-1));
 };
 
+const runIsolatedAuditLoggerScript = (script, extraEnv = {}) => {
+  const result = spawnSync(process.execPath, ["-e", script], {
+    cwd: __dirname,
+    env: {
+      ...process.env,
+      ...extraEnv,
+    },
+    encoding: "utf8",
+    timeout: 20000,
+  });
+
+  assert.equal(
+    result.status,
+    0,
+    `Isolated audit logger script failed:\nSTDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`,
+  );
+
+  return result;
+};
+
 describe("IP normalization", () => {
   test("normalizeIp strips IPv4-mapped IPv6 prefix", () => {
     assert.equal(normalizeIp("::ffff:127.0.0.1"), "127.0.0.1");
@@ -178,6 +202,48 @@ describe("service error extraction", () => {
     });
 
     assert.equal(details, "Unable to read this PDF.");
+  });
+});
+
+describe("audit logger", () => {
+  test("emits structured JSON to stdout and audit files", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pdf-qa-bot-audit-"));
+    const auditLogFile = path.join(tempDir, "audit.log");
+
+    const result = runIsolatedAuditLoggerScript(`
+      const fs = require("node:fs");
+      const { createAuditLogger, hashValue } = require("./src/utils/auditLogger");
+
+      const logger = createAuditLogger("gateway");
+      logger.info("audit_test_event", {
+        email_hash: hashValue("user@example.com"),
+        session_id_hash: hashValue("550e8400-e29b-41d4-a716-446655440000"),
+        error: new Error("boom"),
+        attempts: 2n,
+        buffer: Buffer.from("abc"),
+      });
+
+      const fileContent = fs.readFileSync(process.env.AUDIT_LOG_FILE, "utf8");
+      console.log(JSON.stringify({ fileContent, hash: hashValue("user@example.com") }));
+    `, {
+      AUDIT_LOG_FILE: auditLogFile,
+    });
+
+    const lines = result.stdout.trim().split(/\r?\n/).filter(Boolean);
+    const summary = JSON.parse(lines.at(-1));
+    const auditLine = summary.fileContent.trim().split(/\r?\n/).filter(Boolean).at(0);
+    const logged = JSON.parse(auditLine);
+
+    assert.equal(logged.service, "gateway");
+    assert.equal(logged.event, "audit_test_event");
+    assert.equal(logged.email_hash, hashValue("user@example.com"));
+    assert.equal(logged.session_id_hash, hashValue("550e8400-e29b-41d4-a716-446655440000"));
+    assert.equal(logged.attempts, "2");
+    assert.equal(logged.buffer, "[buffer:3]");
+    assert.match(logged.timestamp, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(summary.hash, hashValue("user@example.com"));
+    assert.equal(summary.fileContent.includes("user@example.com"), false);
+    assert.equal(summary.fileContent.includes("550e8400-e29b-41d4-a716-446655440000"), false);
   });
 });
 

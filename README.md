@@ -81,6 +81,19 @@ Existing deployments and local environments must set `INTERNAL_RAG_TOKEN` before
 
 The Express authentication flow also requires `JWT_SECRET` for both token signing and verification. Use one strong random value across the auth controller and middleware; do not hardcode or reuse a default secret.
 
+### Audit logging
+
+Structured audit events are written to `stdout` by default so container platforms and host process managers can capture them automatically.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUDIT_LOG_FILE` | *(empty)* | Optional JSONL file path for audit logs. When set, logs are appended there in addition to `stdout` |
+| `AUDIT_LOG_MAX_BYTES` | `5242880` | Maximum size of `AUDIT_LOG_FILE` before rotation |
+| `AUDIT_LOG_MAX_FILES` | `5` | Number of rotated audit files to keep |
+| `LOG_LEVEL` | `INFO` | RAG service log level |
+
+For deployed containers, check the platform log viewer first; if `AUDIT_LOG_FILE` is set, inspect that file too.
+
 ### Default ports
 
 | Service | Folder | Port | URL |
