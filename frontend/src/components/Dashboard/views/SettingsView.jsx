@@ -35,7 +35,8 @@ const SettingsView = () => {
     <div className="settings-wrap">
       {/* BG */}
       <div className="settings-bg-grid" />
-      <div className="settings-orb" />
+      <div className="settings-orb settings-orb-1" />
+      <div className="settings-orb settings-orb-2" />
 
       <div className="settings-inner">
 
