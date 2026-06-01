@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../../contexts/AuthContext';
 import { useDashboardData } from '../../../hooks/useDashboardData';
-import '../Dashboard.css';
+import './DashboardHome.css';
 
 /* ── Animated counter hook ── */
 const useCounter = (target, ms = 1400) => {
