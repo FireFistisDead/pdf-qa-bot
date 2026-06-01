@@ -13,33 +13,41 @@
   overflow-x: hidden;
 }
 
-/* ── BACKGROUND GRID (exact copy from Dashboard) ── */
+/* ── BACKGROUND GRID — fixed so it covers the whole viewport ── */
 .settings-bg-grid {
-  position: absolute;
+  position: fixed;
   inset: 0;
   background-image:
-    linear-gradient(rgba(200, 255, 0, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(200, 255, 0, 0.03) 1px, transparent 1px);
+    linear-gradient(rgba(200, 255, 0, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(200, 255, 0, 0.04) 1px, transparent 1px);
   background-size: 60px 60px;
-  mask-image: radial-gradient(ellipse at 30% 30%, black 20%, transparent 70%);
-  -webkit-mask-image: radial-gradient(ellipse at 30% 30%, black 20%, transparent 70%);
   pointer-events: none;
   z-index: 0;
 }
 
-/* Ambient orb */
+/* Ambient orbs — fixed so they paint behind all content */
 .settings-orb {
-  position: absolute;
-  width: 600px;
-  height: 600px;
+  position: fixed;
   border-radius: 50%;
-  filter: blur(160px);
+  filter: blur(140px);
   pointer-events: none;
   z-index: 0;
-  top: -200px;
-  right: -100px;
-  background: rgba(200, 255, 0, 0.04);
   animation: orbFloat 14s ease-in-out infinite alternate;
+}
+.settings-orb-1 {
+  width: 700px;
+  height: 700px;
+  top: -250px;
+  right: -150px;
+  background: rgba(200, 255, 0, 0.06);
+}
+.settings-orb-2 {
+  width: 500px;
+  height: 500px;
+  bottom: -200px;
+  left: 5%;
+  background: rgba(120, 0, 255, 0.05);
+  animation-delay: -7s;
 }
 @keyframes orbFloat {
   0%   { transform: translate(0, 0) scale(1); }
