@@ -715,6 +715,7 @@ def persist_session_registry_entry(session_id: str, meta: dict):
             "expires_at": session_expires_at(last_accessed),
             "documents": list(meta.get("documents", [])),
             "session_dir": session_dir,
+            "session_secret": meta.get("session_secret", ""),
             "hashed_session_secret": meta.get("hashed_session_secret") or _hash_secret(meta.get("session_secret", "")),
         }
         write_session_registry_unlocked(registry)

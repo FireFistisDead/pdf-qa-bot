@@ -32,6 +32,7 @@ services:
     volumes:
       - shared_uploads:/app/uploads
       - hf_cache:/root/.cache/huggingface
+      - sessions_data:/app/rag-service/data
     env_file:
       - .env
     # Optional: if you have a local GPU, uncomment the lines below to enable GPU for the container
@@ -110,3 +111,5 @@ volumes:
     name: pdf-qa-bot-uploads
   hf_cache:
     name: pdf-qa-bot-hf-cache
+  sessions_data:
+    name: pdf-qa-bot-sessions-data
