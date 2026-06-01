@@ -101,18 +101,30 @@ def chunk_text_with_overlap(
     boundary_patterns: tuple[str, ...] = _DEFAULT_BOUNDARY_PATTERNS,
 ) -> list[str]:
     """
-    Split text into chunks of roughly ``chunk_size`` characters with a
-    sliding overlap of ``chunk_overlap`` characters, preferring natural
-    sentence/paragraph boundaries over hard character-count cuts so the
-    vector store can preserve cross-boundary context.
+    Split text into chunks with a sliding overlap of ``chunk_overlap``
+    characters, preferring natural sentence/paragraph boundaries over
+    hard character-count cuts so the vector store can preserve
+    cross-boundary context.
 
     The algorithm walks the text in ``chunk_size`` windows. For each
-    window it searches right-to-left for the latest natural boundary in
-    the lookahead region and trims the chunk there when one is found;
-    otherwise it cuts at exactly ``chunk_size``. The next chunk starts
-    ``chunk_overlap`` characters before the end of the previous one, so
-    consecutive chunks share a tail of approximately ``chunk_overlap``
-    characters.
+    window it searches *forward* in a ``chunk_size // 2`` lookahead for
+    the latest natural boundary and extends the chunk end to that
+    boundary when one is found; otherwise it cuts at exactly
+    ``chunk_size``. The next chunk starts ``chunk_overlap`` characters
+    before the end of the previous one, so consecutive chunks share a
+    tail of approximately ``chunk_overlap`` characters.
+
+    **Sizing semantics.** ``chunk_size`` is a *soft target*, not a hard
+    cap. Because the boundary search extends the chunk end forward (not
+    backward), a chunk that finds a boundary just past ``chunk_size``
+    will be extended to that boundary, making the actual chunk size up
+    to ``chunk_size + chunk_size // 2`` characters. This is a deliberate
+    trade-off: extending forward keeps the chunk's *start* aligned with
+    ``chunk_size`` (so the start of each chunk falls on a roughly
+    regular cadence, which downstream code can rely on) while still
+    snapping the *end* to a natural break. Callers that need a hard
+    cap should post-process the output to split any chunk that exceeds
+    the desired maximum.
 
     This is a pure-text utility with no embeddings or vector-store
     dependency, so it can be exercised in isolation.
@@ -120,15 +132,16 @@ def chunk_text_with_overlap(
     Args:
         text: Input text to split. ``None``, empty, or whitespace-only
             inputs return an empty list.
-        chunk_size: Target maximum characters per chunk. Must be > 0.
+        chunk_size: Soft target for chunk size in characters. Actual
+            chunks may reach ``chunk_size + chunk_size // 2`` when a
+            natural boundary is found in the lookahead. Must be > 0.
         chunk_overlap: Characters of overlap between consecutive chunks.
             Must satisfy ``0 <= chunk_overlap < chunk_size`` so each
             iteration makes forward progress.
         boundary_patterns: Regex patterns marking natural boundary
             points, in priority order. The chunk's end is extended to
-            the earliest match (rightmost-in-priority) within a
-            ``chunk_size // 2`` lookahead so the chunk stays close to
-            the target size.
+            the latest match within a ``chunk_size // 2`` lookahead so
+            the chunk stays close to the target size.
 
     Returns:
         List of non-empty stripped text chunks. The first chunk starts
