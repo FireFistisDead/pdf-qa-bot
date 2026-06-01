@@ -518,3 +518,4 @@ Protected routes also include `/ask/stream` and `/validate-session-write`.
 
 If `INTERNAL_RAG_TOKEN` is unset or empty, the RAG service fails startup with a
 configuration error instead of allowing unauthenticated direct access.
+\n<!-- Fix for #351 -->\n
