@@ -39,6 +39,7 @@ const Navbar = ({ darkMode, setDarkMode }) => {
             src={logo}
             alt="Logo"
             onClick={() => navigate('/')}
+            imgProps={{ loading: "lazy" }}
             sx={{
               width: 48,
               height: 48,
