@@ -8,7 +8,7 @@ langchain-text-splitters
 sentence-transformers
 transformers
 faiss-cpu
-pypdf
+PyMuPDF
 requests
 numpy
 rank-bm25==0.2.2
