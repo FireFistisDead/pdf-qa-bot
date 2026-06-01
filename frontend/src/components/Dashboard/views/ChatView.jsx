@@ -49,30 +49,38 @@ const ChatView = () => {
     if (!activeDoc) { setMessages([]); return; }
     const load = async () => {
       try {
-        const { data, error } = await supabase
-          .from('chat_messages')
-          .select('*')
-          .eq('document_id', activeDoc.id)
-          .order('created_at', { ascending: true });
-        if (error) throw error;
-        setMessages(data || []);
-        setMsgCount((data || []).length);
+        const { getSessionsApi } = require('../../../services/api');
+        const sessions = await getSessionsApi([{ session_id: activeDoc.session_id, session_secret: activeDoc.session_secret }]);
+        if (sessions && sessions.length > 0) {
+          const chat = sessions[0].chat || [];
+          const formatted = chat.map(m => ({
+            role: m.role === 'bot' ? 'assistant' : m.role,
+            content: m.text,
+            created_at: new Date().toISOString()
+          }));
+          setMessages(formatted);
+          setMsgCount(formatted.length);
+        } else {
+          setMessages([]);
+        }
       } catch (err) {
-        toast.error('Failed to load chat history');
+        console.error("Failed to load messages:", err);
       }
     };
     load();
   }, [activeDoc]);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, currentStream]);
+    // Use 'auto' instead of 'smooth' during streaming to prevent animation jitter/glitches
+    messagesEndRef.current?.scrollIntoView({ behavior: isTyping ? 'auto' : 'smooth', block: 'end' });
+  }, [messages, currentStream, isTyping]);
 
   // Auto-grow textarea
   useEffect(() => {
     if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-      textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 140) + 'px';
+      textareaRef.current.style.height = '22px'; // Reset to min-height to calculate true scrollHeight
+      const scrollHeight = textareaRef.current.scrollHeight;
+      textareaRef.current.style.height = Math.min(scrollHeight, 140) + 'px';
     }
   }, [inputText]);
 
@@ -86,14 +94,6 @@ const ChatView = () => {
     setCurrentStream('');
 
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      await supabase.from('chat_messages').insert({
-        user_id: session.user.id,
-        document_id: activeDoc.id,
-        role: 'user',
-        content: userMsg.content,
-      });
-
       let full = '';
       askStream(
         activeDoc.session_id,
@@ -105,14 +105,8 @@ const ChatView = () => {
           setCurrentStream('');
           setMessages(prev => [...prev, { role: 'assistant', content: full }]);
           setMsgCount(c => c + 2);
-          await supabase.from('chat_messages').insert({
-            user_id: session.user.id,
-            document_id: activeDoc.id,
-            role: 'assistant',
-            content: full,
-          });
         },
-        (err) => { setIsTyping(false); setCurrentStream(''); toast.error(err); }
+        (err) => { setIsTyping(false); setCurrentStream(''); toast.error(err.message || String(err)); }
       );
     } catch (err) {
       setIsTyping(false);
@@ -352,7 +346,7 @@ const ChatView = () => {
                   handleSend(e);
                 }
               }}
-              disabled={!activeDoc || isTyping}
+              disabled={!activeDoc}
             />
             <div className="chat-input-actions">
               <span className="cia-hint">SHIFT+ENTER for newline</span>
