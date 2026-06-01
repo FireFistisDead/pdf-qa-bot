@@ -2637,6 +2637,7 @@ def process_pdf(
 
     all_chunks = []
     seen_content = set()
+    adaptive_splitter = AdaptiveTextSplitter(chunk_size=1000, chunk_overlap=200)
     for doc in docs:
         page_number = doc.metadata.get("page", 0)
         page_text = doc.page_content or ""
