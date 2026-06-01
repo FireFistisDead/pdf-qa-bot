@@ -14,6 +14,8 @@ const { askSchema, summarizeSchema, knowledgeGapsSchema, sessionsLookupSchema } 
 const { clientIpFromRequest } = require("./security/ip");
 const { createRedisClient } = require("./security/redis");
 const authRoutes = require("./src/routes/authRoutes");
+const { authenticateUser } = require("./src/middleware/auth");
+const { authorizeSession, authorizeDocument } = require("./src/services/authz/resource-access");
 
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
 const getInternalRagToken = () => (process.env.INTERNAL_RAG_TOKEN || "").trim();
@@ -480,12 +482,16 @@ const requireInternalRagToken = () => {
   }
 };
 
-const ragAuthHeaders = () => {
+const ragAuthHeaders = (req = null) => {
   const token = getInternalRagToken();
   if (!token) {
     throw new Error("INTERNAL_RAG_TOKEN must be configured for RAG service requests.");
   }
-  return { "X-Internal-Token": token };
+  const headers = { "X-Internal-Token": token };
+  if (req && req.user && req.user.id) {
+    headers["X-User-Id"] = req.user.id;
+  }
+  return headers;
 };
 
 const normalizeSessionSecret = (value) =>
@@ -552,7 +558,7 @@ const multerErrorHandler = (err, req, res, next) => {
   next(err);
 };
 
-const validateSessionExtension = async (sessionId, sessionSecret) => {
+const validateSessionExtension = async (req, sessionId, sessionSecret) => {
   if (!sessionId) {
     return {
       allowed: false,
@@ -576,7 +582,7 @@ const validateSessionExtension = async (sessionId, sessionSecret) => {
         session_id: sessionId,
         session_secret: sessionSecret,
       },
-      { headers: ragAuthHeaders() },
+      { headers: ragAuthHeaders(req) },
     );
 
     return { allowed: true };
@@ -593,7 +599,7 @@ const validateSessionExtension = async (sessionId, sessionSecret) => {
   }
 };
 
-app.post("/upload", uploadLimiter, upload.single("file"), multerErrorHandler, async (req, res) => {
+app.post("/upload", authenticateUser, uploadLimiter, upload.single("file"), multerErrorHandler, async (req, res) => {
   const uploadedFilePath = req.file?.path;
   // CodeQL [js/path-injection] Mitigation: Break taint flow by forcing basename
   const absoluteFilePath = uploadedFilePath
@@ -621,7 +627,7 @@ app.post("/upload", uploadLimiter, upload.single("file"), multerErrorHandler, as
     }
 
     if (sessionId) {
-      const validation = await validateSessionExtension(sessionId, sessionSecret);
+      const validation = await validateSessionExtension(req, sessionId, sessionSecret);
       if (!validation.allowed) {
         await cleanupFile(uploadedFilePath);
         return sendUploadError(
@@ -677,7 +683,7 @@ if (signatureBuffer.toString() !== "%PDF") {
     const response = await axios.postForm(
       `${RAG_SERVICE_URL}/process-pdf`,
       formData,
-      { headers: ragAuthHeaders() },
+      { headers: ragAuthHeaders(req) },
     );
 
     // Delete the temp file immediately after the RAG service has fully read and
@@ -740,7 +746,7 @@ const requireSupabaseAuth = (req, res, next) => {
 // Downloads the PDF from a remote URL (e.g. Supabase Storage public URL),
 // streams it to the RAG service for text extraction + FAISS indexing,
 // and returns the session_id + session_secret needed for /ask/stream.
-app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, res) => {
+app.post("/process-from-url", authenticateUser, uploadLimiter, requireSupabaseAuth, async (req, res) => {
   const { url, filename, session_id, session_secret } = req.body || {};
 
   if (!url || typeof url !== "string") {
@@ -813,7 +819,7 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
       `${RAG_SERVICE_URL}/process-pdf`,
       form,
       {
-        headers: ragAuthHeaders(),
+        headers: ragAuthHeaders(req),
         timeout: 120000, // 2 min — embedding generation can be slow
         maxContentLength: Infinity,
         maxBodyLength: Infinity,
@@ -840,7 +846,7 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
   }
 });
 
-app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+app.post("/ask", authenticateUser, authorizeSession, inferenceSlowDown, inferenceLimiter, async (req, res) => {
   const validation = askSchema.safeParse(req.body);
 
   if (!validation.success) {
@@ -862,7 +868,7 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
         session_secret,
         mode,
       },
-      { headers: ragAuthHeaders() },
+      { headers: ragAuthHeaders(req) },
     );
 
     return res.json({
@@ -881,7 +887,7 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
     });
   }
 });
-app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+app.post("/ask/stream", authenticateUser, authorizeSession, inferenceSlowDown, inferenceLimiter, async (req, res) => {
   const validation = askSchema.safeParse(req.body);
 
   if (!validation.success) {
@@ -899,7 +905,7 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
       `${RAG_SERVICE_URL}/ask/stream`,
       { question, session_id, session_secret, mode },
       {
-        headers: ragAuthHeaders(),
+        headers: ragAuthHeaders(req),
         responseType: "stream",
         timeout: 120000,
       }
@@ -932,7 +938,7 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
   }
 });
 
-app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+app.post("/summarize", authenticateUser, authorizeDocument, authorizeSession, inferenceSlowDown, inferenceLimiter, async (req, res) => {
   const validation = summarizeSchema.safeParse(req.body);
 
   if (!validation.success) {
@@ -944,7 +950,7 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
 
   try {
     const response = await axios.post(`${RAG_SERVICE_URL}/summarize`, validation.data, {
-      headers: ragAuthHeaders(),
+      headers: ragAuthHeaders(req),
     });
 
     return res.json({
@@ -962,7 +968,7 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
   }
 });
 
-app.post("/knowledge-gaps", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+app.post("/knowledge-gaps", authenticateUser, authorizeDocument, authorizeSession, inferenceSlowDown, inferenceLimiter, async (req, res) => {
   const validation = knowledgeGapsSchema.safeParse(req.body);
 
   if (!validation.success) {
@@ -976,7 +982,7 @@ app.post("/knowledge-gaps", inferenceSlowDown, inferenceLimiter, async (req, res
     const response = await axios.post(
       `${RAG_SERVICE_URL}/knowledge-gaps`,
       validation.data,
-      { headers: ragAuthHeaders() },
+      { headers: ragAuthHeaders(req) },
     );
     // Pass the response through as-is — no gateway-layer transformation.
     return res.json(response.data);
@@ -998,7 +1004,7 @@ app.get("/sessions", async (req, res) => {
   });
 });
 
-app.post("/sessions/lookup", async (req, res) => {
+app.post("/sessions/lookup", authenticateUser, async (req, res) => {
   const validation = sessionsLookupSchema.safeParse(req.body);
 
   if (!validation.success) {
@@ -1012,7 +1018,7 @@ app.post("/sessions/lookup", async (req, res) => {
     const response = await axios.post(
       `${RAG_SERVICE_URL}/sessions/lookup`,
       validation.data,
-      { headers: ragAuthHeaders() },
+      { headers: ragAuthHeaders(req) },
     );
     return res.json(response.data);
   } catch (err) {
