@@ -8,6 +8,7 @@ const LandingNavbar = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [activeSection, setActiveSection] = useState('');
   const dropdownRef = useRef(null);
 
   // Close dropdown when clicking outside
@@ -19,6 +20,24 @@ const LandingNavbar = () => {
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+   useEffect(() => {
+    const sections = ['features', 'how-it-works', 'pricing', 'faq'];
+    const observers = [];
+
+    sections.forEach((id) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const observer = new IntersectionObserver(
+        ([entry]) => { if (entry.isIntersecting) setActiveSection(id); },
+        { threshold: 0.4 }
+      );
+      observer.observe(el);
+      observers.push(observer);
+    });
+
+    return () => observers.forEach((o) => o.disconnect());
   }, []);
 
   return (
@@ -35,10 +54,10 @@ const LandingNavbar = () => {
 
       {/* Center Links */}
       <div className="navbar-links" id="navbar-links">
-        <a href="#features" className="navbar-link">Features</a>
-        <a href="#how-it-works" className="navbar-link">How It Works</a>
-        <a href="#pricing" className="navbar-link">Pricing</a>
-        <a href="#faq" className="navbar-link">FAQ</a>
+        <a href="#features" className={`navbar-link ${activeSection === 'features' ? 'active' : ''}`}>Features</a>
+        <a href="#how-it-works" className={`navbar-link ${activeSection === 'how-it-works' ? 'active' : ''}`}>How It Works</a>
+        <a href="#pricing" className={`navbar-link ${activeSection === 'pricing' ? 'active' : ''}`}>Pricing</a>
+        <a href="#faq" className={`navbar-link ${activeSection === 'faq' ? 'active' : ''}`}>FAQ</a>
       </div>
 
       {/* Actions */}
