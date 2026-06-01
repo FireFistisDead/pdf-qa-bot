@@ -95,6 +95,8 @@ const updateFlashcardProgressSchema = z.object({
 });
 
 module.exports = {
+  uuidSchema,
+  sessionSecretSchema,
   askSchema,
   summarizeSchema,
   knowledgeGapsSchema,

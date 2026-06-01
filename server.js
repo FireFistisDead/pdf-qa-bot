@@ -10,7 +10,7 @@ const crypto = require("crypto");
 const { rateLimit } = require("express-rate-limit");
 const slowDown = require("express-slow-down");
 const helmet = require("helmet");
-const { askSchema, summarizeSchema, knowledgeGapsSchema, sessionsLookupSchema } = require("./validators/schemas");
+const { askSchema, summarizeSchema, knowledgeGapsSchema, sessionsLookupSchema, uuidSchema, sessionSecretSchema } = require("./validators/schemas");
 const { clientIpFromRequest } = require("./security/ip");
 const { createRedisClient } = require("./security/redis");
 const authRoutes = require("./src/routes/authRoutes");
@@ -677,8 +677,27 @@ app.post(
   const absoluteFilePath = uploadedFilePath
     ? path.join(UPLOADS_DIR, path.basename(uploadedFilePath))
     : null;
-  const sessionId = req.body?.session_id || null;
-  const sessionSecret = normalizeSessionSecret(req.body?.session_secret);
+  const rawSessionId = req.body?.session_id;
+  const rawSessionSecret = req.body?.session_secret;
+  
+  let sessionId = null;
+  let sessionSecret = null;
+
+  if (rawSessionId || rawSessionSecret) {
+    const idValidation = uuidSchema.safeParse(rawSessionId);
+    const secretValidation = sessionSecretSchema.safeParse(rawSessionSecret);
+    
+    if (!idValidation.success || !secretValidation.success) {
+      if (uploadedFilePath) await cleanupFile(uploadedFilePath);
+      return sendUploadError(
+        res,
+        400,
+        "Validation failed for session credentials."
+      );
+    }
+    sessionId = idValidation.data;
+    sessionSecret = secretValidation.data;
+  }
 
   try {
     if (!req.file) {
@@ -840,10 +859,24 @@ const requireSupabaseAuth = (req, res, next) => {
 // streams it to the RAG service for text extraction + FAISS indexing,
 // and returns the session_id + session_secret needed for /ask/stream.
 app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, res) => {
-  const { url, filename, session_id, session_secret } = req.body || {};
+  const { url, filename, session_id: rawSessionId, session_secret: rawSessionSecret } = req.body || {};
 
   if (!url || typeof url !== "string") {
     return res.status(400).json({ error: "Missing or invalid 'url' field." });
+  }
+
+  let session_id = null;
+  let session_secret = null;
+
+  if (rawSessionId || rawSessionSecret) {
+    const idValidation = uuidSchema.safeParse(rawSessionId);
+    const secretValidation = sessionSecretSchema.safeParse(rawSessionSecret);
+    
+    if (!idValidation.success || !secretValidation.success) {
+      return res.status(400).json({ error: "Validation failed for session credentials." });
+    }
+    session_id = idValidation.data;
+    session_secret = secretValidation.data;
   }
   
   // SSRF Protection: Validate URL format, protocol, and hostname
