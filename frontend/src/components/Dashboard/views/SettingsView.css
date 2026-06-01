@@ -25,7 +25,7 @@
   z-index: 0;
 }
 
-/* Ambient orbs — symmetric: one top-right, one top-left */
+/* Ambient orbs */
 .settings-orb {
   position: fixed;
   border-radius: 50%;
@@ -36,20 +36,30 @@
 }
 /* TOP-RIGHT — neon green */
 .settings-orb-1 {
-  width: 650px;
-  height: 650px;
-  top: -150px;
+  width: 700px;
+  height: 700px;
+  top: -200px;
   right: -100px;
   background: rgba(200, 255, 0, 0.08);
 }
-/* TOP-LEFT — purple (mirrors the right) */
+/* CENTER-LEFT (offset past sidebar ~260px) — purple */
 .settings-orb-2 {
   width: 600px;
   height: 600px;
-  top: -150px;
-  left: -100px;
-  background: rgba(130, 0, 255, 0.07);
+  top: 50px;
+  left: 260px;
+  background: rgba(130, 0, 255, 0.08);
   animation-delay: -7s;
+}
+/* BOTTOM-CENTER — subtle neon green for lower page coverage */
+.settings-orb-3 {
+  width: 500px;
+  height: 500px;
+  bottom: -150px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(200, 255, 0, 0.04);
+  animation-delay: -3s;
 }
 @keyframes orbFloat {
   0%   { transform: translate(0, 0) scale(1); }
