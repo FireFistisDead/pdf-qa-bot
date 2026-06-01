@@ -11,7 +11,7 @@ import {
 
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 
-const UploadCard = ({ darkMode, onUpload, uploading }) => {
+const UploadCard = ({ darkMode, onUpload, uploading, uploadProgress, uploadStatusText }) => {
   const [files, setFiles] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
 
@@ -289,13 +289,15 @@ const handleDrop = (e) => {
                 {uploading ? (
                   <>
                     <CircularProgress
+                      variant={uploadProgress > 0 ? "determinate" : "indeterminate"}
+                      value={uploadProgress > 0 ? uploadProgress : undefined}
                       size={20}
                       sx={{
                         color: "#fff",
                         mr: 1,
                       }}
                     />
-                    Uploading...
+                    {uploadStatusText || "Uploading..."}
                   </>
                 ) : hasSelectedFiles && files.length > 1 ? (
                   "Upload PDFs"

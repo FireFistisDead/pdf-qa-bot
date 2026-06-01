@@ -13,3 +13,5 @@ requests
 numpy
 rank-bm25==0.2.2
 python-multipart
+celery>=5.3.0
+redis>=5.0.0
