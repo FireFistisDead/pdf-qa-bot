@@ -13,40 +13,42 @@
   overflow-x: hidden;
 }
 
-/* ── BACKGROUND GRID — fixed so it covers the whole viewport ── */
+/* ── BACKGROUND GRID — fixed, full viewport, symmetric ── */
 .settings-bg-grid {
   position: fixed;
   inset: 0;
   background-image:
-    linear-gradient(rgba(200, 255, 0, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(200, 255, 0, 0.04) 1px, transparent 1px);
+    linear-gradient(rgba(200, 255, 0, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(200, 255, 0, 0.05) 1px, transparent 1px);
   background-size: 60px 60px;
   pointer-events: none;
   z-index: 0;
 }
 
-/* Ambient orbs — fixed so they paint behind all content */
+/* Ambient orbs — symmetric: one top-right, one top-left */
 .settings-orb {
   position: fixed;
   border-radius: 50%;
-  filter: blur(140px);
+  filter: blur(130px);
   pointer-events: none;
   z-index: 0;
   animation: orbFloat 14s ease-in-out infinite alternate;
 }
+/* TOP-RIGHT — neon green */
 .settings-orb-1 {
-  width: 700px;
-  height: 700px;
-  top: -250px;
-  right: -150px;
-  background: rgba(200, 255, 0, 0.06);
+  width: 650px;
+  height: 650px;
+  top: -150px;
+  right: -100px;
+  background: rgba(200, 255, 0, 0.08);
 }
+/* TOP-LEFT — purple (mirrors the right) */
 .settings-orb-2 {
-  width: 500px;
-  height: 500px;
-  bottom: -200px;
-  left: 5%;
-  background: rgba(120, 0, 255, 0.05);
+  width: 600px;
+  height: 600px;
+  top: -150px;
+  left: -100px;
+  background: rgba(130, 0, 255, 0.07);
   animation-delay: -7s;
 }
 @keyframes orbFloat {
