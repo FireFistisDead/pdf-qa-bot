@@ -169,9 +169,5 @@
 }
 .navbar-link.active {
   color: #C8F135;
-}
-
-.navbar-link.active::after {
-  transform: scaleX(1);
-  background-color: #C8F135;
+  border-bottom: 2px solid #C8F135;
 }
