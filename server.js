@@ -574,6 +574,11 @@ const SESSION_SECRET_REDIS_URL = process.env.SESSION_SECRET_REDIS_URL || RATE_LI
 const SESSION_SECRET_REDIS_PREFIX = "session-secret:";
 const SESSION_SECRET_MEMORY_MAP = new Map(); // token -> { encrypted: string, expiry }
 
+// Cookie SameSite configuration for session-secret fallback cookie.
+// Default: 'lax'. Operators can set to 'none' when frontend+API are cross-site,
+// but that requires Secure to be true per browser rules.
+const SESSION_SECRET_COOKIE_SAMESITE = (process.env.SESSION_SECRET_COOKIE_SAMESITE || "lax").toString();
+
 let sessionSecretRedisClient = null;
 let sessionSecretRedisConnectPromise = null;
 
@@ -609,6 +614,14 @@ const _initEncKey = () => {
     }
   }
   if (!ENC_KEY) {
+    // If Redis-backed storage is enabled (or specifically sessionSecretRedisClient is set)
+    // and we're running in production, require a persistent encryption key so
+    // stored values remain decryptable across restarts. Falling back to a
+    // runtime-only key in this configuration leads to opaque failures.
+    if (sessionSecretRedisClient && process.env.NODE_ENV === "production") {
+      throw new Error("SESSION_SECRET_ENC_KEY is required when using Redis-backed session secret storage in production");
+    }
+
     ENC_KEY = crypto.randomBytes(32);
     console.warn("No SESSION_SECRET_ENC_KEY provided — generated runtime-only key (won't persist across restarts)");
   }
@@ -700,11 +713,16 @@ const _storeSessionSecret = async (sessionSecret) => {
   }
 
   SESSION_SECRET_MEMORY_MAP.set(token, { encrypted, expiry });
-  const timeout = setTimeout(() => {
-    SESSION_SECRET_MEMORY_MAP.delete(token);
-  }, SESSION_SECRET_TTL_MS + 1000);
-  if (typeof timeout.unref === "function") {
-    timeout.unref();
+  // Only create a per-token timer for in-memory fallback. When Redis is
+  // configured we rely on Redis TTLs and lazy eviction to avoid creating
+  // large numbers of active timers in-process.
+  if (!sessionSecretRedisClient) {
+    const timeout = setTimeout(() => {
+      SESSION_SECRET_MEMORY_MAP.delete(token);
+    }, SESSION_SECRET_TTL_MS + 1000);
+    if (typeof timeout.unref === "function") {
+      timeout.unref();
+    }
   }
   return token;
 };
@@ -792,10 +810,20 @@ const setSessionSecretCookie = async (res, sessionId, sessionSecret) => {
   const token = await _storeSessionSecret(sessionSecret);
   if (!token) return;
 
+  // Respect operator-configured SameSite. If operators explicitly request
+  // 'none', ensure the Secure flag is set (browsers require this for None).
+  const sameSiteRaw = (SESSION_SECRET_COOKIE_SAMESITE || "lax").toString();
+  const sameSite = ("" + sameSiteRaw).toLowerCase();
+  const secureFlag = process.env.NODE_ENV === "production" || sameSite === "none";
+
+  if (sameSite === "none" && !secureFlag) {
+    console.warn("SESSION_SECRET_COOKIE_SAMESITE=none was requested but secure cookies are not enabled; forcing Secure flag to true for compatibility.");
+  }
+
   res.cookie(getSessionSecretCookieName(sessionId), token, {
     httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    sameSite: sameSiteRaw,
+    secure: !!secureFlag,
     path: "/",
     maxAge: SESSION_SECRET_TTL_MS,
   });
