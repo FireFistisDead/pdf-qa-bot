@@ -716,7 +716,7 @@ def remove_persisted_session(session_id: str, session_dir: str | None = None):
     try:
         target_path = Path(get_session_dir(session_id)).resolve()
         if target_path.is_dir() and PERSIST_PATH in target_path.parents:
-            shutil.rmtree(target_path)
+            shutil.rmtree(target_path, ignore_errors=True)
     except Exception:
         logger.exception("Failed to remove persisted session session_id=%s", session_id)
 
@@ -746,7 +746,7 @@ def cleanup_expired_persisted_sessions(extra_session_dirs: dict | None = None):
         try:
             target_path = Path(get_session_dir(sid)).resolve()
             if target_path.is_dir() and PERSIST_PATH in target_path.parents:
-                shutil.rmtree(target_path)
+                shutil.rmtree(target_path, ignore_errors=True)
         except Exception:
             logger.exception("Failed to remove persisted session session_id=%s", sid)
 
