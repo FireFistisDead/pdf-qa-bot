@@ -707,6 +707,14 @@ def persist_session_registry_entry(session_id: str, meta: dict):
         write_session_registry_unlocked(registry)
 
 
+def _log_rmtree_error(func, path, exc_info):
+    """Log individual file/directory deletion failures during rmtree."""
+    logger.warning(
+        "Failed to delete during session cleanup path=%s error=%s",
+        path,
+        exc_info[1],
+    )
+
 def remove_persisted_session(session_id: str, session_dir: str | None = None):
     with session_registry_lock():
         registry = read_session_registry_unlocked()
@@ -716,7 +724,7 @@ def remove_persisted_session(session_id: str, session_dir: str | None = None):
     try:
         target_path = Path(get_session_dir(session_id)).resolve()
         if target_path.is_dir() and PERSIST_PATH in target_path.parents:
-            shutil.rmtree(target_path, ignore_errors=True)
+            shutil.rmtree(target_path, onerror=_log_rmtree_error)
     except Exception:
         logger.exception("Failed to remove persisted session session_id=%s", session_id)
 
@@ -742,13 +750,28 @@ def cleanup_expired_persisted_sessions(extra_session_dirs: dict | None = None):
         if expired_ids:
             write_session_registry_unlocked(registry)
 
+    successful = 0
+    failed = 0
     for sid, session_dir in expired_dirs.items():
         try:
             target_path = Path(get_session_dir(sid)).resolve()
             if target_path.is_dir() and PERSIST_PATH in target_path.parents:
-                shutil.rmtree(target_path, ignore_errors=True)
+                shutil.rmtree(target_path, onerror=_log_rmtree_error)
+                if not target_path.exists():
+                    successful += 1
+                else:
+                    failed += 1
         except Exception:
             logger.exception("Failed to remove persisted session session_id=%s", sid)
+            failed += 1
+
+    if expired_dirs:
+        logger.info(
+            "Persisted session cleanup completed total=%s successful=%s failed=%s",
+            len(expired_dirs),
+            successful,
+            failed,
+        )
 
 
 def persist_vectorstore(session_id: str, vectorstore):
