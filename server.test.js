@@ -450,7 +450,7 @@ describe("route error responses", () => {
         }),
       });
       assert.equal(res.status, 200);
-      assert.equal(forwardedHeaders["X-Internal-Token"], "test-internal-token-for-ci");
+      assert.equal(forwardedHeaders["X-Internal-Token"], process.env.INTERNAL_RAG_TOKEN);
     } finally {
       axios.post = originalPost;
     }
