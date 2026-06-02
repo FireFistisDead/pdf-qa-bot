@@ -716,17 +716,23 @@ def _log_rmtree_error(func, path, exc_info):
     )
 
 def remove_persisted_session(session_id: str, session_dir: str | None = None):
-    with session_registry_lock():
-        registry = read_session_registry_unlocked()
-        registry_entry = registry.pop(session_id, None)
-        write_session_registry_unlocked(registry)
-
+    deletion_succeeded = False
     try:
         target_path = Path(get_session_dir(session_id)).resolve()
         if target_path.is_dir() and PERSIST_PATH in target_path.parents:
             shutil.rmtree(target_path, onerror=_log_rmtree_error)
+            deletion_succeeded = not target_path.exists()
+        else:
+            # Directory already missing — treat as successful cleanup
+            deletion_succeeded = True
     except Exception:
         logger.exception("Failed to remove persisted session session_id=%s", session_id)
+
+    if deletion_succeeded:
+        with session_registry_lock():
+            registry = read_session_registry_unlocked()
+            registry.pop(session_id, None)
+            write_session_registry_unlocked(registry)
 
 
 def cleanup_expired_persisted_sessions(extra_session_dirs: dict | None = None):
@@ -749,7 +755,7 @@ def cleanup_expired_persisted_sessions(extra_session_dirs: dict | None = None):
     successful = 0
     failed = 0
     successful_sids = []
-    for sid, session_dir in expired_dirs.items():
+    for sid in expired_dirs:
         try:
             target_path = Path(get_session_dir(sid)).resolve()
             if target_path.is_dir() and PERSIST_PATH in target_path.parents:
