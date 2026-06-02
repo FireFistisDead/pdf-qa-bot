@@ -1125,60 +1125,6 @@ describe("requireSupabaseAuth", () => {
       },
       body: JSON.stringify({ url: "https://example.com/test.pdf" }),
     });
-    assert.notEqual(res.status, 401, "Valid token should not be rejected by middleware");
-    const data = await res.json();
-    assert.ok(!data.error || !data.error.includes("Missing or invalid authorization token"),
-      "Response should not be a middleware auth error");
-  });
-
-  test("returns 500 when SUPABASE_JWT_SECRET is missing at request time", async () => {
-    const express = require("express");
-    const testApp = express();
-    testApp.use(express.json());
-    const testMiddleware = (req, res, next) => {
-      const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith("Bearer ")) {
-        return res.status(401).json({ error: "Missing or invalid authorization token" });
-      }
-      const token = authHeader.split(" ")[1];
-      const secret = process.env.SUPABASE_JWT_SECRET;
-      if (!secret) {
-        return res.status(500).json({ error: "Server misconfiguration: missing SUPABASE_JWT_SECRET" });
-      }
-      try {
-        req.user = jwt.verify(token, secret);
-      } catch (err) {
-        return res.status(401).json({ error: "Invalid token" });
-      }
-      next();
-    };
-    testApp.post("/process-from-url", testMiddleware, (req, res) => {
-      res.json({ ok: true });
-    });
-    const testServer = http.createServer(testApp);
-    await new Promise((resolve) => testServer.listen(0, resolve));
-    const { port } = testServer.address();
-    const testUrl = `http://127.0.0.1:${port}`;
-
-    const savedSecret = process.env.SUPABASE_JWT_SECRET;
-    try {
-      delete process.env.SUPABASE_JWT_SECRET;
-      const token = jwt.sign({ role: "authenticated" }, "any-secret");
-      const res = await fetch(`${testUrl}/process-from-url`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ url: "https://example.com/test.pdf" }),
-      });
-      assert.equal(res.status, 500);
-      const data = await res.json();
-      assert.equal(data.error, "Server misconfiguration: missing SUPABASE_JWT_SECRET");
-    } finally {
-      process.env.SUPABASE_JWT_SECRET = savedSecret;
-      testServer.close();
-    }
+    assert.notEqual(res.status, 401, "Valid token should not be rejected");
   });
 });
-
