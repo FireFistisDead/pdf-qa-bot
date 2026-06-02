@@ -829,18 +829,32 @@ def persist_session_registry_entry(session_id: str, meta: dict):
         write_session_registry_unlocked(registry)
 
 
-def remove_persisted_session(session_id: str, session_dir: str | None = None):
-    with session_registry_lock():
-        registry = read_session_registry_unlocked()
-        registry_entry = registry.pop(session_id, None)
-        write_session_registry_unlocked(registry)
+def _log_rmtree_error(func, path, exc_info):
+    """Log individual file/directory deletion failures during rmtree."""
+    logger.warning(
+        "Failed to delete during session cleanup path=%s error=%s",
+        path,
+        exc_info[1],
+    )
 
+def remove_persisted_session(session_id: str, session_dir: str | None = None):
+    deletion_succeeded = False
     try:
         target_path = Path(get_session_dir(session_id)).resolve()
         if target_path.is_dir() and PERSIST_PATH in target_path.parents:
-            shutil.rmtree(target_path)
+            shutil.rmtree(target_path, onerror=_log_rmtree_error)
+            deletion_succeeded = not target_path.exists()
+        else:
+            # Directory already missing — treat as successful cleanup
+            deletion_succeeded = True
     except Exception:
         logger.exception("Failed to remove persisted session session_id=%s", session_id)
+
+    if deletion_succeeded:
+        with session_registry_lock():
+            registry = read_session_registry_unlocked()
+            registry.pop(session_id, None)
+            write_session_registry_unlocked(registry)
 
 
 def cleanup_expired_persisted_sessions(extra_session_dirs: dict | None = None):
@@ -859,18 +873,46 @@ def cleanup_expired_persisted_sessions(extra_session_dirs: dict | None = None):
 
         for sid in expired_ids:
             expired_dirs[sid] = get_session_dir(sid)
-            registry.pop(sid, None)
 
-        if expired_ids:
-            write_session_registry_unlocked(registry)
-
-    for sid, session_dir in expired_dirs.items():
+    successful = 0
+    failed = 0
+    successful_sids = []
+    for sid in expired_dirs:
         try:
             target_path = Path(get_session_dir(sid)).resolve()
             if target_path.is_dir() and PERSIST_PATH in target_path.parents:
-                shutil.rmtree(target_path)
+                shutil.rmtree(target_path, onerror=_log_rmtree_error)
+                if not target_path.exists():
+                    successful += 1
+                    successful_sids.append(sid)
+                else:
+                    failed += 1
+            else:
+                # If directory is missing, it's considered successfully cleaned up
+                successful += 1
+                successful_sids.append(sid)
         except Exception:
             logger.exception("Failed to remove persisted session session_id=%s", sid)
+            failed += 1
+
+    if successful_sids:
+        with session_registry_lock():
+            registry = read_session_registry_unlocked()
+            modified = False
+            for sid in successful_sids:
+                if sid in registry:
+                    registry.pop(sid)
+                    modified = True
+            if modified:
+                write_session_registry_unlocked(registry)
+
+    if expired_dirs:
+        logger.info(
+            "Persisted session cleanup completed total=%s successful=%s failed=%s",
+            len(expired_dirs),
+            successful,
+            failed,
+        )
 
 
 def persist_vectorstore(session_id: str, vectorstore):
