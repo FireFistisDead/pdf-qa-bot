@@ -204,6 +204,42 @@ const rateLimitHandler = (req, res) => {
   });
 };
 
+const parsePositiveIntegerEnv = (rawValue, fallbackValue, name) => {
+  const candidate = (rawValue ?? "").toString().trim();
+  const value = candidate === "" ? String(fallbackValue) : candidate;
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`${name} must be a positive integer. Received: "${rawValue}".`);
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer greater than 0.`);
+  }
+
+  return parsed;
+};
+
+const parseUploadFileSizeLimitBytes = () => {
+  if (typeof process.env.UPLOAD_MAX_FILE_SIZE_BYTES === "string" && process.env.UPLOAD_MAX_FILE_SIZE_BYTES.trim() !== "") {
+    return parsePositiveIntegerEnv(
+      process.env.UPLOAD_MAX_FILE_SIZE_BYTES,
+      20_000_000,
+      "UPLOAD_MAX_FILE_SIZE_BYTES",
+    );
+  }
+
+  if (typeof process.env.MAX_UPLOAD_SIZE_MB === "string" && process.env.MAX_UPLOAD_SIZE_MB.trim() !== "") {
+    const maxUploadSizeMb = parsePositiveIntegerEnv(
+      process.env.MAX_UPLOAD_SIZE_MB,
+      20,
+      "MAX_UPLOAD_SIZE_MB",
+    );
+    return maxUploadSizeMb * 1024 * 1024;
+  }
+
+  return 20_000_000;
+};
+
 // ─── Rate Limiters ───────────────────────────────────────────────────────────
 const keyGenerator = (req) => clientIpFromRequest(req) || "unknown";
 // Note: express-rate-limit's `ipv6Subnet` is not compatible with a custom
@@ -223,6 +259,17 @@ const createLimiterStore = (prefix) => {
   });
 };
 
+const RATE_LIMIT_WINDOW_MS = parsePositiveIntegerEnv(
+  process.env.RATE_LIMIT_WINDOW_MS,
+  60_000,
+  "RATE_LIMIT_WINDOW_MS",
+);
+const RATE_LIMIT_MAX = parsePositiveIntegerEnv(
+  process.env.RATE_LIMIT_MAX,
+  60,
+  "RATE_LIMIT_MAX",
+);
+
 // Global baseline — broad bot/scraper protection across every route.
 // 200 req / 15 min per IP. Tripping this triggers the escalating ban.
 const globalLimiter = rateLimit({
@@ -238,17 +285,17 @@ const globalLimiter = rateLimit({
   },
 });
 
-// Hard cap: configured uploads / hour per IP. Tripping this triggers the ban system.
-const uploadLimitMax = parseInt(process.env.RATE_LIMIT_UPLOAD_MAX || "10", 10);
+// Route-specific cap for upload and inference endpoints.
+// Tripping this triggers the ban system.
 const uploadLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  max: uploadLimitMax,
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max: RATE_LIMIT_MAX,
   standardHeaders: "draft-7",
   legacyHeaders: false,
   keyGenerator,
   store: createLimiterStore("rl:upload:"),
   handler: (req, res) => {
-    res.locals.rateLimitMessage = `Upload limit reached. You can upload up to ${uploadLimitMax} PDFs per hour. Please try again later.`;
+    res.locals.rateLimitMessage = "Too many requests. Please slow down and try again later.";
     rateLimitHandler(req, res);
   },
 });
@@ -273,17 +320,65 @@ const inferenceSlowDown = slowDown({
 // Inference hard limiter — fires after slow-down window if the attacker still
 // keeps hammering. Triggers the escalating ban on violation.
 const inferenceLimiter = rateLimit({
-  windowMs: 5 * 60 * 1000,
-  max: parseInt(process.env.RATE_LIMIT_INFERENCE_MAX || "30", 10),
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max: RATE_LIMIT_MAX,
   standardHeaders: "draft-7",
   legacyHeaders: false,
   keyGenerator,
   store: createLimiterStore("rl:inference:"),
   handler: (req, res) => {
-    res.locals.rateLimitMessage = "Inference limit reached. Please wait a few minutes before sending more requests.";
+    res.locals.rateLimitMessage = "Too many requests. Please slow down and try again later.";
     rateLimitHandler(req, res);
   },
 });
+
+const UPLOAD_MAX_CONCURRENT_PER_IP = parsePositiveIntegerEnv(
+  process.env.UPLOAD_MAX_CONCURRENT_PER_IP,
+  2,
+  "UPLOAD_MAX_CONCURRENT_PER_IP",
+);
+const activeUploadsByIp = new Map();
+
+const releaseUploadSlot = (ip) => {
+  if (!ip) return;
+
+  const currentCount = activeUploadsByIp.get(ip);
+  if (!currentCount) return;
+
+  if (currentCount <= 1) {
+    activeUploadsByIp.delete(ip);
+  } else {
+    activeUploadsByIp.set(ip, currentCount - 1);
+  }
+};
+
+const uploadConcurrencyGuard = (req, res, next) => {
+  const ip = clientIpFromRequest(req) || "unknown";
+  const currentCount = activeUploadsByIp.get(ip) || 0;
+
+  if (currentCount >= UPLOAD_MAX_CONCURRENT_PER_IP) {
+    console.warn(
+      `[upload] concurrent upload limit reached for IP=${ip} active=${currentCount} cap=${UPLOAD_MAX_CONCURRENT_PER_IP}`,
+    );
+    return res.status(429).json({
+      error: "Too many concurrent uploads. Please wait for an active upload to finish.",
+    });
+  }
+
+  activeUploadsByIp.set(ip, currentCount + 1);
+
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    releaseUploadSlot(ip);
+  };
+  req.releaseUploadSlot = release;
+  res.on("finish", release);
+  res.on("close", release);
+
+  return next();
+};
 
 // Apply global limiter before ban guard so DB-backed ban checks are rate-limited.
 app.use(globalLimiter);
@@ -291,33 +386,10 @@ app.use(banGuard);
 app.use("/api/auth", authRoutes);
 
 // ─── File Size Limits ──────────────────────────────────────────────────────────
-// MAX_UPLOAD_SIZE_MB controls the maximum PDF file size allowed per upload.
-// Default is 50 MB. Set to a lower value in resource-constrained environments.
-// Multer will automatically reject files exceeding this limit with 413 Payload Too Large.
-//
-// Environment variable validation: Ensures the value is a positive integer and rejects
-// malformed strings like "50gb" or "50.5mb" that parseInt would silently truncate.
-const validateUploadSizeConfig = () => {
-  const rawValue = process.env.MAX_UPLOAD_SIZE_MB || "50";
-  // Regex: match only pure positive integers (no units, decimals, or garbage)
-  const integerRegex = /^\d+$/;
-  if (!integerRegex.test(rawValue.trim())) {
-    throw new Error(
-      `MAX_UPLOAD_SIZE_MB must be a positive integer without units. ` +
-      `Received: "${rawValue}". Examples: 50, 100, 200 (not "50mb" or "50.5").`
-    );
-  }
-  const parsed = parseInt(rawValue, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(
-      `MAX_UPLOAD_SIZE_MB must be a positive integer. ` +
-      `Received: ${parsed}. Please set a value like 50, 100, or 200.`
-    );
-  }
-  return parsed;
-};
-const MAX_UPLOAD_SIZE_MB = validateUploadSizeConfig();
-const MAX_PDF_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
+// UPLOAD_MAX_FILE_SIZE_BYTES controls the maximum PDF file size allowed per upload.
+// Default is 20,000,000 bytes. A legacy MAX_UPLOAD_SIZE_MB value is still honored
+// when the new bytes-based env var is not set.
+const MAX_PDF_SIZE_BYTES = parseUploadFileSizeLimitBytes();
 
 const UPLOADS_DIR = path.resolve("uploads");
 const isDevelopment = process.env.NODE_ENV !== "production";
@@ -640,23 +712,23 @@ app.post("/upload", authenticateUser, uploadLimiter, upload.single("file"), mult
     }
 
     const fileHandle = await fsPromises.open(absoluteFilePath, "r");
-const signatureBuffer = Buffer.alloc(4);
+    const signatureBuffer = Buffer.alloc(4);
 
-try {
-  await fileHandle.read(signatureBuffer, 0, 4, 0);
-} finally {
-  await fileHandle.close();
-}
+    try {
+      await fileHandle.read(signatureBuffer, 0, 4, 0);
+    } finally {
+      await fileHandle.close();
+    }
 
-if (signatureBuffer.toString() !== "%PDF") {
-  await cleanupFile(uploadedFilePath);
+    if (signatureBuffer.toString() !== "%PDF") {
+      await cleanupFile(uploadedFilePath);
 
-  return sendUploadError(
-    res,
-    415,
-    "Invalid file type. Only real PDF documents are accepted.",
-  );
-}
+      return sendUploadError(
+        res,
+        415,
+        "Invalid file type. Only real PDF documents are accepted.",
+      );
+    }
     // Validate session credential pairing before opening the file stream.
     // Creating fs.createReadStream before this check would leave a dangling
     // open handle on the file if the request is rejected and cleanupFile
@@ -723,6 +795,10 @@ if (signatureBuffer.toString() !== "%PDF") {
       error: typeof details === "string" ? details : "PDF processing failed",
       details: isDevelopment ? details : "Internal processing error",
     });
+  } finally {
+    if (typeof req.releaseUploadSlot === "function") {
+      req.releaseUploadSlot();
+    }
   }
 });
 
