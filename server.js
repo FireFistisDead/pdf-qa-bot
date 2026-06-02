@@ -694,13 +694,13 @@ const SUPABASE_ALLOWED_HOST_SUFFIXES = new Set(["supabase.co", "supabase.in"]);
 const normalizeHostnameForAllowlist = (hostname) => {
   if (typeof hostname !== "string") return null;
 
-  const normalizedHostname = hostname.trim().toLowerCase().replace(/\.$/, "");
+  const normalizedHostname = hostname.trim().toLowerCase().replace(/\.+$/, "");
   if (!normalizedHostname) return null;
 
   const asciiHostname = domainToASCII(normalizedHostname);
   if (!asciiHostname) return null;
 
-  return asciiHostname.toLowerCase().replace(/\.$/, "");
+  return asciiHostname.toLowerCase().replace(/\.+$/, "");
 };
 
 const isAllowedSupabaseHostname = (hostname) => {
@@ -1039,9 +1039,11 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
     // Download the PDF from the remote URL into a Buffer
     let pdfBuffer;
     try {
-      const downloadPath = `${parsedUrl.pathname}${parsedUrl.search}` || "/";
-      const dlResponse = await axios.get(downloadPath, {
-        baseURL: trustedSupabaseOrigin,
+      const downloadUrl = new URL(trustedSupabaseOrigin);
+      downloadUrl.pathname = parsedUrl.pathname;
+      downloadUrl.search = parsedUrl.search;
+
+      const dlResponse = await axios.get(downloadUrl.toString(), {
         responseType: "arraybuffer",
         timeout: 30000,
         maxContentLength: 50 * 1024 * 1024, // 50 MB cap
