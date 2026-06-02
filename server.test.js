@@ -5,27 +5,8 @@ const { spawnSync } = require("node:child_process");
 const axios = require("axios");
 const { Blob } = require("node:buffer");
 
-const originalInternalRagToken = process.env.INTERNAL_RAG_TOKEN;
-const originalJwtSecret = process.env.JWT_SECRET;
-
-before(() => {
-  process.env.INTERNAL_RAG_TOKEN = process.env.INTERNAL_RAG_TOKEN || "test-internal-rag-token";
-  process.env.JWT_SECRET = process.env.JWT_SECRET || "test-jwt-secret";
-});
-
-after(() => {
-  if (originalInternalRagToken === undefined) {
-    delete process.env.INTERNAL_RAG_TOKEN;
-  } else {
-    process.env.INTERNAL_RAG_TOKEN = originalInternalRagToken;
-  }
-
-  if (originalJwtSecret === undefined) {
-    delete process.env.JWT_SECRET;
-  } else {
-    process.env.JWT_SECRET = originalJwtSecret;
-  }
-});
+process.env.JWT_SECRET = "test-secret-for-ci";
+process.env.INTERNAL_RAG_TOKEN = "test-internal-token-for-ci";
 
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
@@ -383,6 +364,35 @@ describe("route error responses", () => {
     const data = await res.json();
     assert.equal(data.error, "Validation failed");
     assert.deepEqual(data.details.fieldErrors.session_id, ["Invalid session ID format."]);
+  });
+
+  test("POST /ask/stream forwards internal auth header", async () => {
+    const originalPost = axios.post;
+    let forwardedHeaders = null;
+
+    axios.post = async (url, body, options) => {
+      forwardedHeaders = options?.headers;
+      const { PassThrough } = require("node:stream");
+      const fakeStream = new PassThrough();
+      fakeStream.end("mock streamed answer");
+      return { data: fakeStream };
+    };
+
+    try {
+      const res = await fetch(`${baseUrl}/ask/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: "hi",
+          session_id: "550e8400-e29b-41d4-a716-446655440000",
+          session_secret: "secret-abc",
+        }),
+      });
+      assert.equal(res.status, 200);
+      assert.equal(forwardedHeaders["X-Internal-Token"], "test-internal-token-for-ci");
+    } finally {
+      axios.post = originalPost;
+    }
   });
 
   test("POST /summarize with empty body returns 400", async () => {

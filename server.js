@@ -997,11 +997,7 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
     const ragResponse = await axios.post(
       `${RAG_SERVICE_URL}/ask/stream`,
       { question, session_id, session_secret, mode },
-      {
-        headers: ragAuthHeaders(),
-        responseType: "stream",
-        timeout: 120000,
-      }
+      { headers: ragAuthHeaders(), responseType: "stream", timeout: 120000 }
     );
 
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
