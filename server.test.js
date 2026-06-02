@@ -11,6 +11,8 @@ process.env.INTERNAL_RAG_TOKEN = "test-internal-token-for-ci";
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
 let app, askSchema, summarizeSchema, extractServiceDetails, ragAuthHeaders;
+let _credCache, _credKey, _credCacheHit, _credCacheStore, _credCacheDrop;
+let validateAskBody, validateSummarizeBody, MAX_QUESTION_LENGTH;
 let clientIpFromRequest, normalizeIp;
 before(() => {
   process.env.JWT_SECRET = "test-secret-for-ci";
@@ -19,6 +21,14 @@ before(() => {
   askSchema = mod.askSchema;
   summarizeSchema = mod.summarizeSchema;
   extractServiceDetails = mod.extractServiceDetails;
+  _credCache = mod._credCache;
+  _credKey = mod._credKey;
+  _credCacheHit = mod._credCacheHit;
+  _credCacheStore = mod._credCacheStore;
+  _credCacheDrop = mod._credCacheDrop;
+  validateAskBody = mod.validateAskBody;
+  validateSummarizeBody = mod.validateSummarizeBody;
+  MAX_QUESTION_LENGTH = mod.MAX_QUESTION_LENGTH;
   ragAuthHeaders = mod.ragAuthHeaders;
 
   ({ clientIpFromRequest, normalizeIp } = require("./security/ip"));
@@ -29,6 +39,8 @@ test("module loads without error", () => {
   assert.ok(typeof askSchema.safeParse === "function", "askSchema should be a Zod schema");
   assert.ok(typeof summarizeSchema.safeParse === "function", "summarizeSchema should be a Zod schema");
   assert.ok(typeof extractServiceDetails === "function", "extractServiceDetails should be exported for tests");
+  assert.ok(typeof validateAskBody === "function", "validateAskBody should be exported");
+  assert.ok(typeof validateSummarizeBody === "function", "validateSummarizeBody should be exported");
 });
 
 test("ragAuthHeaders forwards the internal token", () => {
@@ -873,5 +885,124 @@ describe("route error responses", () => {
     assert.equal(res.status, 200);
     const data = await res.json();
     assert.ok(data.token);
+  });
+});
+
+// ─── Credential validation cache tests ───────────────────────────────────────
+
+const _V_UUID = "550e8400-e29b-41d4-a716-446655440000";
+const _V_SECRET = "any-valid-session-secret";
+
+describe("credential validation cache", () => {
+  test("cache miss returns false for unseen credentials", () => {
+    assert.equal(_credCacheHit(_V_UUID, "never-seen"), false);
+  });
+
+  test("cache hit returns true after store", () => {
+    _credCacheStore(_V_UUID, _V_SECRET);
+    assert.equal(_credCacheHit(_V_UUID, _V_SECRET), true);
+    _credCacheDrop(_V_UUID, _V_SECRET);
+  });
+
+  test("drop removes cached entry", () => {
+    _credCacheStore(_V_UUID, "drop-me");
+    _credCacheDrop(_V_UUID, "drop-me");
+    assert.equal(_credCacheHit(_V_UUID, "drop-me"), false);
+  });
+
+  test("different secrets produce different cache keys", () => {
+    assert.notEqual(_credKey(_V_UUID, "a"), _credKey(_V_UUID, "b"));
+  });
+
+  test("different session_ids produce different cache keys", () => {
+    assert.notEqual(
+      _credKey("550e8400-e29b-41d4-a716-446655440000", _V_SECRET),
+      _credKey("660e8400-e29b-41d4-a716-446655440000", _V_SECRET),
+    );
+  });
+
+  test("FIFO eviction at max size", () => {
+    _credCacheStore("aaa", "aaa");
+    assert.equal(_credCacheHit("aaa", "aaa"), true);
+    for (let i = 0; i < 1001; i++) {
+      _credCacheStore(`fill-${i}`, `sec-${i}`);
+    }
+    assert.equal(_credCacheHit("aaa", "aaa"), false, "oldest entry must be evicted");
+  });
+
+  test("validateAskBody accepts valid input and populates cache", () => {
+    _credCacheDrop(_V_UUID, _V_SECRET);
+    const result = validateAskBody({
+      question: "What is this document about?",
+      session_id: _V_UUID,
+      session_secret: _V_SECRET,
+    });
+    assert.equal(result.success, true);
+    assert.ok(result.data.question);
+    assert.equal(_credCacheHit(_V_UUID, _V_SECRET), true);
+    _credCacheDrop(_V_UUID, _V_SECRET);
+  });
+
+  test("validateAskBody uses cache on second identical-credential call", () => {
+    _credCacheDrop(_V_UUID, _V_SECRET);
+    validateAskBody({ question: "First?", session_id: _V_UUID, session_secret: _V_SECRET });
+    const result = validateAskBody({
+      question: "Second question here?",
+      session_id: _V_UUID,
+      session_secret: _V_SECRET,
+    });
+    assert.equal(result.success, true);
+    assert.equal(result.data.question, "Second question here?");
+    _credCacheDrop(_V_UUID, _V_SECRET);
+  });
+
+  test("validateAskBody rejects invalid session_id even on first call", () => {
+    const result = validateAskBody({
+      question: "Valid question?",
+      session_id: "not-a-uuid",
+      session_secret: _V_SECRET,
+    });
+    assert.equal(result.success, false);
+  });
+
+  test("validateAskBody rejects empty question even when credentials are cached", () => {
+    _credCacheStore(_V_UUID, _V_SECRET);
+    const result = validateAskBody({
+      question: "",
+      session_id: _V_UUID,
+      session_secret: _V_SECRET,
+    });
+    assert.equal(result.success, false, "Empty question must fail even on cache hit");
+    _credCacheDrop(_V_UUID, _V_SECRET);
+  });
+
+  test("validateAskBody rejects question over MAX_QUESTION_LENGTH", () => {
+    const result = validateAskBody({
+      question: "q".repeat(MAX_QUESTION_LENGTH + 1),
+      session_id: _V_UUID,
+      session_secret: _V_SECRET,
+    });
+    assert.equal(result.success, false);
+  });
+
+  test("validateSummarizeBody accepts valid input and caches", () => {
+    _credCacheDrop(_V_UUID, "sum-secret");
+    const result = validateSummarizeBody({ session_id: _V_UUID, session_secret: "sum-secret" });
+    assert.equal(result.success, true);
+    assert.equal(_credCacheHit(_V_UUID, "sum-secret"), true);
+    _credCacheDrop(_V_UUID, "sum-secret");
+  });
+
+  test("validateSummarizeBody uses cache on second call", () => {
+    _credCacheDrop(_V_UUID, "sum2");
+    validateSummarizeBody({ session_id: _V_UUID, session_secret: "sum2" });
+    const result = validateSummarizeBody({ session_id: _V_UUID, session_secret: "sum2" });
+    assert.equal(result.success, true);
+    _credCacheDrop(_V_UUID, "sum2");
+  });
+
+  test("validateSummarizeBody rejects missing session_id", () => {
+    const result = validateSummarizeBody({ session_secret: "some-secret" });
+    assert.equal(result.success, false);
   });
 });
