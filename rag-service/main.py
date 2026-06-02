@@ -75,6 +75,9 @@ SESSION_REGISTRY_LOCK_FILE = PERSIST_PATH / "session_registry.lock"
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(FAISS_DIR, exist_ok=True)
 
+VECTORSTORE_SNAPSHOT_FILENAME = "vectorstore_snapshot.json"
+VECTORSTORE_SNAPSHOT_VERSION = 1
+
 
 class NormalizedChatHistory(list):
     """Marker for chat histories already converted to role/text messages."""
@@ -874,17 +877,115 @@ def persist_vectorstore(session_id: str, vectorstore):
     session_dir = get_session_dir(session_id)
     os.makedirs(session_dir, exist_ok=True)
     vectorstore.save_local(session_dir)
+    _write_vectorstore_snapshot(session_id, vectorstore)
     return session_dir
+
+
+def _vectorstore_snapshot_path(session_id: str) -> Path:
+    return Path(get_session_dir(session_id)) / VECTORSTORE_SNAPSHOT_FILENAME
+
+
+def _vectorstore_snapshot_payload(vectorstore) -> dict:
+    docstore = getattr(vectorstore, "docstore", None)
+    stored_docs = getattr(docstore, "_dict", {}) if docstore else {}
+    index_to_docstore_id = getattr(vectorstore, "index_to_docstore_id", {}) or {}
+
+    documents = []
+    for row_index, docstore_id in sorted(index_to_docstore_id.items(), key=lambda item: int(item[0])):
+        document = stored_docs.get(docstore_id)
+        if document is None:
+            raise ValueError(f"Missing docstore entry for document id {docstore_id!r}")
+
+        documents.append(
+            {
+                "row_index": int(row_index),
+                "doc_id": str(docstore_id),
+                "page_content": document.page_content,
+                "metadata": dict(document.metadata or {}),
+            }
+        )
+
+    return {
+        "schema_version": VECTORSTORE_SNAPSHOT_VERSION,
+        "documents": documents,
+    }
+
+
+def _write_vectorstore_snapshot(session_id: str, vectorstore) -> None:
+    snapshot_path = _vectorstore_snapshot_path(session_id)
+    temp_path = snapshot_path.with_suffix(".tmp")
+    payload = _vectorstore_snapshot_payload(vectorstore)
+
+    with open(temp_path, "w", encoding="utf-8") as snapshot_file:
+        json.dump(payload, snapshot_file, separators=(",", ":"))
+
+    os.replace(temp_path, snapshot_path)
+
+
+def _load_vectorstore_from_snapshot(session_id: str, embeddings):
+    try:
+        session_dir_path = Path(get_session_dir(session_id))
+    except ValueError as exc:
+        raise ValueError(f"Invalid persisted session id: {session_id}") from exc
+    snapshot_path = session_dir_path / VECTORSTORE_SNAPSHOT_FILENAME
+    try:
+        with open(snapshot_path, "r", encoding="utf-8") as snapshot_file:
+            snapshot = json.load(snapshot_file)
+    except Exception as exc:
+        raise ValueError(f"Failed to load vectorstore snapshot at {snapshot_path}: {exc}") from exc
+
+    if not isinstance(snapshot, dict) or snapshot.get("schema_version") != VECTORSTORE_SNAPSHOT_VERSION:
+        raise ValueError(f"Unsupported vectorstore snapshot format at {snapshot_path}")
+
+    documents = snapshot.get("documents")
+    if not isinstance(documents, list):
+        raise ValueError(f"Vectorstore snapshot is empty at {snapshot_path}")
+
+    index_path = session_dir_path / "index.faiss"
+    try:
+        from langchain_community.vectorstores.faiss import dependable_faiss_import
+
+        faiss = dependable_faiss_import()
+        index = faiss.read_index(str(index_path))
+    except Exception as exc:
+        raise ValueError(f"Failed to load FAISS index at {index_path}: {exc}") from exc
+
+    from langchain_community.docstore.in_memory import InMemoryDocstore
+
+    docstore_documents = {}
+    index_to_docstore_id = {}
+
+    for entry in documents:
+        if not isinstance(entry, dict):
+            raise ValueError(f"Invalid vectorstore snapshot entry at {snapshot_path}")
+
+        doc_id = str(entry.get("doc_id") or "").strip()
+        row_index = entry.get("row_index")
+        if not doc_id or row_index is None:
+            raise ValueError(f"Vectorstore snapshot entry is missing doc_id or row_index at {snapshot_path}")
+
+        metadata = entry.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        docstore_documents[doc_id] = Document(
+            page_content=entry.get("page_content") or "",
+            metadata=metadata,
+        )
+        index_to_docstore_id[int(row_index)] = doc_id
+
+    return FAISS(
+        embeddings,
+        index,
+        InMemoryDocstore(docstore_documents),
+        index_to_docstore_id,
+    )
 
 
 def _load_vectorstore_for_session_unlocked(session_id: str, meta: dict):
     session_dir = meta.get("session_dir") or get_session_dir(session_id)
     meta["session_dir"] = session_dir
-    return FAISS.load_local(
-        session_dir,
-        get_embedding_model(),
-        allow_dangerous_deserialization=True,
-    )
+    return _load_vectorstore_from_snapshot(session_id, get_embedding_model())
 
 
 def _recover_session_unlocked(session_id: str):
@@ -904,11 +1005,7 @@ def _recover_session_unlocked(session_id: str):
         return None
 
     try:
-        vectorstore = FAISS.load_local(
-            session_dir,
-            get_embedding_model(),
-            allow_dangerous_deserialization=True,
-        )
+        vectorstore = _load_vectorstore_from_snapshot(session_id, get_embedding_model())
     except Exception:
         logger.exception("Failed to recover persisted session session_id=%s", session_id)
         return None
@@ -3903,10 +4000,9 @@ def knowledge_gaps(data: KnowledgeGapsRequest):
         # Lazy-load vectorstore if not in memory
         if not session.get("vectorstore"):
             try:
-                session["vectorstore"] = FAISS.load_local(
-                    str(FAISS_DIR / session_id),
+                session["vectorstore"] = _load_vectorstore_from_snapshot(
+                    session_id,
                     get_embedding_model(),
-                    allow_dangerous_deserialization=True,
                 )
             except Exception as exc:
                 logger.error("Failed to lazy load vectorstore: %s", exc)

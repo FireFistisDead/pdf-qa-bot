@@ -1088,7 +1088,7 @@ def test_cleanup_holds_lock_only_for_dict_mutation_not_disk_io():
     finally:
         _main_module.sessions.clear()
         _main_module.sessions.update(original)
-def test_stream_lazy_load_faiss_uses_get_embedding_model():
+def test_stream_lazy_load_uses_secure_vectorstore_loader():
     import main as main_module
     from unittest.mock import patch, MagicMock
     import threading
@@ -1098,7 +1098,7 @@ def test_stream_lazy_load_faiss_uses_get_embedding_model():
     main_module.embedding_model = None
 
     client = TestClient(main_module.app, raise_server_exceptions=False)
-    
+
     session_id = "00000000-0000-0000-0000-000000000009"
     with main_module.sessions_lock:
         main_module.sessions[session_id] = {
@@ -1112,33 +1112,95 @@ def test_stream_lazy_load_faiss_uses_get_embedding_model():
 
     try:
         with patch("main.get_embedding_model") as mock_get_embedding_model:
-            with patch("main.FAISS.load_local") as mock_faiss_load:
-                # We expect load_local to raise an exception or succeed, but either way it should call get_embedding_model
-                mock_get_embedding_model.return_value = MagicMock()
-                mock_faiss_load.return_value = MagicMock()
-                
-                client.post(
-                    "/ask/stream",
-                    json={
-                        "question": "test",
-                        "session_id": session_id,
-                        "session_secret": "test_secret"
-                    },
-                    headers={"X-Internal-Token": main_module.INTERNAL_RAG_TOKEN},
-                )
-                
-                mock_get_embedding_model.assert_called_once()
-                mock_faiss_load.assert_called_once()
+            with patch("main._load_vectorstore_from_snapshot") as mock_snapshot_load:
+                with patch("main.FAISS.load_local") as mock_faiss_load:
+                    mock_get_embedding_model.return_value = MagicMock()
+                    mock_snapshot_load.return_value = MagicMock()
 
-                # Verify that load_local was called with the result of get_embedding_model()
-                # FAISS.load_local(get_session_dir(session_id), get_embedding_model(), allow_dangerous_deserialization=True)
-                call_args = mock_faiss_load.call_args
-                assert call_args[0][0] == main_module.get_session_dir(session_id)
-                assert call_args[0][1] == mock_get_embedding_model.return_value
+                    client.post(
+                        "/ask/stream",
+                        json={
+                            "question": "test",
+                            "session_id": session_id,
+                            "session_secret": "test_secret"
+                        },
+                        headers={"X-Internal-Token": main_module.INTERNAL_RAG_TOKEN},
+                    )
 
-                with main_module.sessions_lock:
-                    assert main_module.sessions[session_id]["session_dir"] == main_module.get_session_dir(session_id)
+                    mock_get_embedding_model.assert_called_once()
+                    mock_snapshot_load.assert_called_once()
+                    mock_faiss_load.assert_not_called()
+
+                    # Verify that the secure loader was called with the session id and embedding model.
+                    call_args = mock_snapshot_load.call_args
+                    assert call_args[0][0] == session_id
+                    assert call_args[0][1] == mock_get_embedding_model.return_value
+
+                    with main_module.sessions_lock:
+                        assert main_module.sessions[session_id]["session_dir"] == main_module.get_session_dir(session_id)
     finally:
         main_module.embedding_model = original_embedding_model
         with main_module.sessions_lock:
             main_module.sessions.pop(session_id, None)
+
+
+def test_secure_vectorstore_loader_fails_closed_on_corrupt_snapshot(tmp_path):
+    import main as main_module
+    from unittest.mock import patch
+
+    session_id = "550e8400-e29b-41d4-a716-446655440000"
+    session_dir = tmp_path / session_id
+    session_dir.mkdir()
+    snapshot_path = session_dir / main_module.VECTORSTORE_SNAPSHOT_FILENAME
+    snapshot_path.write_text("{not-json}", encoding="utf-8")
+
+    with patch.object(main_module, "get_session_dir", return_value=str(session_dir)):
+        with pytest.raises(ValueError, match="Failed to load vectorstore snapshot"):
+            main_module._load_vectorstore_from_snapshot(session_id, MagicMock())
+
+
+def test_vectorstore_snapshot_round_trip_uses_same_session_dir(tmp_path):
+    import main as main_module
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    session_id = "550e8400-e29b-41d4-a716-446655440001"
+    session_dir = tmp_path / session_id
+    session_dir.mkdir()
+
+    fake_vectorstore = SimpleNamespace(
+        docstore=SimpleNamespace(
+            _dict={
+                "doc-1": SimpleNamespace(
+                    page_content="Alpha beta gamma.",
+                    metadata={"filename": "doc.pdf", "page": 0},
+                )
+            }
+        ),
+        index_to_docstore_id={0: "doc-1"},
+        save_local=MagicMock(),
+    )
+
+    loaded_vectorstore = object()
+
+    with patch.object(main_module, "get_session_dir", return_value=str(session_dir)):
+        with patch("langchain_community.vectorstores.faiss.dependable_faiss_import") as mock_faiss_import:
+            mock_faiss = MagicMock()
+            mock_faiss.read_index.return_value = "fake-index"
+            mock_faiss_import.return_value = mock_faiss
+            with patch.object(main_module, "FAISS", return_value=loaded_vectorstore) as mock_faiss_cls:
+                persisted_dir = main_module.persist_vectorstore(session_id, fake_vectorstore)
+                restored = main_module._load_vectorstore_from_snapshot(session_id, MagicMock())
+
+    assert persisted_dir == str(session_dir)
+    assert fake_vectorstore.save_local.call_args[0][0] == str(session_dir)
+    assert mock_faiss.read_index.call_args[0][0] == str(session_dir / "index.faiss")
+    assert mock_faiss_cls.call_count == 1
+    assert restored is loaded_vectorstore
+
+
+def test_vectorstore_loader_rejects_path_traversal_like_session_id():
+    import main as main_module
+
+    with pytest.raises(ValueError, match=r"(badly formed hexadecimal UUID string|Invalid persisted session id)"):
+        main_module._load_vectorstore_from_snapshot("../escape", MagicMock())
