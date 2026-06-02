@@ -780,6 +780,81 @@ def test_internal_token_valid_case_sensitive():
     assert internal_token_valid("secret", "secret") is True
 
 
+# ─── Model readiness gate tests ───────────────────────────────────────────────
+
+def test_health_returns_200_while_models_loading():
+    """/health must stay 200 regardless of model load state (liveness probe)."""
+    import main as m
+    from fastapi.testclient import TestClient
+    original = m._models_ready.is_set()
+    m._models_ready.clear()
+    try:
+        resp = TestClient(app).get("/health")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
+    finally:
+        m._models_ready.set() if original else m._models_ready.clear()
+
+
+def test_ready_returns_503_before_models_loaded():
+    """/ready must return 503 while _models_ready is unset."""
+    import main as m
+    from fastapi.testclient import TestClient
+    original = m._models_ready.is_set()
+    m._models_ready.clear()
+    try:
+        resp = TestClient(app, raise_server_exceptions=False).get("/ready")
+        assert resp.status_code == 503
+        assert "Retry-After" in resp.headers
+    finally:
+        m._models_ready.set() if original else m._models_ready.clear()
+
+
+def test_ready_returns_200_after_models_loaded():
+    """/ready must return 200 once _models_ready is set."""
+    import main as m
+    from fastapi.testclient import TestClient
+    original = m._models_ready.is_set()
+    m._models_ready.set()
+    try:
+        resp = TestClient(app).get("/ready")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ready"
+        assert "embedding_model" in data
+        assert "generation_model" in data
+    finally:
+        m._models_ready.set() if original else m._models_ready.clear()
+
+
+def test_ready_503_includes_retry_after_header():
+    """/ready 503 must include Retry-After so callers know when to retry."""
+    import main as m
+    from fastapi.testclient import TestClient
+    original = m._models_ready.is_set()
+    m._models_ready.clear()
+    try:
+        resp = TestClient(app, raise_server_exceptions=False).get("/ready")
+        assert resp.status_code == 503
+        retry = resp.headers.get("Retry-After")
+        assert retry is not None
+        assert int(retry) > 0
+    finally:
+        m._models_ready.set() if original else m._models_ready.clear()
+
+
+def test_liveness_and_readiness_differ_during_startup():
+    """/health stays 200 and /ready stays 503 while models are loading."""
+    import main as m
+    from fastapi.testclient import TestClient
+    original = m._models_ready.is_set()
+    m._models_ready.clear()
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+        assert client.get("/health").status_code == 200
+        assert client.get("/ready").status_code == 503
+    finally:
+        m._models_ready.set() if original else m._models_ready.clear()
 # ── Issue #264: background session cleanup ────────────────────────────────────
 #
 # cleanup_expired_sessions() must no longer be called inline inside request
