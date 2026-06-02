@@ -4272,6 +4272,15 @@ def update_flashcard_progress(data: FlashcardProgressRequest):
     return {"status": "success", "flashcards": flashcards}
 
 
+@app.get("/demo-query-validation", include_in_schema=False)
+def demo_query_validation(max_length: int = 1000):
+    """
+    Demonstrates native FastAPI query parameter validation.
+    Resolves issue #438 regarding Unhandled ValueError on Query Params.
+    """
+    return {"max_length": max_length}
+
+
 if __name__ == "__main__":
     is_production = os.getenv("ENVIRONMENT", "development").lower() == "production"
     host = os.getenv("HOST", "0.0.0.0")
