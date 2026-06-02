@@ -2,6 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
+const crypto = require('crypto');
 const axios = require("axios");
 const fs = require("fs");
 const fsPromises = require("fs/promises");
@@ -447,7 +448,11 @@ const startUploadsCleanup = () => {
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, 'uploads/'),
-  filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname),
+  filename: (req, file, cb) => {
+  const unique = `${Date.now()}-${crypto.randomUUID()}`;
+  const ext = path.extname(file.originalname).toLowerCase();
+  cb(null, unique + ext);
+},
 });
 
 const fileFilter = (req, file, cb) => {
