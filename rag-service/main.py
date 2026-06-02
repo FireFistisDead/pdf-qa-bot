@@ -231,12 +231,14 @@ def internal_token_valid(provided: str | None, expected: str) -> bool:
     return bool(expected) and bool(candidate) and secrets.compare_digest(candidate, expected)
 
 
-def require_internal_rag_token_configured():
-    if not INTERNAL_RAG_TOKEN:
-        raise RuntimeError("INTERNAL_RAG_TOKEN must be configured for protected endpoints.")
+def require_internal_rag_token_configured() -> bool:
+    return bool(INTERNAL_RAG_TOKEN)
 
 
-require_internal_rag_token_configured()
+if not require_internal_rag_token_configured():
+    logger.warning(
+        "INTERNAL_RAG_TOKEN is not configured; protected endpoints will return 503 until it is set."
+    )
 
 
 # How often the background flush thread wakes and writes dirty session metadata
@@ -406,6 +408,14 @@ async def internal_auth_middleware(request: Request, call_next):
         path in PROTECTED_RAG_PATHS
         or any(path.startswith(prefix) for prefix in PROTECTED_RAG_PREFIXES)
     ):
+        if not INTERNAL_RAG_TOKEN:
+            logger.warning(
+                "Protected endpoint unavailable path=%s ip=%s reason=INTERNAL_RAG_TOKEN is not configured",
+                raw_path,
+                request.client.host if request.client else "unknown",
+            )
+            return standard_error_response(503, "INTERNAL_RAG_TOKEN is not configured")
+
         provided = request.headers.get("X-Internal-Token")
         if not internal_token_valid(provided, INTERNAL_RAG_TOKEN):
             logger.warning(
