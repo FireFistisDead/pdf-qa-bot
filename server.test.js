@@ -4,9 +4,31 @@ const http = require("node:http");
 const { spawnSync } = require("node:child_process");
 const axios = require("axios");
 const { Blob } = require("node:buffer");
+const { validatePassword } = require("./src/utils/passwordValidator");
 
-process.env.JWT_SECRET = "test-secret-for-ci";
-process.env.INTERNAL_RAG_TOKEN = "test-internal-token-for-ci";
+const originalInternalRagToken = process.env.INTERNAL_RAG_TOKEN;
+const originalJwtSecret = process.env.JWT_SECRET;
+
+before(() => {
+  process.env.INTERNAL_RAG_TOKEN =
+    process.env.INTERNAL_RAG_TOKEN || "test-internal-rag-token";
+  process.env.JWT_SECRET =
+    process.env.JWT_SECRET || "test-jwt-secret";
+});
+
+after(() => {
+  if (originalInternalRagToken === undefined) {
+    delete process.env.INTERNAL_RAG_TOKEN;
+  } else {
+    process.env.INTERNAL_RAG_TOKEN = originalInternalRagToken;
+  }
+
+  if (originalJwtSecret === undefined) {
+    delete process.env.JWT_SECRET;
+  } else {
+    process.env.JWT_SECRET = originalJwtSecret;
+  }
+});
 
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
@@ -401,7 +423,10 @@ describe("route error responses", () => {
         }),
       });
       assert.equal(res.status, 200);
-      assert.equal(forwardedHeaders["X-Internal-Token"], "test-internal-token-for-ci");
+      assert.equal(
+  forwardedHeaders["X-Internal-Token"],
+  process.env.INTERNAL_RAG_TOKEN.trim(),
+);
     } finally {
       axios.post = originalPost;
     }
@@ -847,7 +872,7 @@ describe("route error responses", () => {
   test("POST /api/auth/signup normalizes email case and prevents duplicates", async () => {
     const timestamp = Date.now();
     const upperCaseEmail = ` TestUser-${timestamp}@Example.com `;
-    const password = "ValidPassword123!";
+    const password = "ExamplePasswordForTests123!";
 
     const res1 = await fetch(`${baseUrl}/api/auth/signup`, {
       method: "POST",
@@ -869,7 +894,7 @@ describe("route error responses", () => {
   test("POST /api/auth/login allows mixed-case and whitespace in email", async () => {
     const timestamp = Date.now();
     const upperCaseEmail = `TestUser2-${timestamp}@Example.com`;
-    const password = "ValidPassword123!";
+    const password = "ExamplePasswordForTests123!";
 
     await fetch(`${baseUrl}/api/auth/signup`, {
       method: "POST",
@@ -1004,5 +1029,48 @@ describe("credential validation cache", () => {
   test("validateSummarizeBody rejects missing session_id", () => {
     const result = validateSummarizeBody({ session_secret: "some-secret" });
     assert.equal(result.success, false);
+  });
+});
+
+describe("passwordValidator utility", () => {
+  test("accepts a strong password", () => {
+    const result = validatePassword("ExamplePasswordForTests123!");
+    assert.equal(result.valid, true);
+    assert.equal(result.message, "Strong password");
+  });
+
+  test("rejects password without uppercase character", () => {
+  const result = validatePassword("examplepasswordfortests123!");
+  assert.equal(result.valid, false);
+});
+
+test("rejects password without lowercase character", () => {
+  const result = validatePassword("EXAMPLEPASSWORDFORTESTS123!");
+  assert.equal(result.valid, false);
+});
+
+test("rejects password without number", () => {
+  const result = validatePassword("ExamplePasswordForTests!");
+  assert.equal(result.valid, false);
+});
+
+test("rejects password without special character", () => {
+  const result = validatePassword("ExamplePasswordForTests123");
+  assert.equal(result.valid, false);
+});
+
+  test("rejects password shorter than minimum length", () => {
+    const result = validatePassword("Aa1!");
+    assert.equal(result.valid, false);
+  });
+
+  test("returns expected validation message for weak passwords", () => {
+    const result = validatePassword("weak");
+
+    assert.equal(result.valid, false);
+    assert.equal(
+      result.message,
+      "Password must contain uppercase, lowercase, number, special character and minimum 8 characters.",
+    );
   });
 });
