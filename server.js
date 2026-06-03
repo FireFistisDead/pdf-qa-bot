@@ -10,7 +10,16 @@ const crypto = require("crypto");
 const { rateLimit } = require("express-rate-limit");
 const slowDown = require("express-slow-down");
 const helmet = require("helmet");
-const { askSchema, summarizeSchema, knowledgeGapsSchema, sessionsLookupSchema } = require("./validators/schemas");
+const {
+  askSchema,
+  askCredentialSchema,
+  askPayloadSchema,
+  summarizeSchema,
+  summarizeCredentialSchema,
+  sessionsLookupSchema,
+  knowledgeGapsSchema,
+  MAX_QUESTION_LENGTH,
+} = require("./validators/schemas");
 const { clientIpFromRequest } = require("./security/ip");
 const { createRedisClient } = require("./security/redis");
 const authRoutes = require("./src/routes/authRoutes");
@@ -20,6 +29,105 @@ const { authorizeSession, authorizeDocument } = require("./src/services/authz/re
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
 const getInternalRagToken = () => (process.env.INTERNAL_RAG_TOKEN || "").trim();
 const PORT = process.env.PORT || 4000;
+
+// ─── Credential Validation Cache ─────────────────────────────────────────────
+// session_id and session_secret are structurally identical on every request
+// within a session (same UUID, same secret).  Re-running the full Zod parse
+// for every /ask and /summarize call under Socratic/Tutor mode burns event-loop
+// time on checks that cannot possibly fail for an already-validated credential.
+//
+// The cache is keyed on HMAC-SHA256(session_id:session_secret)[0:16] so the
+// actual secret is never stored.  TTL matches SESSION_TTL_MINUTES so entries
+// expire when the RAG session would have expired anyway.  The map is bounded at
+// CRED_CACHE_MAX entries; when full the oldest entry (insertion order) is evicted.
+const _SESSION_TTL_MS =
+  parseInt(process.env.SESSION_TTL_MINUTES || "43200", 10) * 60 * 1000;
+const _CRED_CACHE_MAX = parseInt(process.env.CRED_CACHE_MAX_SIZE || "1000", 10);
+
+const _credCache = new Map(); // key → { validatedAt: number }
+
+const _hmacKey = crypto
+  .createHash("sha256")
+  .update("pdf-qa-cred-cache")
+  .digest();
+
+function _credKey(sessionId, sessionSecret) {
+  return crypto
+    .createHmac("sha256", _hmacKey)
+    .update(`${sessionId}:${sessionSecret}`)
+    .digest("hex")
+    .slice(0, 16);
+}
+
+function _credCacheHit(sessionId, sessionSecret) {
+  const k = _credKey(sessionId, sessionSecret);
+  const entry = _credCache.get(k);
+  if (!entry) return false;
+  if (Date.now() - entry.validatedAt > _SESSION_TTL_MS) {
+    _credCache.delete(k);
+    return false;
+  }
+  return true;
+}
+
+function _credCacheStore(sessionId, sessionSecret) {
+  const k = _credKey(sessionId, sessionSecret);
+  if (_credCache.size >= _CRED_CACHE_MAX) {
+    _credCache.delete(_credCache.keys().next().value); // evict oldest (FIFO)
+  }
+  _credCache.set(k, { validatedAt: Date.now() });
+}
+
+function _credCacheDrop(sessionId, sessionSecret) {
+  _credCache.delete(_credKey(sessionId, sessionSecret));
+}
+
+// Validate /ask body: always parse payload fields (question, mode change per
+// request); short-circuit credential fields on cache hit.
+function validateAskBody(body) {
+  const rawId = typeof body?.session_id === "string" ? body.session_id : "";
+  const rawSecret =
+    typeof body?.session_secret === "string" ? body.session_secret : "";
+
+  const payloadResult = askPayloadSchema.safeParse(body);
+  if (!payloadResult.success) {
+    return { success: false, error: payloadResult.error };
+  }
+
+  if (_credCacheHit(rawId, rawSecret)) {
+    return {
+      success: true,
+      data: { ...payloadResult.data, session_id: rawId, session_secret: rawSecret },
+    };
+  }
+
+  const credResult = askCredentialSchema.safeParse(body);
+  if (!credResult.success) {
+    return { success: false, error: credResult.error };
+  }
+
+  _credCacheStore(rawId, rawSecret);
+  return { success: true, data: { ...payloadResult.data, ...credResult.data } };
+}
+
+// Validate /summarize body: only credential fields; short-circuit on cache hit.
+function validateSummarizeBody(body) {
+  const rawId = typeof body?.session_id === "string" ? body.session_id : "";
+  const rawSecret =
+    typeof body?.session_secret === "string" ? body.session_secret : "";
+
+  if (_credCacheHit(rawId, rawSecret)) {
+    return { success: true, data: { session_id: rawId, session_secret: rawSecret } };
+  }
+
+  const result = summarizeCredentialSchema.safeParse(body);
+  if (!result.success) {
+    return { success: false, error: result.error };
+  }
+
+  _credCacheStore(rawId, rawSecret);
+  return { success: true, data: result.data };
+}
 
 const app = express();
 
@@ -204,6 +312,42 @@ const rateLimitHandler = (req, res) => {
   });
 };
 
+const parsePositiveIntegerEnv = (rawValue, fallbackValue, name) => {
+  const candidate = (rawValue ?? "").toString().trim();
+  const value = candidate === "" ? String(fallbackValue) : candidate;
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`${name} must be a positive integer. Received: "${rawValue}".`);
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer greater than 0.`);
+  }
+
+  return parsed;
+};
+
+const parseUploadFileSizeLimitBytes = () => {
+  if (typeof process.env.UPLOAD_MAX_FILE_SIZE_BYTES === "string" && process.env.UPLOAD_MAX_FILE_SIZE_BYTES.trim() !== "") {
+    return parsePositiveIntegerEnv(
+      process.env.UPLOAD_MAX_FILE_SIZE_BYTES,
+      20_000_000,
+      "UPLOAD_MAX_FILE_SIZE_BYTES",
+    );
+  }
+
+  if (typeof process.env.MAX_UPLOAD_SIZE_MB === "string" && process.env.MAX_UPLOAD_SIZE_MB.trim() !== "") {
+    const maxUploadSizeMb = parsePositiveIntegerEnv(
+      process.env.MAX_UPLOAD_SIZE_MB,
+      20,
+      "MAX_UPLOAD_SIZE_MB",
+    );
+    return maxUploadSizeMb * 1024 * 1024;
+  }
+
+  return 20_000_000;
+};
+
 // ─── Rate Limiters ───────────────────────────────────────────────────────────
 const keyGenerator = (req) => clientIpFromRequest(req) || "unknown";
 // Note: express-rate-limit's `ipv6Subnet` is not compatible with a custom
@@ -223,6 +367,17 @@ const createLimiterStore = (prefix) => {
   });
 };
 
+const RATE_LIMIT_WINDOW_MS = parsePositiveIntegerEnv(
+  process.env.RATE_LIMIT_WINDOW_MS,
+  60_000,
+  "RATE_LIMIT_WINDOW_MS",
+);
+const RATE_LIMIT_MAX = parsePositiveIntegerEnv(
+  process.env.RATE_LIMIT_MAX,
+  60,
+  "RATE_LIMIT_MAX",
+);
+
 // Global baseline — broad bot/scraper protection across every route.
 // 200 req / 15 min per IP. Tripping this triggers the escalating ban.
 const globalLimiter = rateLimit({
@@ -238,17 +393,17 @@ const globalLimiter = rateLimit({
   },
 });
 
-// Hard cap: configured uploads / hour per IP. Tripping this triggers the ban system.
-const uploadLimitMax = parseInt(process.env.RATE_LIMIT_UPLOAD_MAX || "10", 10);
+// Route-specific cap for upload and inference endpoints.
+// Tripping this triggers the ban system.
 const uploadLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  max: uploadLimitMax,
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max: RATE_LIMIT_MAX,
   standardHeaders: "draft-7",
   legacyHeaders: false,
   keyGenerator,
   store: createLimiterStore("rl:upload:"),
   handler: (req, res) => {
-    res.locals.rateLimitMessage = `Upload limit reached. You can upload up to ${uploadLimitMax} PDFs per hour. Please try again later.`;
+    res.locals.rateLimitMessage = "Too many requests. Please slow down and try again later.";
     rateLimitHandler(req, res);
   },
 });
@@ -273,17 +428,65 @@ const inferenceSlowDown = slowDown({
 // Inference hard limiter — fires after slow-down window if the attacker still
 // keeps hammering. Triggers the escalating ban on violation.
 const inferenceLimiter = rateLimit({
-  windowMs: 5 * 60 * 1000,
-  max: parseInt(process.env.RATE_LIMIT_INFERENCE_MAX || "30", 10),
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max: RATE_LIMIT_MAX,
   standardHeaders: "draft-7",
   legacyHeaders: false,
   keyGenerator,
   store: createLimiterStore("rl:inference:"),
   handler: (req, res) => {
-    res.locals.rateLimitMessage = "Inference limit reached. Please wait a few minutes before sending more requests.";
+    res.locals.rateLimitMessage = "Too many requests. Please slow down and try again later.";
     rateLimitHandler(req, res);
   },
 });
+
+const UPLOAD_MAX_CONCURRENT_PER_IP = parsePositiveIntegerEnv(
+  process.env.UPLOAD_MAX_CONCURRENT_PER_IP,
+  2,
+  "UPLOAD_MAX_CONCURRENT_PER_IP",
+);
+const activeUploadsByIp = new Map();
+
+const releaseUploadSlot = (ip) => {
+  if (!ip) return;
+
+  const currentCount = activeUploadsByIp.get(ip);
+  if (!currentCount) return;
+
+  if (currentCount <= 1) {
+    activeUploadsByIp.delete(ip);
+  } else {
+    activeUploadsByIp.set(ip, currentCount - 1);
+  }
+};
+
+const uploadConcurrencyGuard = (req, res, next) => {
+  const ip = clientIpFromRequest(req) || "unknown";
+  const currentCount = activeUploadsByIp.get(ip) || 0;
+
+  if (currentCount >= UPLOAD_MAX_CONCURRENT_PER_IP) {
+    console.warn(
+      `[upload] concurrent upload limit reached for IP=${ip} active=${currentCount} cap=${UPLOAD_MAX_CONCURRENT_PER_IP}`,
+    );
+    return res.status(429).json({
+      error: "Too many concurrent uploads. Please wait for an active upload to finish.",
+    });
+  }
+
+  activeUploadsByIp.set(ip, currentCount + 1);
+
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    releaseUploadSlot(ip);
+  };
+  req.releaseUploadSlot = release;
+  res.on("finish", release);
+  res.on("close", release);
+
+  return next();
+};
 
 // Apply global limiter before ban guard so DB-backed ban checks are rate-limited.
 app.use(globalLimiter);
@@ -291,33 +494,10 @@ app.use(banGuard);
 app.use("/api/auth", authRoutes);
 
 // ─── File Size Limits ──────────────────────────────────────────────────────────
-// MAX_UPLOAD_SIZE_MB controls the maximum PDF file size allowed per upload.
-// Default is 50 MB. Set to a lower value in resource-constrained environments.
-// Multer will automatically reject files exceeding this limit with 413 Payload Too Large.
-//
-// Environment variable validation: Ensures the value is a positive integer and rejects
-// malformed strings like "50gb" or "50.5mb" that parseInt would silently truncate.
-const validateUploadSizeConfig = () => {
-  const rawValue = process.env.MAX_UPLOAD_SIZE_MB || "50";
-  // Regex: match only pure positive integers (no units, decimals, or garbage)
-  const integerRegex = /^\d+$/;
-  if (!integerRegex.test(rawValue.trim())) {
-    throw new Error(
-      `MAX_UPLOAD_SIZE_MB must be a positive integer without units. ` +
-      `Received: "${rawValue}". Examples: 50, 100, 200 (not "50mb" or "50.5").`
-    );
-  }
-  const parsed = parseInt(rawValue, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(
-      `MAX_UPLOAD_SIZE_MB must be a positive integer. ` +
-      `Received: ${parsed}. Please set a value like 50, 100, or 200.`
-    );
-  }
-  return parsed;
-};
-const MAX_UPLOAD_SIZE_MB = validateUploadSizeConfig();
-const MAX_PDF_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
+// UPLOAD_MAX_FILE_SIZE_BYTES controls the maximum PDF file size allowed per upload.
+// Default is 20,000,000 bytes. A legacy MAX_UPLOAD_SIZE_MB value is still honored
+// when the new bytes-based env var is not set.
+const MAX_PDF_SIZE_BYTES = parseUploadFileSizeLimitBytes();
 
 const UPLOADS_DIR = path.resolve("uploads");
 const isDevelopment = process.env.NODE_ENV !== "production";
@@ -494,6 +674,23 @@ const ragAuthHeaders = (req = null) => {
   return headers;
 };
 
+// When the RAG service is still loading models it returns 503 with a
+// Retry-After header.  Forward both the status code and the header to the
+// client so it knows how long to wait before retrying rather than receiving
+// a generic 500 with no guidance.
+const propagateRagError = (err, res, fallback) => {
+  const status = err.response?.status || 500;
+  const detail = extractServiceDetails(err, fallback);
+  if (status === 503) {
+    const retryAfter = err.response?.headers?.["retry-after"] || "30";
+    res.set("Retry-After", String(retryAfter));
+  }
+  return res.status(status).json({
+    error: typeof detail === "string" ? detail : fallback,
+    details: isDevelopment ? detail : "Internal processing error",
+  });
+};
+
 const normalizeSessionSecret = (value) =>
   typeof value === "string" ? value.trim() || null : null;
 
@@ -640,23 +837,23 @@ app.post("/upload", authenticateUser, uploadLimiter, upload.single("file"), mult
     }
 
     const fileHandle = await fsPromises.open(absoluteFilePath, "r");
-const signatureBuffer = Buffer.alloc(4);
+    const signatureBuffer = Buffer.alloc(4);
 
-try {
-  await fileHandle.read(signatureBuffer, 0, 4, 0);
-} finally {
-  await fileHandle.close();
-}
+    try {
+      await fileHandle.read(signatureBuffer, 0, 4, 0);
+    } finally {
+      await fileHandle.close();
+    }
 
-if (signatureBuffer.toString() !== "%PDF") {
-  await cleanupFile(uploadedFilePath);
+    if (signatureBuffer.toString() !== "%PDF") {
+      await cleanupFile(uploadedFilePath);
 
-  return sendUploadError(
-    res,
-    415,
-    "Invalid file type. Only real PDF documents are accepted.",
-  );
-}
+      return sendUploadError(
+        res,
+        415,
+        "Invalid file type. Only real PDF documents are accepted.",
+      );
+    }
     // Validate session credential pairing before opening the file stream.
     // Creating fs.createReadStream before this check would leave a dangling
     // open handle on the file if the request is rejected and cleanupFile
@@ -725,6 +922,10 @@ if (signatureBuffer.toString() !== "%PDF") {
       error: typeof details === "string" ? details : "PDF processing failed",
       details: isDevelopment ? details : "Internal processing error",
     });
+  } finally {
+    if (typeof req.releaseUploadSlot === "function") {
+      req.releaseUploadSlot();
+    }
   }
 });
 
@@ -890,14 +1091,8 @@ app.post("/ask", authenticateUser, authorizeSession, inferenceSlowDown, inferenc
       mode: response.data.mode ?? "default",
     });
   } catch (err) {
-    const statusCode = err.response?.status || 500;
-    const details = extractServiceDetails(err, "Error answering question");
-    console.error("Question answering failed:", details);
-
-    return res.status(statusCode).json({
-      error: typeof details === "string" ? details : "Error answering question",
-      details: isDevelopment ? details : "Internal processing error",
-    });
+    console.error("Question answering failed:", extractServiceDetails(err, "Error answering question"));
+    return propagateRagError(err, res, "Error answering question");
   }
 });
 app.post("/ask/stream", authenticateUser, authorizeSession, inferenceSlowDown, inferenceLimiter, async (req, res) => {
@@ -941,13 +1136,8 @@ app.post("/ask/stream", authenticateUser, authorizeSession, inferenceSlowDown, i
       }
     });
   } catch (err) {
-    const statusCode = err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
-    const details = extractServiceDetails(err, "Error answering question");
-    console.error("Streaming question answering failed:", details);
-    return res.status(statusCode).json({
-      error: typeof details === "string" ? details : "Error answering question",
-      details: isDevelopment ? details : "Internal processing error",
-    });
+    console.error("Streaming question answering failed:", extractServiceDetails(err, "Error answering question"));
+    return propagateRagError(err, res, "Error answering question");
   }
 });
 
@@ -970,14 +1160,8 @@ app.post("/summarize", authenticateUser, authorizeDocument, authorizeSession, in
       summary: response.data.summary,
     });
   } catch (err) {
-    const statusCode = err.response?.status || 500;
-    const details = extractServiceDetails(err, "Error summarizing PDF");
-    console.error("Summarization failed:", details);
-
-    return res.status(statusCode).json({
-      error: typeof details === "string" ? details : "Error summarizing PDF",
-      details: isDevelopment ? details : "Internal processing error",
-    });
+    console.error("Summarization failed:", extractServiceDetails(err, "Error summarizing PDF"));
+    return propagateRagError(err, res, "Error summarizing PDF");
   }
 });
 
@@ -1108,6 +1292,15 @@ module.exports = {
   askSchema,
   summarizeSchema,
   extractServiceDetails,
+  // Exported for tests — verify cache behaviour without going through routes.
+  _credCache,
+  _credKey,
+  _credCacheHit,
+  _credCacheStore,
+  _credCacheDrop,
+  validateAskBody,
+  validateSummarizeBody,
+  MAX_QUESTION_LENGTH,
   ragAuthHeaders,
   requireInternalRagToken,
 };

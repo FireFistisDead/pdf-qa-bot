@@ -1,31 +1,41 @@
 import React from "react";
 import { Button } from "react-bootstrap";
-import Papa from "papaparse";
 import { saveAs } from "file-saver";
 
 const ExportMenu = ({ currentChat, selectedPdfName }) => {
-  const exportChat = (type) => {
+  const exportChatTxt = () => {
     if (!selectedPdfName || !currentChat || currentChat.length === 0) return;
 
-    if (type === "csv") {
-      const csv = Papa.unparse(currentChat);
-      const blob = new Blob([csv], { type: "text/csv" });
-      saveAs(blob, `${selectedPdfName}-chat.csv`);
-    } else if (type === "pdf") {
-      const text = currentChat.map((msg) => `${msg.role}: ${msg.text}`).join("\n\n");
-      const blob = new Blob([text], { type: "application/pdf" });
-      saveAs(blob, `${selectedPdfName}-chat.pdf`);
-    }
+    const now = new Date();
+    const yyyy = now.getFullYear();
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const hh = String(now.getHours()).padStart(2, '0');
+    const min = String(now.getMinutes()).padStart(2, '0');
+    const formattedTimestamp = `${yyyy}-${mm}-${dd} ${hh}:${min}`;
+
+    let content = `PDF Q&A Bot — Chat Export\nPDF: ${selectedPdfName}\nExported: ${formattedTimestamp}\n\n---\n\n`;
+
+    currentChat.forEach((msg) => {
+      if (msg.role === "user") {
+        content += `Q: ${msg.text}\n`;
+      } else if (msg.role === "bot") {
+        content += `A: ${msg.text}\n\n`;
+      }
+    });
+
+    const blob = new Blob([content], { type: "text/plain" });
+    saveAs(blob, `chat-export-${selectedPdfName}.txt`);
   };
 
   return (
     <Button
       variant="outline-secondary"
       size="sm"
-      onClick={() => exportChat("pdf")}
+      onClick={exportChatTxt}
       disabled={!selectedPdfName || !currentChat || currentChat.length === 0}
     >
-      Export
+      📥 Export Chat
     </Button>
   );
 };
