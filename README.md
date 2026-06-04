@@ -521,7 +521,7 @@ We’d love to hear from you — whether you’re setting up the project for the
 
 ## License
 
-See repository license files and package metadata where applicable. Third-party models are subject to their respective Hugging Face model cards and licenses.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details. Third-party models are subject to their respective Hugging Face model cards and licenses.
 ## RAG internal authentication
 
 `INTERNAL_RAG_TOKEN` is required for the FastAPI RAG service. The Node.js
