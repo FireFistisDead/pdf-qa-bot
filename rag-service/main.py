@@ -24,7 +24,7 @@ import secrets
 import shutil
 import urllib.request
 import urllib.error
-from typing import Optional
+from typing import Optional, List
 from transformers import (
     AutoConfig,
     AutoTokenizer,
@@ -2375,11 +2375,27 @@ def validate_uploaded_pdf(file_path: str) -> str:
 
 VALID_MODES = {"default", "tutor", "socratic", "eli5", "concise"}
 
+class ChatMessage(BaseModel):
+    """A single message in the conversation history."""
+    role: str  # "user" or "assistant"
+    content: str
+
+    @field_validator("role")
+    @classmethod
+    def role_must_be_valid(cls, v: str) -> str:
+        if v not in {"user", "assistant"}:
+            raise ValueError("role must be 'user' or 'assistant'")
+        return v
+
+
 class Question(BaseModel):
     question: str = Field(..., min_length=1, description="Question cannot be empty")
     session_id: UUID
     mode: str = Field(default="default")
     session_secret: str | None = None
+    # Optional conversation history for follow-up question condensation.
+    # The Node gateway passes the last N turns (role/content pairs).
+    chat_history: Optional[List[ChatMessage]] = Field(default_factory=list)
 
     @field_validator("question")
     @classmethod
@@ -2846,8 +2862,53 @@ def ask_question(data: Question):
     session_id = str(data.session_id)
     mode = data.mode
 
+    # ── Question condensation ─────────────────────────────────────────────────
+    # If the user provided prior chat history, attempt to rephrase the follow-up
+    # into a fully self-contained standalone question so FAISS retrieval is not
+    # confused by pronouns ("they", "it", "that approach", etc.).
+    # We use only the last 6 messages (3 turns) to keep the prompt short.
+    # On any failure we fall back to the raw question transparently.
+    condensed_question = question
+    chat_history = data.chat_history or []
+    if chat_history:
+        try:
+            history_lines = []
+            for msg in chat_history[-6:]:
+                prefix = "User" if msg.role == "user" else "Assistant"
+                history_lines.append(f"{prefix}: {msg.content}")
+            history_text = "\n".join(history_lines)
+
+            condense_prompt = (
+                "Given the conversation history below and a follow-up question, "
+                "rewrite the follow-up as a single fully self-contained question "
+                "that includes all necessary context from the history. "
+                "Output ONLY the rewritten question with no extra commentary.\n\n"
+                f"History:\n{history_text}\n\n"
+                f"Follow-up: {question}\n"
+                "Standalone question:"
+            )
+
+            ollama_condensed = synthesize_with_ollama(condense_prompt)
+            if ollama_condensed:
+                candidate = ollama_condensed.strip().splitlines()[0].strip()
+                # Guard: reject obviously malformed output (too short / too long)
+                if 5 < len(candidate) < 500:
+                    condensed_question = candidate
+                    logger.info(
+                        "Question condensed session_id=%s original=%r condensed=%r",
+                        session_id, question, condensed_question,
+                    )
+        except Exception:
+            logger.warning(
+                "Question condensation failed session_id=%s; using raw question",
+                session_id, exc_info=True,
+            )
+
+    # Use the condensed question for retrieval; keep raw question for chat log
+    retrieval_question = condensed_question
+
     # Normalize query for cache reuse
-    normalized_query = normalize_query(question)
+    normalized_query = normalize_query(retrieval_question)
 
 
     with sessions_lock:
@@ -2910,7 +2971,7 @@ def ask_question(data: Question):
                 )
                 scored_candidates = search_retrieval_candidates(
                     vectorstore,
-                    question,
+                    retrieval_question,
                     ASK_RETRIEVAL_CANDIDATES,
                 )
 

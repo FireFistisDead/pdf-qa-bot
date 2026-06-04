@@ -50,11 +50,25 @@ const sessionSecretSchema = z.preprocess(
   z.string().trim().min(1, "session_secret is required."),
 );
 
+// ─── Chat Message schema (for conversation history) ─────────────────────────
+// Each turn is a { role: "user"|"assistant", content: string } object.
+// We cap history at 20 messages server-side to prevent giant payloads.
+const chatMessageSchema = z.object({
+  role: z.enum(["user", "assistant"]),
+  content: z.string().trim().min(1).max(8000),
+});
+
 const askSchema = z.object({
   question: questionSchema,
   session_id: uuidSchema,
   session_secret: sessionSecretSchema,
   mode: modeSchema,
+  // Optional: last N conversation turns for follow-up question condensation
+  chat_history: z
+    .array(chatMessageSchema)
+    .max(20, "chat_history may contain at most 20 messages.")
+    .optional()
+    .default([]),
 });
 
 const summarizeSchema = z.object({

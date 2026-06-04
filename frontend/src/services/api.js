@@ -54,15 +54,24 @@ export const uploadPdfApi = async (file, sessionId = null, sessionSecret = null)
 
 /**
  * Asks a question to the AI assistant about the uploaded PDF.
- * @param {string} question 
- * @param {string} sessionId 
+ * @param {string} question
+ * @param {string} sessionId
  * @param {string} sessionSecret
+ * @param {string} mode
+ * @param {Array<{role:string, text:string}>} chatHistory  — current chat messages
  * @returns {Promise<Object>} Contains the bot's answer
  */
-export const askQuestionApi = async (question, sessionId, sessionSecret, mode = "default") => {
+export const askQuestionApi = async (question, sessionId, sessionSecret, mode = "default", chatHistory = []) => {
+  // Map internal {role, text} format to the API's {role, content} schema.
+  // Only send the last 6 messages (3 turns) to keep the payload small.
+  const chat_history = chatHistory
+    .filter((m) => (m.role === "user" || m.role === "assistant") && m.text && !m.streaming)
+    .slice(-6)
+    .map((m) => ({ role: m.role === "bot" ? "assistant" : m.role, content: m.text }));
+
   const res = await axios.post(
     `${API_BASE}/ask`,
-    { question, session_id: sessionId, session_secret: sessionSecret, mode },
+    { question, session_id: sessionId, session_secret: sessionSecret, mode, chat_history },
     {
       timeout: 60000, // 60 second timeout for AI responses
     }
@@ -106,11 +115,27 @@ export const mapKnowledgeGapsApi = async (sessionId, sessionSecret, documentId =
   return res.data;
 };
 
-export const askQuestionStreamApi = async (question, sessionId, sessionSecret, mode = "default", onChunk, signal) => {
+/**
+ * Streams an answer chunk-by-chunk.
+ * @param {string} question
+ * @param {string} sessionId
+ * @param {string} sessionSecret
+ * @param {string} mode
+ * @param {Array<{role:string, text:string}>} chatHistory  — current chat messages
+ * @param {Function} onChunk
+ * @param {AbortSignal} signal
+ */
+export const askQuestionStreamApi = async (question, sessionId, sessionSecret, mode = "default", onChunk, signal, chatHistory = []) => {
+  // Map internal chat messages to API schema, last 6 only, skip streaming entries.
+  const chat_history = chatHistory
+    .filter((m) => (m.role === "user" || m.role === "bot") && m.text && !m.streaming)
+    .slice(-6)
+    .map((m) => ({ role: m.role === "bot" ? "assistant" : m.role, content: m.text }));
+
   const response = await fetch(`${API_BASE}/ask/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, session_id: sessionId, session_secret: sessionSecret, mode }),
+    body: JSON.stringify({ question, session_id: sessionId, session_secret: sessionSecret, mode, chat_history }),
     signal,
   });
 
