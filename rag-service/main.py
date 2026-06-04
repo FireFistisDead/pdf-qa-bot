@@ -3142,13 +3142,10 @@ def processing_status(
 
     return progress
 
-
 @app.post("/ask")
 def ask_question(data: Question, _ready: None = Depends(require_models_ready)):
     cleanup_expired_sessions()
-
-
-def ask_question(data: Question):
+    
     question = (data.question or "").strip()
 
     if not question:
@@ -3191,7 +3188,8 @@ def ask_question(data: Question):
             if ollama_condensed:
                 candidate = ollama_condensed.strip().splitlines()[0].strip()
                 # Guard: reject obviously malformed output (too short / too long)
-                if 5 < len(candidate) < 500:
+                # FIX applied: use MAX_QUESTION_LENGTH constant
+                if 5 < len(candidate) < MAX_QUESTION_LENGTH:
                     condensed_question = candidate
                     logger.info(
                         "Question condensed session_id=%s original_len=%d condensed_len=%d",
@@ -3959,9 +3957,13 @@ def _run_generation_locked(model, generate_kwargs):
             model.generate(**generate_kwargs)
 
 
-@app.post("/summarize")
+
+    @app.post("/summarize")
 def summarize_pdf(data: SummarizeRequest, _ready: None = Depends(require_models_ready)):
     cleanup_expired_sessions()
+    # full summarization logic from the second definition goes here
+    # (session lookup, secret check, vectorstore load, collect_index_documents, build summary)
+
 def summarize_pdf(data: SummarizeRequest):
     session_id = str(data.session_id)
     with sessions_lock:
