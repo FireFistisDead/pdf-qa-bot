@@ -3637,7 +3637,66 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
     intent = detect_question_intent(question)
     session_id = str(data.session_id)
     mode = data.mode
-    normalized_query = normalize_query(question)
+
+    # --- Begin: replicate condensation flow from /ask ---
+    # Attempt to build a condensed question from chat_history so the streaming
+    # endpoint uses the same retrieval query and cache keys as /ask.
+    retrieval_question = question  # default fallback
+    try:
+        chat_history = getattr(data, "chat_history", []) or []
+
+        # condense_prompt and synthesize_with_ollama are the same helpers used by /ask.
+        # synthesize_with_ollama is expected to return a string (the condensed question).
+        condensed_question = synthesize_with_ollama(
+            condense_prompt,
+            {
+                "chat_history": chat_history,
+                "question": question,
+                "mode": mode,
+            },
+        )
+
+        # Validate condensed_question length and content
+        if not condensed_question or not isinstance(condensed_question, str):
+            raise ValueError("Condensed question empty or invalid")
+
+        condensed_question = condensed_question.strip()
+        if len(condensed_question) == 0:
+            raise ValueError("Condensed question empty after trim")
+
+        if len(condensed_question) > MAX_QUESTION_LENGTH:
+            # If condensation produced an overly long query, log and fall back.
+            logger.warning(
+                "Stream: condensed question exceeds MAX_QUESTION_LENGTH; falling back to raw question"
+            )
+            raise ValueError("Condensed question too long")
+
+        # Success: use condensed question for retrieval
+        retrieval_question = condensed_question
+        logger.info(
+            "Stream: condensed query built successfully; using condensed query for retrieval session_id=%s",
+            session_id,
+        )
+    except Exception as condense_err:
+        # On any error, fall back to raw question and log the failure
+        logger.warning(
+            "Stream: failed to build condensed query; falling back to raw question session_id=%s error=%s",
+            session_id,
+            str(condense_err),
+        )
+        retrieval_question = question
+    # --- End condensation flow ---
+
+    # Normalize the retrieval query the same way /ask does
+    try:
+        normalized_query = normalize_query(retrieval_question)
+    except Exception as norm_err:
+        logger.warning(
+            "Stream: normalize_query failed, falling back to normalize raw question session_id=%s error=%s",
+            session_id,
+            str(norm_err),
+        )
+        normalized_query = normalize_query(question)
 
     with sessions_lock:
         session = _touch_session_unlocked(session_id)
@@ -3696,7 +3755,7 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
                 )
                 scored_candidates = search_retrieval_candidates(
                     vectorstore,
-                    question,
+                    retrieval_question,
                     ASK_RETRIEVAL_CANDIDATES,
                 )
 
@@ -3719,11 +3778,11 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
     docs = (
         representative_documents_by_source(indexed_documents)
         if intent == "overview"
-        else diversify_retrieved_documents(scored_candidates, question)
+        else diversify_retrieved_documents(scored_candidates, retrieval_question)
     )
 
     best_score = scored_candidates[0][1] if scored_candidates else None
-    if not passes_evidence_gate(question, docs, best_score, intent):
+    if not passes_evidence_gate(retrieval_question, docs, best_score, intent):
         logger.info(
             "Stream evidence gate refused session_id=%s intent=%s best_score=%s",
             session_id,
@@ -3735,7 +3794,7 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
             if current_session:
                 append_chat_exchange(
                     current_session,
-                    question,
+                    retrieval_question,
                     INSUFFICIENT_CONTEXT_MESSAGE,
                     [],
                     mode,
@@ -3755,7 +3814,7 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
     # spinning up a generation thread — there are no tokens to generate.
     if grounded_answer != INSUFFICIENT_CONTEXT_MESSAGE and grounded_answer:
         citation_sources = [citation_source_for_document(doc, idx) for idx, doc in enumerate(docs)]
-        framed = apply_mode_framing(grounded_answer, question, mode, docs, context)
+        framed = apply_mode_framing(grounded_answer, retrieval_question, mode, docs, context)
         if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
             framed = grounded_answer
 
@@ -3766,7 +3825,7 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
 
                 append_chat_exchange(
                     current_session,
-                    question,
+                    retrieval_question,
                     framed,
                     citation_sources,
                     mode,
