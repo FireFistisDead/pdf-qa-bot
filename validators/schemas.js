@@ -61,14 +61,6 @@ const sessionSecretSchema = z.preprocess(
   z.string().trim().min(1, "session_secret is required."),
 );
 
-// ─── Chat Message schema (for conversation history) ─────────────────────────
-// Each turn is a { role: "user"|"assistant", content: string } object.
-// We cap history at 20 messages server-side to prevent giant payloads.
-const chatMessageSchema = z.object({
-  role: z.enum(["user", "assistant"]),
-  content: z.string().trim().min(1).max(8000),
-});
-
 // ─── Split schemas for credential vs payload validation ───────────────────────
 // Credential fields (session_id, session_secret) are structurally identical
 // for every turn within a session. Separating them into a dedicated schema
@@ -82,27 +74,33 @@ const askCredentialSchema = z.object({
 const askPayloadSchema = z.object({
   question: questionSchema,
   mode: modeSchema,
-  // Optional: last N conversation turns for follow-up question condensation
-  chat_history: z
-    .array(chatMessageSchema)
-    .max(20, "chat_history may contain at most 20 messages.")
-    .optional()
-    .default([]),
 });
 
 // Combined schema — kept for backwards compatibility with existing tests and
 // any direct callers that pass the full request body to a single safeParse.
-const askSchema = z.object({
-  question: questionSchema,
-  session_id: uuidSchema,
-  session_secret: sessionSecretSchema,
-  mode: modeSchema,
-  chat_history: z
-    .array(chatMessageSchema)
-    .max(20, "chat_history may contain at most 20 messages.")
-    .optional()
-    .default([]),
-});
+// Added a transport-size refinement so oversized but schema-valid requests
+// fail validation early with a clear error instead of being rejected by
+// express.json({ limit: "16kb" }) during parsing.
+const askSchema = z
+  .object({
+    question: questionSchema,
+    session_id: uuidSchema,
+    session_secret: sessionSecretSchema,
+    mode: modeSchema,
+  })
+  .superRefine((val, ctx) => {
+    try {
+      const size = JSON.stringify(val).length;
+      if (size > 16000) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "request body exceeds 16kb transport limit",
+        });
+      }
+    } catch (_) {
+      // If stringify fails for some reason, do not block validation here.
+    }
+  });
 
 const summarizeSchema = z.object({
   session_id: uuidSchema,
@@ -159,5 +157,4 @@ module.exports = {
   knowledgeGapsSchema,
   generateFlashcardsSchema,
   updateFlashcardProgressSchema,
-  chatMessageSchema,
 };
