@@ -2895,8 +2895,8 @@ def ask_question(data: Question):
                 if 5 < len(candidate) < 500:
                     condensed_question = candidate
                     logger.info(
-                        "Question condensed session_id=%s original=%r condensed=%r",
-                        session_id, question, condensed_question,
+                        "Question condensed session_id=%s original_len=%d condensed_len=%d",
+                        session_id, len(question), len(condensed_question),
                     )
         except Exception:
             logger.warning(
