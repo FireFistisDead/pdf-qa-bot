@@ -65,9 +65,9 @@ export const askQuestionApi = async (question, sessionId, sessionSecret, mode = 
   // Map internal {role, text} format to the API's {role, content} schema.
   // Only send the last 6 messages (3 turns) to keep the payload small.
   const chat_history = chatHistory
-    .filter((m) => (m.role === "user" || m.role === "assistant") && m.text && !m.streaming)
-    .slice(-6)
-    .map((m) => ({ role: m.role === "bot" ? "assistant" : m.role, content: m.text }));
+    .filter((m) => (m.role === "user" || m.role === "bot" || m.role === "assistant") && m.text && !m.streaming)
+     .slice(-6)
+     .map((m) => ({ role: m.role === "bot" ? "assistant" : m.role, content: m.text }));
 
   const res = await axios.post(
     `${API_BASE}/ask`,
