@@ -35,14 +35,25 @@ const uuidSchema = z.preprocess(
 // Converts non-string values → "" so missing/invalid question input produces
 // "Question is required." rather than Zod's generic invalid-type message.
 // Trim surrounding whitespace so whitespace-only questions are treated as empty.
+// Hard cap at 2000 characters to prevent prompt-injection via oversized questions
+// and to bound LLM context consumption per request.
+const MAX_QUESTION_LENGTH = 2000;
+
 const questionSchema = z.preprocess(
   (val) => (typeof val === "string" ? val : ""),
-  z.string().trim().min(1, "Question is required."),
+  z
+    .string()
+    .trim()
+    .min(1, "Question is required.")
+    .max(
+      MAX_QUESTION_LENGTH,
+      `Question must not exceed ${MAX_QUESTION_LENGTH} characters.`,
+    ),
 );
 
 const modeSchema = z.preprocess(
   (val) => (typeof val === "string" ? val : "default"),
-  z.enum(["default", "tutor", "socratic", "eli5", "concise"]).default("default")
+  z.enum(["default", "tutor", "socratic", "eli5", "concise"]).default("default"),
 );
 
 const sessionSecretSchema = z.preprocess(
@@ -58,10 +69,18 @@ const chatMessageSchema = z.object({
   content: z.string().trim().min(1).max(8000),
 });
 
-const askSchema = z.object({
-  question: questionSchema,
+// ─── Split schemas for credential vs payload validation ───────────────────────
+// Credential fields (session_id, session_secret) are structurally identical
+// for every turn within a session. Separating them into a dedicated schema
+// lets the gateway short-circuit structural re-validation on cache hit while
+// always running question/mode validation, which changes per request.
+const askCredentialSchema = z.object({
   session_id: uuidSchema,
   session_secret: sessionSecretSchema,
+});
+
+const askPayloadSchema = z.object({
+  question: questionSchema,
   mode: modeSchema,
   // Optional: last N conversation turns for follow-up question condensation
   chat_history: z
@@ -71,7 +90,28 @@ const askSchema = z.object({
     .default([]),
 });
 
+// Combined schema — kept for backwards compatibility with existing tests and
+// any direct callers that pass the full request body to a single safeParse.
+const askSchema = z.object({
+  question: questionSchema,
+  session_id: uuidSchema,
+  session_secret: sessionSecretSchema,
+  mode: modeSchema,
+  chat_history: z
+    .array(chatMessageSchema)
+    .max(20, "chat_history may contain at most 20 messages.")
+    .optional()
+    .default([]),
+});
+
 const summarizeSchema = z.object({
+  session_id: uuidSchema,
+  session_secret: sessionSecretSchema,
+});
+
+// Credential-only schema for /summarize — used by the gateway's cache so the
+// UUID and secret checks are not repeated on every call.
+const summarizeCredentialSchema = z.object({
   session_id: uuidSchema,
   session_secret: sessionSecretSchema,
 });
@@ -110,9 +150,14 @@ const updateFlashcardProgressSchema = z.object({
 
 module.exports = {
   askSchema,
+  askCredentialSchema,
+  askPayloadSchema,
   summarizeSchema,
-  knowledgeGapsSchema,
+  summarizeCredentialSchema,
   sessionsLookupSchema,
+  MAX_QUESTION_LENGTH,
+  knowledgeGapsSchema,
   generateFlashcardsSchema,
   updateFlashcardProgressSchema,
+  chatMessageSchema,
 };
