@@ -10,6 +10,7 @@ const crypto = require("crypto");
 const { rateLimit } = require("express-rate-limit");
 const slowDown = require("express-slow-down");
 const helmet = require("helmet");
+const jwt = require("jsonwebtoken");
 const {
   askSchema,
   askCredentialSchema,
@@ -27,6 +28,7 @@ const authRoutes = require("./src/routes/authRoutes");
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
 const getInternalRagToken = () => (process.env.INTERNAL_RAG_TOKEN || "").trim();
 const PORT = process.env.PORT || 4000;
+const SUPABASE_JWT_SECRET = (process.env.SUPABASE_JWT_SECRET || "").trim();
 
 // ─── Credential Validation Cache ─────────────────────────────────────────────
 // session_id and session_secret are structurally identical on every request
@@ -944,20 +946,18 @@ const requireSupabaseAuth = (req, res, next) => {
   }
   
   const token = authHeader.split(" ")[1];
-  const secret = process.env.SUPABASE_JWT_SECRET;
-  
-  // If the server admin hasn't configured the JWT secret, we at least enforce 
-  // that a token is provided (to satisfy basic security checks), but we can't 
-  // cryptographically verify it without the secret.
-  if (secret) {
-    const jwt = require("jsonwebtoken");
-    try {
-      req.user = jwt.verify(token, secret);
-    } catch (err) {
-      return res.status(401).json({ error: "Invalid token" });
-    }
+  const secret = SUPABASE_JWT_SECRET;
+
+  if (!secret) {
+    return res.status(500).json({ error: "Server misconfiguration: missing SUPABASE_JWT_SECRET" });
   }
-  
+
+  try {
+    req.user = jwt.verify(token, secret);
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+
   next();
 };
 
@@ -1261,6 +1261,9 @@ app.use((err, req, res, next) => {
 
 if (require.main === module) {
   requireInternalRagToken();
+  if (!SUPABASE_JWT_SECRET) {
+    throw new Error("SUPABASE_JWT_SECRET missing in .env – required for /process-from-url authentication");
+  }
 
   (async () => {
     requireInternalRagToken();
