@@ -12,20 +12,19 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from dotenv import load_dotenv
 from rank_bm25 import BM25Okapi
-from pdf_parse_worker import _extract_pdf_text_worker
 from langchain_community.vectorstores import FAISS
 import numpy as np
 import json
 import uuid
 import uvicorn
 import torch
-import multiprocessing
 import os
 import secrets
 import hashlib
 import shutil
 import urllib.request
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 from transformers import (
     AutoConfig,
@@ -311,82 +310,184 @@ def append_chat_exchange(session: dict, question: str, answer: str, sources: lis
     ])
 
 
-def extract_pdf_documents_sandboxed(pdf_path: str, filename: str):
+# Thread pool used exclusively for PDF parsing so the FastAPI event loop
+# is never blocked during text extraction. Workers run LangChain loaders
+# synchronously inside threads — asyncio.wait_for provides the timeout guard.
+_PDF_PARSE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="pdf-parse",
+)
+
+
+def _load_with_pymupdf(pdf_path: str, filename: str, max_pages: int) -> list:
+    """Load PDF pages using LangChain's PyMuPDFLoader (MuPDF C engine).
+
+    MuPDF handles multi-column layouts, embedded fonts, and complex academic
+    PDFs correctly — unlike the pure-Python pypdf fallback.
     """
-    Parse PDF in a separate process with hard timeout and page/size limits.
+    from langchain_community.document_loaders import PyMuPDFLoader
 
-    Returns: List[Document]
-    Raises: HTTPException on failure.
-    """
-    start = time.time()
-    ctx = multiprocessing.get_context("spawn")
-    out_queue = ctx.Queue(maxsize=1)
-    proc = ctx.Process(
-        target=_extract_pdf_text_worker,
-        args=(pdf_path, MAX_PDF_PAGES, MAX_PDF_EXTRACT_CHARS, out_queue),
-        daemon=True,
-    )
-    proc.start()
-    proc.join(timeout=PDF_PARSE_TIMEOUT_SECONDS)
-
-    if proc.is_alive():
-        logger.warning(
-            "PDF parse timeout filename=%s timeout_seconds=%s",
-            filename,
-            PDF_PARSE_TIMEOUT_SECONDS,
-        )
-        proc.terminate()
-        proc.join(timeout=2)
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "PDF parsing timed out. This PDF may be too complex or malformed. "
-                "Try a smaller/simpler PDF."
-            ),
-        )
-
-    try:
-        result = out_queue.get_nowait()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Unable to read this PDF.")
-
-    if not isinstance(result, dict) or not result.get("ok"):
-        error = (result or {}).get("error") if isinstance(result, dict) else None
-        raise HTTPException(status_code=400, detail=error or "Unable to read this PDF.")
-
-    extracted = result.get("extracted", [])
-    extracted_chars = int(result.get("extracted_chars", 0) or 0)
-    page_count = int(result.get("page_count", 0) or 0)
-    elapsed_ms = int((time.time() - start) * 1000)
-
-    logger.info(
-        "PDF parsed safely filename=%s pages=%s extracted_pages=%s extracted_chars=%s duration_ms=%s",
-        filename,
-        page_count,
-        len(extracted),
-        extracted_chars,
-        elapsed_ms,
-    )
-
+    raw_docs = PyMuPDFLoader(pdf_path).load()
     docs = []
-    for item in extracted:
-        page = item.get("page")
-        text = (item.get("text") or "").strip()
+    for doc in raw_docs[:max_pages]:
+        text = (doc.page_content or "").strip()
         if not text:
             continue
+        page_num = doc.metadata.get("page", 0)
         docs.append(
             Document(
                 page_content=text,
                 metadata={
-                    "page": page,
+                    "page": page_num,
                     "filename": filename,
                     "source": filename,
                 },
             )
         )
-    if not docs:
-        raise HTTPException(status_code=400, detail="No readable text was found in the PDF.")
     return docs
+
+
+def _load_with_pypdf(pdf_path: str, filename: str, max_pages: int) -> list:
+    """Fallback loader using LangChain's PyPDFLoader (pure Python).
+
+    Used when PyMuPDF is unavailable or raises an exception. Handles most
+    simple text-based PDFs without a native dependency.
+    """
+    from langchain_community.document_loaders import PyPDFLoader
+
+    raw_docs = PyPDFLoader(pdf_path).load()
+    docs = []
+    for doc in raw_docs[:max_pages]:
+        text = (doc.page_content or "").strip()
+        if not text:
+            continue
+        page_num = doc.metadata.get("page", 0)
+        docs.append(
+            Document(
+                page_content=text,
+                metadata={
+                    "page": page_num,
+                    "filename": filename,
+                    "source": filename,
+                },
+            )
+        )
+    return docs
+
+
+async def load_pdf_documents_async(pdf_path: str, filename: str) -> list:
+    """Parse a PDF and return a list of LangChain Documents.
+
+    Loader chain (priority order):
+      1. PyMuPDFLoader  — MuPDF C engine; handles multi-column, embedded fonts,
+                          complex academic papers.
+      2. PyPDFLoader    — Pure-Python fallback for simple PDFs or environments
+                          without the pymupdf native library.
+
+    Both loaders run inside a ThreadPoolExecutor so the FastAPI event loop is
+    never blocked. asyncio.wait_for enforces PDF_PARSE_TIMEOUT_SECONDS as the
+    DoS guard (replaces the previous multiprocessing.spawn timeout approach).
+
+    Raises:
+        HTTPException(422) — timeout exceeded.
+        HTTPException(400) — loader error or no readable text found.
+    """
+    loop = asyncio.get_event_loop()
+    start = time.time()
+
+    # --- Primary: PyMuPDF ---
+    try:
+        docs = await asyncio.wait_for(
+            loop.run_in_executor(
+                _PDF_PARSE_EXECUTOR,
+                _load_with_pymupdf,
+                pdf_path,
+                filename,
+                MAX_PDF_PAGES,
+            ),
+            timeout=PDF_PARSE_TIMEOUT_SECONDS,
+        )
+        elapsed_ms = int((time.time() - start) * 1000)
+        logger.info(
+            "PDF parsed via PyMuPDF filename=%s extracted_pages=%s duration_ms=%s",
+            filename,
+            len(docs),
+            elapsed_ms,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "PDF parse timeout (PyMuPDF) filename=%s timeout_seconds=%s",
+            filename,
+            PDF_PARSE_TIMEOUT_SECONDS,
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "PDF parsing timed out. The file may be extremely large or complex. "
+                "Try a smaller PDF."
+            ),
+        )
+    except Exception as primary_exc:
+        logger.warning(
+            "PyMuPDF failed for filename=%s error=%s — falling back to PyPDF",
+            filename,
+            primary_exc,
+        )
+        # --- Fallback: PyPDF ---
+        try:
+            docs = await asyncio.wait_for(
+                loop.run_in_executor(
+                    _PDF_PARSE_EXECUTOR,
+                    _load_with_pypdf,
+                    pdf_path,
+                    filename,
+                    MAX_PDF_PAGES,
+                ),
+                timeout=PDF_PARSE_TIMEOUT_SECONDS,
+            )
+            elapsed_ms = int((time.time() - start) * 1000)
+            logger.info(
+                "PDF parsed via PyPDF (fallback) filename=%s extracted_pages=%s duration_ms=%s",
+                filename,
+                len(docs),
+                elapsed_ms,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "PDF parse timeout (PyPDF fallback) filename=%s timeout_seconds=%s",
+                filename,
+                PDF_PARSE_TIMEOUT_SECONDS,
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "PDF parsing timed out. The file may be extremely large or complex. "
+                    "Try a smaller PDF."
+                ),
+            )
+        except Exception as fallback_exc:
+            logger.error(
+                "Both loaders failed filename=%s pymupdf_err=%s pypdf_err=%s",
+                filename,
+                primary_exc,
+                fallback_exc,
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unable to read this PDF: {fallback_exc}",
+            )
+
+    if not docs:
+        raise HTTPException(
+            status_code=400,
+            detail="No readable text was found in the PDF. It may be a scanned image-only PDF.",
+        )
+    return docs
+
+
+# Legacy alias kept for any call sites not yet updated; will be removed in a
+# follow-up cleanup once all callers are confirmed migrated.
+extract_pdf_documents_sandboxed = None  # replaced by load_pdf_documents_async
 
 @app.middleware("http")
 async def internal_auth_middleware(request: Request, call_next):
@@ -2799,7 +2900,7 @@ class SessionWriteRequest(BaseModel):
 
 
 @app.post("/process-pdf")
-def process_pdf(
+async def process_pdf(
     file: UploadFile = File(...),
     session_id: str | None = Form(None),
     original_filename: str | None = Form(None),
@@ -2852,7 +2953,7 @@ def process_pdf(
             raise HTTPException(status_code=400, detail="Uploaded PDF is empty. Please choose a valid PDF file.")
 
         try:
-            docs = extract_pdf_documents_sandboxed(temp_path, filename)
+            docs = await load_pdf_documents_async(temp_path, filename)
         except Exception as exc:
             logger.warning("Failed to load PDF filename=%s error=%s", filename, exc)
             if isinstance(exc, HTTPException):
