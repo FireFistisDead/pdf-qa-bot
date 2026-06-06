@@ -38,9 +38,23 @@ after(() => {
 
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
-let app, askSchema, summarizeSchema, extractServiceDetails, ragAuthHeaders;
-let _credCache, _credKey, _credCacheHit, _credCacheStore, _credCacheDrop;
-let validateAskBody, validateSummarizeBody, MAX_QUESTION_LENGTH;
+let app,
+  askSchema,
+  summarizeSchema,
+  extractServiceDetails,
+  ragAuthHeaders,
+  normalizeHostnameForAllowlist,
+  isAllowedSupabaseHostname;
+
+let _credCache,
+  _credKey,
+  _credCacheHit,
+  _credCacheStore,
+  _credCacheDrop;
+
+let validateAskBody,
+  validateSummarizeBody,
+  MAX_QUESTION_LENGTH;
 let clientIpFromRequest, normalizeIp;
 before(() => {
   process.env.JWT_SECRET = "test-secret-for-ci";
@@ -58,6 +72,8 @@ before(() => {
   validateSummarizeBody = mod.validateSummarizeBody;
   MAX_QUESTION_LENGTH = mod.MAX_QUESTION_LENGTH;
   ragAuthHeaders = mod.ragAuthHeaders;
+  normalizeHostnameForAllowlist = mod.normalizeHostnameForAllowlist;
+  isAllowedSupabaseHostname = mod.isAllowedSupabaseHostname;
 
   ({ clientIpFromRequest, normalizeIp } = require("./security/ip"));
 });
@@ -73,6 +89,28 @@ test("module loads without error", () => {
 
 test("ragAuthHeaders forwards the internal token", () => {
   assert.deepEqual(ragAuthHeaders(), { "X-Internal-Token": process.env.INTERNAL_RAG_TOKEN.trim() });
+});
+
+describe("Supabase URL allowlist", () => {
+  test("normalizes hostname case and trailing dot", () => {
+    assert.equal(normalizeHostnameForAllowlist("XyZ.SUPABASE.CO."), "xyz.supabase.co");
+  });
+
+  test("normalizes multiple trailing dots deterministically", () => {
+    assert.equal(normalizeHostnameForAllowlist("XyZ.SUPABASE.CO..."), "xyz.supabase.co");
+  });
+
+  test("accepts valid Supabase project hostnames", () => {
+    assert.equal(isAllowedSupabaseHostname("xyz.supabase.co"), true);
+    assert.equal(isAllowedSupabaseHostname("xyz.supabase.in"), true);
+    assert.equal(isAllowedSupabaseHostname("XYZ.SUPABASE.CO."), true);
+  });
+
+  test("rejects lookalike and unrelated hostnames", () => {
+    assert.equal(isAllowedSupabaseHostname("supabase.co"), false);
+    assert.equal(isAllowedSupabaseHostname("evil.com"), false);
+    assert.equal(isAllowedSupabaseHostname("xyz.supabase.co.evil.com"), false);
+  });
 });
 
 test("server module can be imported when INTERNAL_RAG_TOKEN is unset", () => {
@@ -452,6 +490,90 @@ describe("route error responses", () => {
       assert.equal(res.status, 200);
       assert.equal(forwardedHeaders["X-Internal-Token"], process.env.INTERNAL_RAG_TOKEN);
     } finally {
+      axios.post = originalPost;
+    }
+  });
+
+  test("POST /process-from-url keeps protocol-relative paths on the trusted host", async () => {
+    const originalGet = axios.get;
+    const originalPost = axios.post;
+    let requestedDownloadUrl = null;
+
+    axios.get = async (url) => {
+      requestedDownloadUrl = url;
+      return { data: Buffer.from("%PDF-1.4\n%%EOF") };
+    };
+    axios.post = async () => ({
+      data: {
+        session_id: "550e8400-e29b-41d4-a716-446655440000",
+        session_secret: "session-secret-123",
+        document: { filename: "safe.pdf" },
+        documents: [],
+      },
+    });
+
+    try {
+      const res = await fetch(`${baseUrl}/process-from-url`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer test-token",
+        },
+        body: JSON.stringify({
+          url: "https://xyz.supabase.co//evil.com/file.pdf?download=1",
+          filename: "safe.pdf",
+        }),
+      });
+
+      assert.equal(res.status, 200);
+      const downloadUrl = new URL(requestedDownloadUrl);
+      assert.equal(downloadUrl.protocol, "https:");
+      assert.equal(downloadUrl.hostname, "xyz.supabase.co");
+      assert.equal(downloadUrl.pathname, "//evil.com/file.pdf");
+      assert.equal(downloadUrl.search, "?download=1");
+    } finally {
+      axios.get = originalGet;
+      axios.post = originalPost;
+    }
+  });
+
+  test("POST /process-from-url accepts whitespace-trimmed Supabase URLs", async () => {
+    const originalGet = axios.get;
+    const originalPost = axios.post;
+    let requestedDownloadUrl = null;
+
+    axios.get = async (url) => {
+      requestedDownloadUrl = url;
+      return { data: Buffer.from("%PDF-1.4\n%%EOF") };
+    };
+    axios.post = async () => ({
+      data: {
+        session_id: "550e8400-e29b-41d4-a716-446655440000",
+        session_secret: "session-secret-123",
+        document: { filename: "trimmed.pdf" },
+        documents: [],
+      },
+    });
+
+    try {
+      const res = await fetch(`${baseUrl}/process-from-url`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer test-token",
+        },
+        body: JSON.stringify({
+          url: "  https://xyz.supabase.co/storage/v1/object/public/docs/trimmed.pdf  ",
+          filename: "trimmed.pdf",
+        }),
+      });
+
+      assert.equal(res.status, 200);
+      const downloadUrl = new URL(requestedDownloadUrl);
+      assert.equal(downloadUrl.hostname, "xyz.supabase.co");
+      assert.equal(downloadUrl.pathname, "/storage/v1/object/public/docs/trimmed.pdf");
+    } finally {
+      axios.get = originalGet;
       axios.post = originalPost;
     }
   });
