@@ -3584,8 +3584,8 @@ def ask_question(data: Question):
 @app.post("/ask/stream")
 def ask_question_stream(data: Question, _ready: None = Depends(require_models_ready)):
     """
-    Streaming variant of /ask. Returns the generated answer as a plain-text
-    chunked response so the frontend can render tokens progressively.
+    Streaming variant of /ask. Returns the generated answer as SSE so the
+    frontend can render tokens progressively.
 
     Retrieval and evidence-gating are identical to /ask. Generation is run in
     a background thread using TextIteratorStreamer so the HTTP response can
@@ -3595,6 +3595,18 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
     in both `protected_paths` (exact match) and under the `/ask/` prefix guard,
     so it cannot be reached without a valid X-Internal-Token.
     """
+    def _sse_frame(text: str, event: str | None = None) -> str:
+        parts = []
+        if event:
+            parts.append(f"event: {event}")
+        normalized_text = str(text).replace("\r\n", "\n").replace("\r", "\n")
+        for line in normalized_text.split("\n"):
+            parts.append(f"data: {line}")
+        return "\n".join(parts) + "\n\n"
+
+    def _sse_done() -> str:
+        return "data: [DONE]\n\n"
+
     question = (data.question or "").strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question is required.")
@@ -3708,9 +3720,10 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
             _mark_session_dirty(session_id)
 
         def _refuse_stream():
-            yield INSUFFICIENT_CONTEXT_MESSAGE
+            yield _sse_frame(INSUFFICIENT_CONTEXT_MESSAGE)
+            yield _sse_done()
 
-        return StreamingResponse(_refuse_stream(), media_type="text/plain; charset=utf-8")
+        return StreamingResponse(_refuse_stream(), media_type="text/event-stream; charset=utf-8")
 
     context = format_context(docs)
 
@@ -3740,9 +3753,10 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
             _mark_session_dirty(session_id)
 
         def _grounded_stream():
-            yield framed
+            yield _sse_frame(framed)
+            yield _sse_done()
 
-        return StreamingResponse(_grounded_stream(), media_type="text/plain; charset=utf-8")
+        return StreamingResponse(_grounded_stream(), media_type="text/event-stream; charset=utf-8")
 
     # LLM generation path — run in a background thread so we can stream tokens
     # back to the caller as they are produced rather than waiting for the full
@@ -3807,7 +3821,7 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
                             token = data['choices'][0]['delta'].get('content', '')
                             if token:
                                 full_answer_parts.append(token)
-                                yield token
+                                yield _sse_frame(token)
                         except Exception:
                             pass
         except Exception as e:
@@ -3817,40 +3831,49 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
 
         full_answer = "".join(full_answer_parts).strip()
 
-        framed = apply_mode_framing(
-            full_answer,
-            question,
-            mode,
-            docs,
-            context,
-        )
+        try:
+            # Streamed tokens were already yielded above as they arrived.
+            # Now produce the final framed answer, persist the chat exchange,
+            # and send the final framed answer + done event.
+            framed = apply_mode_framing(full_answer, question, mode, docs, context)
 
-        if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
-            framed = full_answer
+            if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
+                framed = full_answer
 
-        citation_sources = [
-            citation_source_for_document(doc, idx)
-            for idx, doc in enumerate(docs)
-        ]
+            citation_sources = [
+                citation_source_for_document(doc, idx)
+                for idx, doc in enumerate(docs)
+            ]
 
-        # stream the final framed answer once at the end
-        yield framed
+            # stream the final framed answer once at the end
+            yield _sse_frame(framed)
 
-        with sessions_lock:
-            current_session = sessions.get(session_id)
-            if current_session:
-                ensure_retrieval_cache(current_session)
-                append_chat_exchange(
-                    current_session,
-                    question,
-                    framed,
-                    citation_sources,
-                    mode,
-                )
-            _mark_session_dirty(session_id)
+            with sessions_lock:
+                current_session = sessions.get(session_id)
+                if current_session:
+                    ensure_retrieval_cache(current_session)
+                    append_chat_exchange(
+                        current_session,
+                        question,
+                        framed,
+                        citation_sources,
+                        mode,
+                    )
+                _mark_session_dirty(session_id)
 
+            yield _sse_done()
+        except Exception:
+            logger.exception("Stream generation failed session_id=%s", session_id)
+            yield _sse_frame("Generation error. Please try again.", event="error")
+            # Emit an explicit done marker after the error so SSE clients
+            # that rely on an in-band completion token can handle the
+            # terminal state deterministically.
+            try:
+                yield _sse_done()
+            except Exception:
+                pass
 
-    return StreamingResponse(_generate_and_stream(), media_type="text/plain; charset=utf-8")
+    return StreamingResponse(_generate_and_stream(), media_type="text/event-stream; charset=utf-8")
 
 
 def _run_generation_locked(model, generate_kwargs):

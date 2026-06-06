@@ -1150,33 +1150,102 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
 
   const { question, session_id, mode } = validation.data;
   const session_secret = validation.data.session_secret;
+  const upstreamAbort = new AbortController();
+  let upstreamStream = null;
+  let cleanedUp = false;
+
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    upstreamAbort.abort();
+    if (upstreamStream && typeof upstreamStream.destroy === "function") {
+      upstreamStream.destroy();
+    }
+  };
 
   try {
     const ragResponse = await axios.post(
       `${RAG_SERVICE_URL}/ask/stream`,
       { question, session_id, session_secret, mode },
-      { headers: ragAuthHeaders(), responseType: "stream", timeout: 120000 }
+{
+  headers: ragAuthHeaders(),
+  responseType: "stream",
+  timeout: 120000,
+  signal: upstreamAbort.signal,
+}
     );
 
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    upstreamStream = ragResponse.data;
+
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Transfer-Encoding", "chunked");
     res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
     res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders();
+
+    req.on("close", cleanup);
+    res.on("close", cleanup);
 
     ragResponse.data.pipe(res);
 
     ragResponse.data.on("error", (err) => {
+      // Ensure we always clean up the upstream stream/abort state so the
+      // upstream request is destroyed promptly and background resources
+      // are released even when headers have already been sent.
+      try {
+        cleanup();
+      } catch (cleanupErr) {
+        // Ignore cleanup errors; still proceed to notify the client.
+      }
+
+      if (upstreamAbort.signal.aborted || req.aborted) {
+        return;
+      }
+
       console.error("Stream error from RAG service:", err.message);
       if (!res.headersSent) {
         res.status(502).json({ error: "Streaming response failed." });
       } else {
+        res.write("event: error\ndata: Streaming response failed.\n\n");
+        // End the response after signalling the error to the client.
         res.end();
       }
     });
+
+    ragResponse.data.on("end", cleanup);
   } catch (err) {
-    console.error("Streaming question answering failed:", extractServiceDetails(err, "Error answering question"));
-    return propagateRagError(err, res, "Error answering question");
+if (
+  upstreamAbort.signal.aborted ||
+  req.aborted ||
+  err.code === "ERR_CANCELED" ||
+  err.name === "CanceledError"
+) {
+  return;
+}
+
+const statusCode =
+  err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
+
+const details = extractServiceDetails(
+  err,
+  "Error answering question"
+);
+
+console.error(
+  "Streaming question answering failed:",
+  details
+);
+
+return res.status(statusCode).json({
+  error:
+    typeof details === "string"
+      ? details
+      : "Error answering question",
+  details: isDevelopment
+    ? details
+    : "Internal processing error",
+});
   }
 });
 
