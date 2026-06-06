@@ -1,4 +1,5 @@
 # PDF Q&A Bot
+[![Docker](https://img.shields.io/badge/docker-supported-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/get-docker/)
 
 ![PDF Q&A Bot Logo](logo.svg)
 
@@ -134,7 +135,7 @@ source venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
-
+> **Important:** Before running the RAG service, copy the environment file from the repository root. Without this step, the Hugging Face model override and other required variables will not be loaded:
 Copy environment configuration from the repository root:
 
 ```bash
@@ -144,7 +145,15 @@ copy ..\.env.example .env  # Windows (cmd)
 Copy-Item ..\.env.example .env  # Windows (PowerShell)
 ```
 
-Edit `.env` if you want a smaller or faster generation model (see [Configuration](#configuration)).
+Edit `.env` and set `INTERNAL_RAG_TOKEN` to a strong random value.
+
+> **⚠️ Critical:** The root `.env` and `rag-service/.env` **must have the same value** for
+> `INTERNAL_RAG_TOKEN`. A mismatch causes all PDF processing requests to fail with `403 Forbidden`.
+> Generate a shared secret and paste it into both files:
+>
+> ```bash
+> openssl rand -hex 32
+> ```
 
 ### 2. Express API (repository root)
 
@@ -153,7 +162,15 @@ cd ..          # repository root (parent of rag-service/)
 npm install
 ```
 
-Multer writes uploads to an `uploads/` directory at runtime; it is created automatically on first upload.
+Multer writes uploads to an `uploads/` directory at runtime. If it does not exist after a fresh clone, create it manually before starting the server:
+
+```bash
+# macOS / Linux
+mkdir -p uploads
+
+# Windows (PowerShell)
+New-Item -ItemType Directory -Force -Path uploads
+```
 
 ### 3. React frontend (`frontend/`)
 
@@ -163,6 +180,26 @@ npm install
 ```
 
 The frontend `package.json` sets `"proxy": "http://localhost:4000"`, so development requests to `/upload`, `/ask`, and `/summarize` are forwarded to Express without CORS configuration in the browser.
+
+> **⚠️ Note:** After editing `frontend/.env`, you **must** stop and restart `npm start`.
+> React does not hot-reload environment variables — the running process continues using the
+> old values until restarted.
+
+### 4. Supabase schema (first-time only)
+
+If you are using the **Dashboard** (`/dashboard/*`) routes, you need to bootstrap the
+database schema in your Supabase project once before the Documents page will work.
+
+Run the migration in the **Supabase SQL Editor** (Dashboard → SQL Editor → New query):
+
+```bash
+# The migration file is at:
+supabase/migrations/001_init_documents.sql
+```
+
+Paste its contents into the SQL Editor and click **Run**. This creates the `documents`
+table and the `documents` storage bucket. Without this step, uploads appear to succeed
+but the Documents page will always show **0 FILES**.
 
 ---
 
@@ -425,16 +462,15 @@ Always restart **RAG → Express → Frontend** after port changes.
 | Immediate 500 on upload | RAG service not running | Start `uvicorn` in `rag-service/` first |
 | `ECONNREFUSED` in Express logs | Wrong host/port | Ensure FastAPI is on `http://localhost:5000` |
 | `Session expired or invalid` in answers | RAG process restarted | Re-upload the PDF to obtain a new `session_id` |
-| Empty or scanned PDF | No extractable text | Use a text-based PDF, not a pure image scan |
-
+| Empty or scanned PDF | No extractable text | Use a text-based PDF, not a pure image scan. Scanned/image-based PDFs return no text — the service will return a 400 error. For scanned documents, use an OCR tool (e.g. Adobe Acrobat, pdf2image + pytesseract) to convert to text-based PDF first |
 ---
 
 ### Slow first request / long “Downloading…” pauses
 
 | Cause | What to do |
 |-------|------------|
-| First-time Hugging Face model fetch | Wait for completion; verify disk space (~1–2 GB for defaults) |
-| Slow or restricted network | Pre-download models (see below) or use `flan-t5-small` |
+| First-time Hugging Face model fetch | Wait for completion; verify disk space (~1–2 GB for defaults). **An active internet connection is required at runtime** (not just install time) for the initial model download |
+| Slow or restricted network | Pre-download models (see below) or use `flan-t5-small`. On restricted networks, the request will hang silently with no error — pre-downloading models offline is strongly recommended |
 | CPU-only inference | Expect slower Q&A; use a smaller `HF_GENERATION_MODEL` |
 | Large PDFs | More chunks → longer embedding and search; try smaller files first |
 
@@ -508,7 +544,7 @@ We’d love to hear from you — whether you’re setting up the project for the
 
 ## License
 
-See repository license files and package metadata where applicable. Third-party models are subject to their respective Hugging Face model cards and licenses.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details. Third-party models are subject to their respective Hugging Face model cards and licenses.
 ## RAG internal authentication
 
 `INTERNAL_RAG_TOKEN` is required for the FastAPI RAG service. The Node.js

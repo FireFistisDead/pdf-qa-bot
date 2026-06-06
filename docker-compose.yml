@@ -44,16 +44,21 @@ services:
     #           count: 1
     #           capabilities: [gpu]
     healthcheck:
+      # Use /ready (readiness probe) not /health (liveness probe) so Docker
+      # waits until both embedding and generation models have fully loaded
+      # before marking the container healthy and routing traffic.  /health stays
+      # 200 the whole time; /ready returns 503 until _models_ready is set.
       test:
         [
           "CMD",
           "python",
           "-c",
-          "import urllib.request; response = urllib.request.urlopen('http://localhost:5000/health', timeout=5); response.read(1); response.close()",
+          "import urllib.request; response = urllib.request.urlopen('http://localhost:5000/ready', timeout=10); response.read(1); response.close()",
         ]
       interval: 30s
-      timeout: 10s
-      retries: 3
+      timeout: 15s
+      retries: 6
+      start_period: 120s
 
   backend:
     build:
