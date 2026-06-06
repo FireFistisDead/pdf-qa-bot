@@ -1125,7 +1125,7 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
         session_secret,
         mode,
       },
-      { headers: ragAuthHeaders() },
+      { headers: ragAuthHeaders(), timeout: 30000 },
     );
 
     return res.json({
