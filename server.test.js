@@ -46,8 +46,7 @@ let app,
   normalizeHostnameForAllowlist,
   isAllowedSupabaseHostname;
 
-let _credCache,
-  _credKey,
+let _credKey,
   _credCacheHit,
   _credCacheStore,
   _credCacheDrop;
@@ -69,7 +68,6 @@ before(() => {
   ragAuthHeaders = mod.ragAuthHeaders;
   normalizeHostnameForAllowlist = mod.normalizeHostnameForAllowlist;
   isAllowedSupabaseHostname = mod.isAllowedSupabaseHostname;
-  _credCache = mod._credCache;
   _credKey = mod._credKey;
   _credCacheHit = mod._credCacheHit;
   _credCacheStore = mod._credCacheStore;
