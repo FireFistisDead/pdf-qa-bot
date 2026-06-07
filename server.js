@@ -21,6 +21,8 @@ const {
   sessionsLookupSchema,
   knowledgeGapsSchema,
   MAX_QUESTION_LENGTH,
+  uuidSchema,
+  sessionSecretSchema
 } = require("./validators/schemas");
 const { clientIpFromRequest } = require("./security/ip");
 const { createRedisClient } = require("./security/redis");
@@ -521,40 +523,8 @@ if (!fs.existsSync(UPLOADS_DIR)) {
 // accessed only through the authenticated /pdf/:filename route (if re-introduced
 // in future) or via the in-browser blob URL created by URL.createObjectURL on
 // the frontend.
-const FILE_RETENTION_MS = parseInt(process.env.FILE_RETENTION_MS || "3600000", 10);
-const CLEANUP_INTERVAL_MS = parseInt(process.env.CLEANUP_INTERVAL_MS || "3600000", 10);
 
-const startUploadsCleanup = () => {
-  const intervalId = setInterval(async () => {
-    try {
-      const files = await fsPromises.readdir(UPLOADS_DIR);
-      const now = Date.now();
-      for (const file of files) {
-        if (file === ".gitkeep") continue;
-        const filePath = path.join(UPLOADS_DIR, file);
-        try {
-          const stats = await fsPromises.stat(filePath);
-          if (now - stats.birthtimeMs > FILE_RETENTION_MS) {
-            await fsPromises.unlink(filePath);
-            if (isDevelopment) {
-              console.log(`[cleanup] safety-net deleted orphaned file: ${path.basename(filePath)}`);
-            }
-          }
-        } catch (err) {
-          if (err.code !== "ENOENT") {
-            console.error(`[cleanup] failed to remove ${path.basename(filePath)}:`, err.message);
-          }
-        }
-      }
-    } catch (err) {
-      console.error("[cleanup] failed to read uploads directory:", err.message);
-    }
-  }, CLEANUP_INTERVAL_MS);
 
-  if (typeof intervalId.unref === "function") {
-    intervalId.unref();
-  }
-};
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -688,8 +658,7 @@ const propagateRagError = (err, res, fallback) => {
   });
 };
 
-const normalizeSessionSecret = (value) =>
-  typeof value === "string" ? value.trim() || null : null;
+
 
 const SUPABASE_ALLOWED_HOST_SUFFIXES = new Set(["supabase.co", "supabase.in"]);
 
@@ -841,8 +810,35 @@ app.post(
   const absoluteFilePath = uploadedFilePath
     ? path.join(UPLOADS_DIR, path.basename(uploadedFilePath))
     : null;
-  const sessionId = req.body?.session_id || null;
-  const sessionSecret = normalizeSessionSecret(req.body?.session_secret);
+  const hasSessionId = Object.prototype.hasOwnProperty.call(req.body || {}, 'session_id');
+  const hasSessionSecret = Object.prototype.hasOwnProperty.call(req.body || {}, 'session_secret');
+  
+  let sessionId = null;
+  let sessionSecret = null;
+  if (hasSessionId || hasSessionSecret) {
+    if (!(hasSessionId && hasSessionSecret)) {
+      if (uploadedFilePath) await cleanupFile(uploadedFilePath);
+      return sendUploadError(
+        res,
+        403,
+        "session_id and session_secret must be provided together to extend an existing session."
+      );
+    }
+
+    const idValidation = uuidSchema.safeParse(req.body.session_id);
+    const secretValidation = sessionSecretSchema.safeParse(req.body.session_secret);
+    
+    if (!idValidation.success || !secretValidation.success) {
+      if (uploadedFilePath) await cleanupFile(uploadedFilePath);
+      return sendUploadError(
+        res,
+        400,
+        "Validation failed for session credentials."
+      );
+    }
+    sessionId = idValidation.data;
+    sessionSecret = secretValidation.data;
+  }
 
   try {
     if (!req.file) {
@@ -893,18 +889,7 @@ app.post(
         "Invalid file type. Only real PDF documents are accepted.",
       );
     }
-    // Validate session credential pairing before opening the file stream.
-    // Creating fs.createReadStream before this check would leave a dangling
-    // open handle on the file if the request is rejected and cleanupFile
-    // deletes the file before the stream is ever consumed.
-    if ((sessionId || sessionSecret) && !(sessionId && sessionSecret)) {
-      await cleanupFile(uploadedFilePath);
-      return sendUploadError(
-        res,
-        403,
-        "session_id and session_secret must be provided together to extend an existing session.",
-      );
-    }
+    // Validate session credential pairing was already handled above.
 
     // All validation passed — safe to open the file stream for forwarding.
     const formData = {
@@ -1002,10 +987,31 @@ const requireSupabaseAuth = (req, res, next) => {
 // streams it to the RAG service for text extraction + FAISS indexing,
 // and returns the session_id + session_secret needed for /ask/stream.
 app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, res) => {
-  const { url, filename, session_id, session_secret } = req.body || {};
+  const { url, filename } = req.body || {};
 
   if (!url || typeof url !== "string") {
     return res.status(400).json({ error: "Missing or invalid 'url' field." });
+  }
+
+  const hasSessionId = Object.prototype.hasOwnProperty.call(req.body || {}, 'session_id');
+  const hasSessionSecret = Object.prototype.hasOwnProperty.call(req.body || {}, 'session_secret');
+
+  let session_id = null;
+  let session_secret = null;
+
+  if (hasSessionId || hasSessionSecret) {
+    if (!(hasSessionId && hasSessionSecret)) {
+      return res.status(403).json({ error: "session_id and session_secret must be provided together to extend an existing session." });
+    }
+
+    const idValidation = uuidSchema.safeParse(req.body.session_id);
+    const secretValidation = sessionSecretSchema.safeParse(req.body.session_secret);
+    
+    if (!idValidation.success || !secretValidation.success) {
+      return res.status(400).json({ error: "Validation failed for session credentials." });
+    }
+    session_id = idValidation.data;
+    session_secret = secretValidation.data;
   }
   
   // SSRF Protection: Validate URL format, protocol, and hostname.
@@ -1341,7 +1347,7 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-app.use((req, res, next) => {
+app.use((req, res) => {
   res.status(404).json({ error: "Not found" });
 });
 
