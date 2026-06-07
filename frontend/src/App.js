@@ -12,7 +12,7 @@ import toast, { Toaster } from "react-hot-toast";
 import LandingPage from "./components/Landing/LandingPage";
 import SignIn from "./components/Auth/SignIn";
 import SignUp from "./components/Auth/SignUp";
-import { AuthProvider } from "./contexts/AuthContext";
+import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import Dashboard from "./components/Dashboard/Dashboard";
 import StudyHub from "./components/StudyHub/StudyHub";
 
@@ -29,6 +29,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = `${process.env.PUBLIC_URL}/pdf.worker.min.
 const EMPTY_CHAT = [];
 
 function MainApp() {
+  const { user } = useAuth();
   const [pdfs, setPdfs] = useState([]); // {id, name, document_id, url, chat: [], session_id: ""}
   const [selectedPdf, setSelectedPdf] = useState(null);
   const [pdfJumpTarget, setPdfJumpTarget] = useState(null);
@@ -55,7 +56,13 @@ function MainApp() {
   // pdfqa_preferred_mode is a non-sensitive UI preference and intentionally
   // stays in localStorage so the user's chosen reading mode is remembered
   // across sessions.
-  const SESSION_STORAGE_KEY = "pdfqa_sessions";
+  //
+  // The key is scoped to the authenticated user so restoration cannot cross
+  // account boundaries. When no user is signed in, a shared fallback key is
+  // used (no cross-contamination risk since sessionStorage is tab-scoped).
+  const SESSION_STORAGE_KEY = user?.id
+    ? `pdfqa_sessions_${user.id}`
+    : "pdfqa_sessions";
 
   // Encode/decode helpers: credentials are stored as a base64-encoded payload
   // so the raw secret value is never written directly to Web Storage.
@@ -133,7 +140,7 @@ function MainApp() {
     } catch (_) {
       return [];
     }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [SESSION_STORAGE_KEY]);
 
   const upsertKnownSession = React.useCallback(
     (sessionId, sessionSecret) => {
@@ -153,8 +160,9 @@ function MainApp() {
         } catch (_) {}
       }
     },
-    [loadKnownSessions], // eslint-disable-line react-hooks/exhaustive-deps
+    [loadKnownSessions, SESSION_STORAGE_KEY],
   );
+
 
 
   React.useEffect(() => {

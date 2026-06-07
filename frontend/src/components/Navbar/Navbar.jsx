@@ -12,12 +12,11 @@ import LightModeIcon from "@mui/icons-material/LightMode";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../contexts/AuthContext";
-import { supabase } from "../../services/supabaseClient";
 import logo from "./Nav_logo.png";
 
 const Navbar = ({ darkMode, setDarkMode }) => {
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, signOut } = useAuth();
   return (
     <AppBar
       position="static"
@@ -92,7 +91,7 @@ const Navbar = ({ darkMode, setDarkMode }) => {
                 Dashboard
               </button>
               <button 
-                onClick={() => supabase.auth.signOut()}
+                onClick={() => signOut()}
                 style={{
                   background: '#7C4DFF',
                   color: '#fff',
