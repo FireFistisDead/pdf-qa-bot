@@ -660,6 +660,7 @@ const extractServiceDetails = (err, fallbackMessage = "Upstream service request 
 
 const requireInternalRagToken = () => {
   if (!getInternalRagToken()) {
+    console.error("INTERNAL_RAG_TOKEN must be configured for RAG service requests.");
     throw new Error("INTERNAL_RAG_TOKEN must be configured for RAG service requests.");
   }
 };
@@ -993,6 +994,7 @@ const requireSupabaseAuth = (req, res, next) => {
   try {
     req.user = jwt.verify(token, secret);
   } catch (err) {
+    console.error("requireSupabaseAuth JWT verification failed:", err.message, "Secret length:", secret.length);
     return res.status(401).json({ error: "Invalid token" });
   }
 
@@ -1372,6 +1374,7 @@ app.use((err, req, res, next) => {
 if (require.main === module) {
   requireInternalRagToken();
   if (!SUPABASE_JWT_SECRET) {
+    console.error("SUPABASE_JWT_SECRET missing in .env – required for /process-from-url authentication");
     throw new Error("SUPABASE_JWT_SECRET missing in .env – required for /process-from-url authentication");
   }
 

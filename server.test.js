@@ -515,7 +515,7 @@ describe("route error responses", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: "Bearer test-token",
+          Authorization: `Bearer ${jwt.sign({ sub: "test-user" }, process.env.SUPABASE_JWT_SECRET)}`,
         },
         body: JSON.stringify({
           url: "https://xyz.supabase.co//evil.com/file.pdf?download=1",
@@ -558,7 +558,7 @@ describe("route error responses", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: "Bearer test-token",
+          Authorization: `Bearer ${jwt.sign({ sub: "test-user" }, process.env.SUPABASE_JWT_SECRET)}`,
         },
         body: JSON.stringify({
           url: "  https://xyz.supabase.co/storage/v1/object/public/docs/trimmed.pdf  ",
@@ -755,7 +755,7 @@ describe("route error responses", () => {
   test("POST /upload without file returns 400", async () => {
     const res = await fetch(`${baseUrl}/upload`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Connection": "close" },
       body: JSON.stringify({}),
     });
     assert.equal(res.status, 400);
