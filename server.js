@@ -1382,7 +1382,7 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-app.use((req, res, next) => {
+app.use((req, res) => {
   res.status(404).json({ error: "Not found" });
 });
 
@@ -1423,9 +1423,10 @@ if (require.main === module) {
       console.log("[redis] connected");
     }
 
-    const server = app.listen(PORT, () =>
-      console.log(`Backend running on port ${PORT}`)
-    );
+    const server = app.listen(PORT, () => {
+      console.log(`Backend running on port ${PORT}`);
+      startUploadsCleanup();
+    });
 
     // ─── Server-Level Timeouts ───────────────────────────────────────────────
     // Slow-loris and connection-exhaustion attacks open connections and then

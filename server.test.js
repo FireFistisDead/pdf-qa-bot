@@ -46,8 +46,7 @@ let app,
   normalizeHostnameForAllowlist,
   isAllowedSupabaseHostname;
 
-let _credCache,
-  _credKey,
+let _credKey,
   _credCacheHit,
   _credCacheStore,
   _credCacheDrop;
@@ -63,7 +62,6 @@ before(() => {
   askSchema = mod.askSchema;
   summarizeSchema = mod.summarizeSchema;
   extractServiceDetails = mod.extractServiceDetails;
-  _credCache = mod._credCache;
   _credKey = mod._credKey;
   _credCacheHit = mod._credCacheHit;
   _credCacheStore = mod._credCacheStore;
@@ -517,7 +515,7 @@ describe("route error responses", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: "Bearer test-token",
+          Authorization: `Bearer ${jwt.sign({ role: "authenticated" }, process.env.SUPABASE_JWT_SECRET)}`,
         },
         body: JSON.stringify({
           url: "https://xyz.supabase.co//evil.com/file.pdf?download=1",
@@ -560,7 +558,7 @@ describe("route error responses", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: "Bearer test-token",
+          Authorization: `Bearer ${jwt.sign({ role: "authenticated" }, process.env.SUPABASE_JWT_SECRET)}`,
         },
         body: JSON.stringify({
           url: "  https://xyz.supabase.co/storage/v1/object/public/docs/trimmed.pdf  ",
