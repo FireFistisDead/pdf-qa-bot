@@ -32,7 +32,6 @@ from main import (
     require_internal_rag_token_configured,
     normalize_session_id,
     get_session_dir,
-    _extract_pdf_text_worker,
     cleanup_expired_sessions,
     _background_cleanup_loop,
     SESSION_CLEANUP_INTERVAL_MINUTES,
@@ -40,6 +39,7 @@ from main import (
 )
 
 import secrets as _secrets
+from pdf_parse_worker import _extract_pdf_text_worker
 
 
 def is_authorized_session_update(session: dict, provided_secret) -> bool:
