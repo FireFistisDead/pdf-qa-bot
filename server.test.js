@@ -11,7 +11,6 @@ process.env.INTERNAL_RAG_TOKEN = "test-internal-token-for-ci";
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
 let app, askSchema, summarizeSchema, extractServiceDetails, ragAuthHeaders;
-let _credCache, _credKey, _credCacheHit, _credCacheStore, _credCacheDrop;
 let validateAskBody, validateSummarizeBody, MAX_QUESTION_LENGTH;
 let clientIpFromRequest, normalizeIp;
 before(() => {
@@ -21,11 +20,6 @@ before(() => {
   askSchema = mod.askSchema;
   summarizeSchema = mod.summarizeSchema;
   extractServiceDetails = mod.extractServiceDetails;
-  _credCache = mod._credCache;
-  _credKey = mod._credKey;
-  _credCacheHit = mod._credCacheHit;
-  _credCacheStore = mod._credCacheStore;
-  _credCacheDrop = mod._credCacheDrop;
   validateAskBody = mod.validateAskBody;
   validateSummarizeBody = mod.validateSummarizeBody;
   MAX_QUESTION_LENGTH = mod.MAX_QUESTION_LENGTH;

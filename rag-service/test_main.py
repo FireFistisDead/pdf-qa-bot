@@ -32,12 +32,13 @@ from main import (
     require_internal_rag_token_configured,
     normalize_session_id,
     get_session_dir,
-    _extract_pdf_text_worker,
     cleanup_expired_sessions,
     _background_cleanup_loop,
     SESSION_CLEANUP_INTERVAL_MINUTES,
     _hash_secret,
 )
+
+from pdf_parse_worker import _extract_pdf_text_worker
 
 import secrets as _secrets
 

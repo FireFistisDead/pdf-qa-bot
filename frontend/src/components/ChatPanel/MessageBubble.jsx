@@ -60,11 +60,24 @@ const MessageBubble = ({
   registerMessageRef,
 }) => {
   const [copied, setCopied] = React.useState(false);
+  const copyTimeoutRef = React.useRef(null);
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(msg.text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  React.useEffect(() => {
+    return () => {
+      if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
+    };
+  }, []);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(msg.text);
+      setCopied(true);
+      if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
+      copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error("Failed to copy text: ", err);
+      setCopied(false);
+    }
   };
 
   const getSourceLabel = (source) => source.document || "Source Document";
