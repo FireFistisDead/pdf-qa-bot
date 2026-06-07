@@ -591,7 +591,7 @@ describe("route error responses", () => {
   test("POST /summarize with missing session_id returns 400", async () => {
     const res = await fetch(`${baseUrl}/summarize`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Connection": "close" },
       body: JSON.stringify({ session_id: "" }),
     });
     assert.equal(res.status, 400);

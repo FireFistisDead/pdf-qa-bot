@@ -994,7 +994,7 @@ const requireSupabaseAuth = (req, res, next) => {
   try {
     req.user = jwt.verify(token, secret);
   } catch (err) {
-    console.error("requireSupabaseAuth JWT verification failed:", err.message, "Secret length:", secret.length);
+    console.error("requireSupabaseAuth JWT verification failed:", err.message);
     return res.status(401).json({ error: "Invalid token" });
   }
 
