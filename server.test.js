@@ -502,14 +502,15 @@ describe("route error responses", () => {
       requestedDownloadUrl = url;
       return { data: Readable.from(Buffer.from("%PDF-1.4\n%%EOF")) };
     };
-    axios.postForm = async () => ({
-      data: {
+    axios.postForm = async (_url, formData) => {
+      await consumeUploadStream(formData);
+      return { data: {
         session_id: "550e8400-e29b-41d4-a716-446655440000",
         session_secret: "session-secret-123",
         document: { filename: "safe.pdf" },
         documents: [],
-      },
-    });
+      }};
+    };
 
     try {
       const res = await fetch(`${baseUrl}/process-from-url`, {
@@ -545,14 +546,15 @@ describe("route error responses", () => {
       requestedDownloadUrl = url;
       return { data: Readable.from(Buffer.from("%PDF-1.4\n%%EOF")) };
     };
-    axios.postForm = async () => ({
-      data: {
+    axios.postForm = async (_url, formData) => {
+      await consumeUploadStream(formData);
+      return { data: {
         session_id: "550e8400-e29b-41d4-a716-446655440000",
         session_secret: "session-secret-123",
         document: { filename: "trimmed.pdf" },
         documents: [],
-      },
-    });
+      }};
+    };
 
     try {
       const res = await fetch(`${baseUrl}/process-from-url`, {
