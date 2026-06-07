@@ -22,6 +22,9 @@ jobs:
       - name: Install backend dependencies
         run: npm ci
 
+      - name: Lint backend code
+        run: npx eslint . --ext .js
+
       - name: Run backend tests
         run: npm test
 
@@ -49,7 +52,13 @@ jobs:
         run: |
           cd rag-service
           pip install -r requirements.txt
-          pip install pytest
+          pip install pytest flake8
+
+      - name: Lint Python code
+        run: |
+          cd rag-service
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
       - name: Run RAG tests
         run: |
@@ -73,6 +82,11 @@ jobs:
         run: |
           cd frontend
           npm ci
+
+      - name: Lint frontend code
+        run: |
+          cd frontend
+          npx eslint src/ --ext .js,.jsx
 
       - name: Build frontend
         run: |

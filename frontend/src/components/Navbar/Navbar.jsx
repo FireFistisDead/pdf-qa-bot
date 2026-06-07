@@ -35,17 +35,21 @@ const Navbar = ({ darkMode, setDarkMode }) => {
         
         <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
           
-          <Avatar
-            src={logo}
-            alt="Logo"
+          <IconButton 
             onClick={() => navigate('/')}
-            sx={{
-              width: 48,
-              height: 48,
-              bgcolor: "transparent",
-              cursor: "pointer",
-            }}
-          />
+            sx={{ p: 0 }}
+            aria-label="Go to home"
+          >
+            <Avatar
+              src={logo}
+              alt="Logo"
+              sx={{
+                width: 48,
+                height: 48,
+                bgcolor: "transparent",
+              }}
+            />
+          </IconButton>
 
           <Box>
             <Typography
@@ -104,6 +108,7 @@ const Navbar = ({ darkMode, setDarkMode }) => {
                   cursor: 'pointer',
                 }}
                 title="Sign Out"
+                aria-label="Sign Out"
               >
                 {user.email ? user.email.charAt(0).toUpperCase() : 'U'}
               </button>
@@ -144,6 +149,7 @@ const Navbar = ({ darkMode, setDarkMode }) => {
 
           <IconButton
             onClick={() => setDarkMode(!darkMode)}
+            aria-label="Toggle dark mode"
             sx={{
               color: darkMode ? "#fff" : "#111",
               border: darkMode
