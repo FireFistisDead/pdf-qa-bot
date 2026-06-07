@@ -61,16 +61,19 @@ const HowItWorks = () => {
       </div>
       
       <div className="carousel-wrapper">
-        <button className="nav-btn nav-left" onClick={prevSlide}>
+        <button className="nav-btn nav-left" onClick={prevSlide} aria-label="Previous slide">
           <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6"/></svg>
         </button>
 
         <div className="carousel-3d-container">
           {slides.map((slide, index) => (
-            <div 
+            <button 
+              type="button"
               key={slide.id} 
               className={`carousel-3d-slide ${getSlideClass(index)}`}
+              style={{ background: 'transparent', border: 'none', padding: 0, textAlign: 'left', cursor: 'pointer', display: 'block' }}
               onClick={() => setActive(index)}
+              aria-label={`${slide.title} slide`}
             >
               <div className="slide-content-3d glass-panel">
                 <div className="slide-number-bg">{slide.id}</div>
@@ -128,20 +131,23 @@ const HowItWorks = () => {
                   </div>
                 </div>
               </div>
-            </div>
+            </button>
           ))}
         </div>
 
-        <button className="nav-btn nav-right" onClick={nextSlide}>
+        <button className="nav-btn nav-right" onClick={nextSlide} aria-label="Next slide">
           <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
         </button>
       </div>
 
       <div className="carousel-progress">
         {slides.map((_, i) => (
-          <span 
+          <button 
+            type="button"
             key={i} 
+            aria-label={`Slide ${i + 1}`}
             className={`progress-dot ${i === active ? 'active' : ''}`}
+            style={{ background: 'transparent', border: 'none', padding: 0, cursor: 'pointer' }}
             onClick={() => setActive(i)}
           />
         ))}

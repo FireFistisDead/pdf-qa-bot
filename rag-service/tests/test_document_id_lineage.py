@@ -87,13 +87,13 @@ class _FakeVectorstore:
         return None
 
 
-class TestDocumentIdLineage(unittest.TestCase):
+class TestDocumentIdLineage(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         main.sessions.clear()
         main.processing_progress.clear()
 
     @patch.object(main, "cleanup_expired_sessions", lambda: None)
-    def test_process_pdf_uses_single_document_id_for_chunks_and_session_record(self):
+    async def test_process_pdf_uses_single_document_id_for_chunks_and_session_record(self):
         # Stub "extracted" PDF pages
         stub_pages = [
             SimpleNamespace(page_content="hello world", metadata={"page": 0}),
@@ -113,7 +113,7 @@ class TestDocumentIdLineage(unittest.TestCase):
                 )
             ]
 
-        with patch.object(main, "extract_pdf_documents_sandboxed", return_value=stub_pages), \
+        with patch.object(main, "load_pdf_documents_async", return_value=stub_pages), \
              patch.object(main, "semantic_chunk", side_effect=fake_semantic_chunk), \
              patch.object(main, "get_embedding_model", return_value=object()), \
              patch.object(main, "persist_vectorstore", return_value="test-session-dir"), \
@@ -122,7 +122,7 @@ class TestDocumentIdLineage(unittest.TestCase):
              patch.object(main.FAISS, "from_documents", side_effect=lambda docs, _emb: _FakeVectorstore(docs)):
 
             upload = _DummyUploadFile("sample.pdf", b"%PDF-1.4\\n%stub\\n")
-            result = main.process_pdf(file=upload, original_filename="sample.pdf", session_id=None, session_secret=None)
+            result = await main.process_pdf(file=upload, original_filename="sample.pdf", session_id=None, session_secret=None)
 
         uploaded_document = result["document"]
         session_id = result["session_id"]

@@ -7,10 +7,23 @@ const fs = require("fs");
 const fsPromises = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
+const { domainToASCII } = require("url");
 const { rateLimit } = require("express-rate-limit");
 const slowDown = require("express-slow-down");
 const helmet = require("helmet");
-const { askSchema, summarizeSchema, knowledgeGapsSchema, sessionsLookupSchema, uuidSchema, sessionSecretSchema } = require("./validators/schemas");
+const jwt = require("jsonwebtoken");
+const {
+  askSchema,
+  askCredentialSchema,
+  askPayloadSchema,
+  summarizeSchema,
+  summarizeCredentialSchema,
+  sessionsLookupSchema,
+  knowledgeGapsSchema,
+  MAX_QUESTION_LENGTH,
+  uuidSchema,
+  sessionSecretSchema
+} = require("./validators/schemas");
 const { clientIpFromRequest } = require("./security/ip");
 const { createRedisClient } = require("./security/redis");
 const authRoutes = require("./src/routes/authRoutes");
@@ -18,6 +31,106 @@ const authRoutes = require("./src/routes/authRoutes");
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
 const getInternalRagToken = () => (process.env.INTERNAL_RAG_TOKEN || "").trim();
 const PORT = process.env.PORT || 4000;
+const SUPABASE_JWT_SECRET = (process.env.SUPABASE_JWT_SECRET || "").trim();
+
+// ─── Credential Validation Cache ─────────────────────────────────────────────
+// session_id and session_secret are structurally identical on every request
+// within a session (same UUID, same secret).  Re-running the full Zod parse
+// for every /ask and /summarize call under Socratic/Tutor mode burns event-loop
+// time on checks that cannot possibly fail for an already-validated credential.
+//
+// The cache is keyed on HMAC-SHA256(session_id:session_secret)[0:16] so the
+// actual secret is never stored.  TTL matches SESSION_TTL_MINUTES so entries
+// expire when the RAG session would have expired anyway.  The map is bounded at
+// CRED_CACHE_MAX entries; when full the oldest entry (insertion order) is evicted.
+const _SESSION_TTL_MS =
+  parseInt(process.env.SESSION_TTL_MINUTES || "43200", 10) * 60 * 1000;
+const _CRED_CACHE_MAX = parseInt(process.env.CRED_CACHE_MAX_SIZE || "1000", 10);
+
+const _credCache = new Map(); // key → { validatedAt: number }
+
+const _hmacKey = crypto
+  .createHash("sha256")
+  .update("pdf-qa-cred-cache")
+  .digest();
+
+function _credKey(sessionId, sessionSecret) {
+  return crypto
+    .createHmac("sha256", _hmacKey)
+    .update(`${sessionId}:${sessionSecret}`)
+    .digest("hex")
+    .slice(0, 16);
+}
+
+function _credCacheHit(sessionId, sessionSecret) {
+  const k = _credKey(sessionId, sessionSecret);
+  const entry = _credCache.get(k);
+  if (!entry) return false;
+  if (Date.now() - entry.validatedAt > _SESSION_TTL_MS) {
+    _credCache.delete(k);
+    return false;
+  }
+  return true;
+}
+
+function _credCacheStore(sessionId, sessionSecret) {
+  const k = _credKey(sessionId, sessionSecret);
+  if (_credCache.size >= _CRED_CACHE_MAX) {
+    _credCache.delete(_credCache.keys().next().value); // evict oldest (FIFO)
+  }
+  _credCache.set(k, { validatedAt: Date.now() });
+}
+
+function _credCacheDrop(sessionId, sessionSecret) {
+  _credCache.delete(_credKey(sessionId, sessionSecret));
+}
+
+// Validate /ask body: always parse payload fields (question, mode change per
+// request); short-circuit credential fields on cache hit.
+function validateAskBody(body) {
+  const rawId = typeof body?.session_id === "string" ? body.session_id : "";
+  const rawSecret =
+    typeof body?.session_secret === "string" ? body.session_secret : "";
+
+  const payloadResult = askPayloadSchema.safeParse(body);
+  if (!payloadResult.success) {
+    return { success: false, error: payloadResult.error };
+  }
+
+  if (_credCacheHit(rawId, rawSecret)) {
+    return {
+      success: true,
+      data: { ...payloadResult.data, session_id: rawId, session_secret: rawSecret },
+    };
+  }
+
+  const credResult = askCredentialSchema.safeParse(body);
+  if (!credResult.success) {
+    return { success: false, error: credResult.error };
+  }
+
+  _credCacheStore(rawId, rawSecret);
+  return { success: true, data: { ...payloadResult.data, ...credResult.data } };
+}
+
+// Validate /summarize body: only credential fields; short-circuit on cache hit.
+function validateSummarizeBody(body) {
+  const rawId = typeof body?.session_id === "string" ? body.session_id : "";
+  const rawSecret =
+    typeof body?.session_secret === "string" ? body.session_secret : "";
+
+  if (_credCacheHit(rawId, rawSecret)) {
+    return { success: true, data: { session_id: rawId, session_secret: rawSecret } };
+  }
+
+  const result = summarizeCredentialSchema.safeParse(body);
+  if (!result.success) {
+    return { success: false, error: result.error };
+  }
+
+  _credCacheStore(rawId, rawSecret);
+  return { success: true, data: result.data };
+}
 
 const app = express();
 
@@ -560,8 +673,61 @@ const ragAuthHeaders = () => {
   return { "X-Internal-Token": token };
 };
 
+// When the RAG service is still loading models it returns 503 with a
+// Retry-After header.  Forward both the status code and the header to the
+// client so it knows how long to wait before retrying rather than receiving
+// a generic 500 with no guidance.
+const propagateRagError = (err, res, fallback) => {
+  const status = err.response?.status || 500;
+  const detail = extractServiceDetails(err, fallback);
+  if (status === 503) {
+    const retryAfter = err.response?.headers?.["retry-after"] || "30";
+    res.set("Retry-After", String(retryAfter));
+  }
+  return res.status(status).json({
+    error: typeof detail === "string" ? detail : fallback,
+    details: isDevelopment ? detail : "Internal processing error",
+  });
+};
+
 const normalizeSessionSecret = (value) =>
   typeof value === "string" ? value.trim() || null : null;
+
+const SUPABASE_ALLOWED_HOST_SUFFIXES = new Set(["supabase.co", "supabase.in"]);
+
+const normalizeHostnameForAllowlist = (hostname) => {
+  if (typeof hostname !== "string") return null;
+
+  const normalizedHostname = hostname.trim().toLowerCase().replace(/\.+$/, "");
+  if (!normalizedHostname) return null;
+
+  const asciiHostname = domainToASCII(normalizedHostname);
+  if (!asciiHostname) return null;
+
+  return asciiHostname.toLowerCase().replace(/\.+$/, "");
+};
+
+const isAllowedSupabaseHostname = (hostname) => {
+  const normalizedHostname = normalizeHostnameForAllowlist(hostname);
+  if (!normalizedHostname) return false;
+
+  const hostnameLabels = normalizedHostname.split(".");
+  return Array.from(SUPABASE_ALLOWED_HOST_SUFFIXES).some((suffix) => {
+    const suffixLabels = suffix.split(".");
+    if (hostnameLabels.length < suffixLabels.length + 1) return false;
+
+    return hostnameLabels.slice(-suffixLabels.length).join(".") === suffix;
+  });
+};
+
+const getTrustedSupabaseOrigin = (hostname) => {
+  const normalizedHostname = normalizeHostnameForAllowlist(hostname);
+  if (!normalizedHostname) return null;
+
+  if (!isAllowedSupabaseHostname(normalizedHostname)) return null;
+
+  return `https://${normalizedHostname}`;
+};
 
 // ─── Multer Error Handler ───────────────────────────────────────────────────────
 // Catches file size violations (413 Payload Too Large) and other multer errors.
@@ -833,20 +999,18 @@ const requireSupabaseAuth = (req, res, next) => {
   }
   
   const token = authHeader.split(" ")[1];
-  const secret = process.env.SUPABASE_JWT_SECRET;
-  
-  // If the server admin hasn't configured the JWT secret, we at least enforce 
-  // that a token is provided (to satisfy basic security checks), but we can't 
-  // cryptographically verify it without the secret.
-  if (secret) {
-    const jwt = require("jsonwebtoken");
-    try {
-      req.user = jwt.verify(token, secret);
-    } catch (err) {
-      return res.status(401).json({ error: "Invalid token" });
-    }
+  const secret = SUPABASE_JWT_SECRET;
+
+  if (!secret) {
+    return res.status(500).json({ error: "Server misconfiguration: missing SUPABASE_JWT_SECRET" });
   }
-  
+
+  try {
+    req.user = jwt.verify(token, secret);
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+
   next();
 };
 
@@ -881,10 +1045,10 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
     session_secret = secretValidation.data;
   }
   
-  // SSRF Protection: Validate URL format, protocol, and hostname
+  // SSRF Protection: Validate URL format, protocol, and hostname.
   let parsedUrl;
   try {
-    parsedUrl = new URL(url);
+    parsedUrl = new URL(url.trim());
   } catch (err) {
     return res.status(400).json({ error: "Invalid URL format." });
   }
@@ -893,10 +1057,8 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
     return res.status(400).json({ error: "Only HTTPS URLs are allowed." });
   }
 
-  const allowedHosts = [".supabase.co", ".supabase.in"];
-  const isAllowedHost = allowedHosts.some(host => parsedUrl.hostname.endsWith(host));
-  
-  if (!isAllowedHost) {
+  const trustedSupabaseOrigin = getTrustedSupabaseOrigin(parsedUrl.hostname);
+  if (!trustedSupabaseOrigin) {
     return res.status(403).json({ error: "URL host is not allowed." });
   }
 
@@ -914,7 +1076,11 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
     // Download the PDF from the remote URL into a Buffer
     let pdfBuffer;
     try {
-      const dlResponse = await axios.get(url, {
+      const downloadUrl = new URL(trustedSupabaseOrigin);
+      downloadUrl.pathname = parsedUrl.pathname;
+      downloadUrl.search = parsedUrl.search;
+
+      const dlResponse = await axios.get(downloadUrl.toString(), {
         responseType: "arraybuffer",
         timeout: 30000,
         maxContentLength: 50 * 1024 * 1024, // 50 MB cap
@@ -975,7 +1141,7 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
 });
 
 app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
-  const validation = askSchema.safeParse(req.body);
+  const validation = validateAskBody(req.body);
 
   if (!validation.success) {
     return res.status(400).json({
@@ -996,7 +1162,7 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
         session_secret,
         mode,
       },
-      { headers: ragAuthHeaders() },
+      { headers: ragAuthHeaders(), timeout: 30000 },
     );
 
     return res.json({
@@ -1005,18 +1171,12 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
       mode: response.data.mode ?? "default",
     });
   } catch (err) {
-    const statusCode = err.response?.status || 500;
-    const details = extractServiceDetails(err, "Error answering question");
-    console.error("Question answering failed:", details);
-
-    return res.status(statusCode).json({
-      error: typeof details === "string" ? details : "Error answering question",
-      details: isDevelopment ? details : "Internal processing error",
-    });
+    console.error("Question answering failed:", extractServiceDetails(err, "Error answering question"));
+    return propagateRagError(err, res, "Error answering question");
   }
 });
 app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) => {
-  const validation = askSchema.safeParse(req.body);
+  const validation = validateAskBody(req.body);
 
   if (!validation.success) {
     return res.status(400).json({
@@ -1027,47 +1187,107 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
 
   const { question, session_id, mode } = validation.data;
   const session_secret = validation.data.session_secret;
+  const upstreamAbort = new AbortController();
+  let upstreamStream = null;
+  let cleanedUp = false;
+
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    upstreamAbort.abort();
+    if (upstreamStream && typeof upstreamStream.destroy === "function") {
+      upstreamStream.destroy();
+    }
+  };
 
   try {
     const ragResponse = await axios.post(
       `${RAG_SERVICE_URL}/ask/stream`,
       { question, session_id, session_secret, mode },
-      {
-        headers: ragAuthHeaders(),
-        responseType: "stream",
-        timeout: 120000,
-      }
+{
+  headers: ragAuthHeaders(),
+  responseType: "stream",
+  timeout: 120000,
+  signal: upstreamAbort.signal,
+}
     );
 
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    upstreamStream = ragResponse.data;
+
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Transfer-Encoding", "chunked");
     res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
     res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders();
+
+    req.on("close", cleanup);
+    res.on("close", cleanup);
 
     ragResponse.data.pipe(res);
 
     ragResponse.data.on("error", (err) => {
+      // Ensure we always clean up the upstream stream/abort state so the
+      // upstream request is destroyed promptly and background resources
+      // are released even when headers have already been sent.
+      try {
+        cleanup();
+      } catch (cleanupErr) {
+        // Ignore cleanup errors; still proceed to notify the client.
+      }
+
+      if (upstreamAbort.signal.aborted || req.aborted) {
+        return;
+      }
+
       console.error("Stream error from RAG service:", err.message);
       if (!res.headersSent) {
         res.status(502).json({ error: "Streaming response failed." });
       } else {
+        res.write("event: error\ndata: Streaming response failed.\n\n");
+        // End the response after signalling the error to the client.
         res.end();
       }
     });
+
+    ragResponse.data.on("end", cleanup);
   } catch (err) {
-    const statusCode = err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
-    const details = extractServiceDetails(err, "Error answering question");
-    console.error("Streaming question answering failed:", details);
-    return res.status(statusCode).json({
-      error: typeof details === "string" ? details : "Error answering question",
-      details: isDevelopment ? details : "Internal processing error",
-    });
+if (
+  upstreamAbort.signal.aborted ||
+  req.aborted ||
+  err.code === "ERR_CANCELED" ||
+  err.name === "CanceledError"
+) {
+  return;
+}
+
+const statusCode =
+  err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
+
+const details = extractServiceDetails(
+  err,
+  "Error answering question"
+);
+
+console.error(
+  "Streaming question answering failed:",
+  details
+);
+
+return res.status(statusCode).json({
+  error:
+    typeof details === "string"
+      ? details
+      : "Error answering question",
+  details: isDevelopment
+    ? details
+    : "Internal processing error",
+});
   }
 });
 
 app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => {
-  const validation = summarizeSchema.safeParse(req.body);
+  const validation = validateSummarizeBody(req.body);
 
   if (!validation.success) {
     return res.status(400).json({
@@ -1085,14 +1305,8 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
       summary: response.data.summary,
     });
   } catch (err) {
-    const statusCode = err.response?.status || 500;
-    const details = extractServiceDetails(err, "Error summarizing PDF");
-    console.error("Summarization failed:", details);
-
-    return res.status(statusCode).json({
-      error: typeof details === "string" ? details : "Error summarizing PDF",
-      details: isDevelopment ? details : "Internal processing error",
-    });
+    console.error("Summarization failed:", extractServiceDetails(err, "Error summarizing PDF"));
+    return propagateRagError(err, res, "Error summarizing PDF");
   }
 });
 
@@ -1192,6 +1406,9 @@ app.use((err, req, res, next) => {
 
 if (require.main === module) {
   requireInternalRagToken();
+  if (!SUPABASE_JWT_SECRET) {
+    throw new Error("SUPABASE_JWT_SECRET missing in .env – required for /process-from-url authentication");
+  }
 
   (async () => {
     requireInternalRagToken();
@@ -1223,6 +1440,17 @@ module.exports = {
   askSchema,
   summarizeSchema,
   extractServiceDetails,
+  // Exported for tests — verify cache behaviour without going through routes.
+  _credCache,
+  _credKey,
+  _credCacheHit,
+  _credCacheStore,
+  _credCacheDrop,
+  validateAskBody,
+  validateSummarizeBody,
+  MAX_QUESTION_LENGTH,
   ragAuthHeaders,
   requireInternalRagToken,
+  normalizeHostnameForAllowlist,
+  isAllowedSupabaseHostname,
 };
