@@ -113,7 +113,7 @@ function MainApp() {
 
   const loadKnownSessions = React.useCallback(() => {
     try {
-      const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
+      const raw = localStorage.getItem(SESSION_STORAGE_KEY);
       if (!raw) return [];
       const parsed = decodePayload(raw);
       if (!Array.isArray(parsed)) return [];
@@ -145,55 +145,17 @@ function MainApp() {
         ...existing.filter((s) => s.session_id !== sessionId.trim()),
       ];
       try {
-        sessionStorage.setItem(SESSION_STORAGE_KEY, encodePayload(next.slice(0, 50)));
+        localStorage.setItem(SESSION_STORAGE_KEY, encodePayload(next.slice(0, 50)));
       } catch (_) {
         // sessionStorage quota exceeded — prune to 10 most recent and retry once.
         try {
-          sessionStorage.setItem(SESSION_STORAGE_KEY, encodePayload(next.slice(0, 10)));
+          localStorage.setItem(SESSION_STORAGE_KEY, encodePayload(next.slice(0, 10)));
         } catch (_) {}
       }
     },
     [loadKnownSessions], // eslint-disable-line react-hooks/exhaustive-deps
   );
 
-  // One-time migration: if credentials were previously stored in localStorage
-  // under the same key (pre-fix behaviour), move them to sessionStorage and
-  // then delete them from localStorage so they are no longer readable by
-  // JavaScript after the next reload.
-  React.useEffect(() => {
-    try {
-      const legacy = localStorage.getItem(SESSION_STORAGE_KEY);
-      if (!legacy) return;
-      // Legacy format was plain JSON; try both plain and base64.
-      let parsed;
-      try { parsed = JSON.parse(legacy); } catch (_) { parsed = decodePayload(legacy); }
-      if (!Array.isArray(parsed) || parsed.length === 0) {
-        localStorage.removeItem(SESSION_STORAGE_KEY);
-        return;
-      }
-      const valid = parsed.filter(
-        (s) =>
-          s &&
-          typeof s.session_id === "string" &&
-          s.session_id.trim() !== "" &&
-          typeof s.session_secret === "string" &&
-          s.session_secret.trim() !== "",
-      );
-      if (valid.length > 0) {
-        const existing = loadKnownSessions();
-        const existingIds = new Set(existing.map((s) => s.session_id));
-        const merged = [
-          ...existing,
-          ...valid.filter((s) => !existingIds.has(s.session_id.trim())),
-        ].slice(0, 50);
-        sessionStorage.setItem(SESSION_STORAGE_KEY, encodePayload(merged));
-      }
-      localStorage.removeItem(SESSION_STORAGE_KEY);
-    } catch (_) {
-      try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (_) {}
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   React.useEffect(() => {
     // Load historical sessions on initial mount
@@ -318,6 +280,8 @@ function MainApp() {
           "Network error. Please check if the backend server is running.";
       } else if (e.response?.status === 413) {
         message = "File too large. Please choose a file under 20MB.";
+        } else if (e.response?.status === 415) {
+        message = "Invalid file type. Only PDF files are supported. Please upload a valid .pdf file.";
       } else if (e.response?.status === 500) {
         message = "Server error. Please try again later.";
       } else {
@@ -597,23 +561,6 @@ const handleOpenSource = (source) => {
 
   return (
     <>
-      <Toaster
-        position="top-right"
-        toastOptions={{
-          duration: 3500,
-          style: {
-            background: "#111827",
-            color: "#fff",
-            border: "1px solid rgba(255,255,255,0.08)",
-            borderRadius: "16px",
-            padding: "14px 16px",
-            backdropFilter: "blur(12px)",
-            boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
-          },
-          success: { iconTheme: { primary: "#8B5CF6", secondary: "#fff" } },
-          error: { iconTheme: { primary: "#EF4444", secondary: "#fff" } },
-        }}
-      />
       <div
         className={themeClass}
         style={{ minHeight: "100vh", transition: "background 0.3s" }}
@@ -755,18 +702,37 @@ const handleOpenSource = (source) => {
 
 function App() {
   return (
-    <AuthProvider>
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<LandingPage />} />
-          <Route path="/workspace" element={<MainApp />} />
-          <Route path="/signin" element={<SignIn />} />
-          <Route path="/signup" element={<SignUp />} />
-          <Route path="/dashboard/*" element={<Dashboard />} />
-          <Route path="/studyhub" element={<StudyHub />} />
-        </Routes>
-      </BrowserRouter>
-    </AuthProvider>
+    <>
+      <Toaster
+        position="top-right"
+        toastOptions={{
+          duration: 3500,
+          style: {
+            background: "#111827",
+            color: "#fff",
+            border: "1px solid rgba(255,255,255,0.08)",
+            borderRadius: "16px",
+            padding: "14px 16px",
+            backdropFilter: "blur(12px)",
+            boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
+          },
+          success: { iconTheme: { primary: "#8B5CF6", secondary: "#fff" } },
+          error: { iconTheme: { primary: "#EF4444", secondary: "#fff" } },
+        }}
+      />
+      <AuthProvider>
+        <BrowserRouter>
+          <Routes>
+            <Route path="/" element={<LandingPage />} />
+            <Route path="/workspace" element={<MainApp />} />
+            <Route path="/signin" element={<SignIn />} />
+            <Route path="/signup" element={<SignUp />} />
+            <Route path="/dashboard/*" element={<Dashboard />} />
+            <Route path="/studyhub" element={<StudyHub />} />
+          </Routes>
+        </BrowserRouter>
+      </AuthProvider>
+    </>
   );
 }
 
