@@ -46,8 +46,7 @@ let app,
   normalizeHostnameForAllowlist,
   isAllowedSupabaseHostname;
 
-let _credCache,
-  _credKey,
+let _credKey,
   _credCacheHit,
   _credCacheStore,
   _credCacheDrop;
@@ -63,7 +62,7 @@ before(() => {
   askSchema = mod.askSchema;
   summarizeSchema = mod.summarizeSchema;
   extractServiceDetails = mod.extractServiceDetails;
-  _credCache = mod._credCache;
+
   _credKey = mod._credKey;
   _credCacheHit = mod._credCacheHit;
   _credCacheStore = mod._credCacheStore;
@@ -796,7 +795,7 @@ describe("route error responses", () => {
 
       assert.equal(res.status, 403);
       const data = await res.json();
-      assert.equal(data.error, "session_secret is required to extend an existing session.");
+      assert.equal(data.error, "session_id and session_secret must be provided together to extend an existing session.");
       assert.equal(validationCalled, false);
       assert.equal(forwarded, false);
     } finally {

@@ -523,40 +523,8 @@ if (!fs.existsSync(UPLOADS_DIR)) {
 // accessed only through the authenticated /pdf/:filename route (if re-introduced
 // in future) or via the in-browser blob URL created by URL.createObjectURL on
 // the frontend.
-const FILE_RETENTION_MS = parseInt(process.env.FILE_RETENTION_MS || "3600000", 10);
-const CLEANUP_INTERVAL_MS = parseInt(process.env.CLEANUP_INTERVAL_MS || "3600000", 10);
 
-const startUploadsCleanup = () => {
-  const intervalId = setInterval(async () => {
-    try {
-      const files = await fsPromises.readdir(UPLOADS_DIR);
-      const now = Date.now();
-      for (const file of files) {
-        if (file === ".gitkeep") continue;
-        const filePath = path.join(UPLOADS_DIR, file);
-        try {
-          const stats = await fsPromises.stat(filePath);
-          if (now - stats.birthtimeMs > FILE_RETENTION_MS) {
-            await fsPromises.unlink(filePath);
-            if (isDevelopment) {
-              console.log(`[cleanup] safety-net deleted orphaned file: ${path.basename(filePath)}`);
-            }
-          }
-        } catch (err) {
-          if (err.code !== "ENOENT") {
-            console.error(`[cleanup] failed to remove ${path.basename(filePath)}:`, err.message);
-          }
-        }
-      }
-    } catch (err) {
-      console.error("[cleanup] failed to read uploads directory:", err.message);
-    }
-  }, CLEANUP_INTERVAL_MS);
 
-  if (typeof intervalId.unref === "function") {
-    intervalId.unref();
-  }
-};
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -690,8 +658,7 @@ const propagateRagError = (err, res, fallback) => {
   });
 };
 
-const normalizeSessionSecret = (value) =>
-  typeof value === "string" ? value.trim() || null : null;
+
 
 const SUPABASE_ALLOWED_HOST_SUFFIXES = new Set(["supabase.co", "supabase.in"]);
 
@@ -846,6 +813,8 @@ app.post(
   const hasSessionId = Object.prototype.hasOwnProperty.call(req.body || {}, 'session_id');
   const hasSessionSecret = Object.prototype.hasOwnProperty.call(req.body || {}, 'session_secret');
   
+  let sessionId = null;
+  let sessionSecret = null;
   if (hasSessionId || hasSessionSecret) {
     if (!(hasSessionId && hasSessionSecret)) {
       if (uploadedFilePath) await cleanupFile(uploadedFilePath);
@@ -1018,7 +987,7 @@ const requireSupabaseAuth = (req, res, next) => {
 // streams it to the RAG service for text extraction + FAISS indexing,
 // and returns the session_id + session_secret needed for /ask/stream.
 app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, res) => {
-  const { url, filename, session_id: rawSessionId, session_secret: rawSessionSecret } = req.body || {};
+  const { url, filename } = req.body || {};
 
   if (!url || typeof url !== "string") {
     return res.status(400).json({ error: "Missing or invalid 'url' field." });
@@ -1378,7 +1347,7 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-app.use((req, res, next) => {
+app.use((req, res) => {
   res.status(404).json({ error: "Not found" });
 });
 
