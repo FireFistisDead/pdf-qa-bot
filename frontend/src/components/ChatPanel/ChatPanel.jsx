@@ -55,8 +55,9 @@ const ChatPanel = ({
       behavior: "smooth",
     });
   }, [currentChat, asking]);
-const askQuestion = async () => {
-  if (!question.trim()) {
+const askQuestion = async (overrideQuestion = null) => {
+  const queryToAsk = typeof overrideQuestion === 'string' ? overrideQuestion : question;
+  if (!queryToAsk.trim()) {
     toast.error("Please enter a question before submitting.");
     return;
   }
@@ -65,9 +66,11 @@ const askQuestion = async () => {
     return;
   }
 
-  const trimmedQuestion = question;
+  const trimmedQuestion = queryToAsk.trim();
   setAsking(true);
-  setQuestion("");
+  if (typeof overrideQuestion !== 'string') {
+    setQuestion("");
+  }
   onAppendMessage({ role: "user", text: trimmedQuestion });
   onAppendMessage({ role: "bot", text: "", question: trimmedQuestion, streaming: true, sources: [], mode });
 
@@ -340,6 +343,7 @@ const askQuestion = async () => {
                     onToggleBookmark={onToggleBookmark}
                     highlighted={highlightedMessageId === messageId}
                     registerMessageRef={(node) => onRegisterMessageRef?.(messageId, node)}
+                    onOptionClick={(opt) => askQuestion(opt)}
                   />
                 );
               })}

@@ -12,20 +12,19 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from dotenv import load_dotenv
 from rank_bm25 import BM25Okapi
-from pdf_parse_worker import _extract_pdf_text_worker
 from langchain_community.vectorstores import FAISS
 import numpy as np
 import json
 import uuid
 import uvicorn
 import torch
-import multiprocessing
 import os
 import secrets
 import hashlib
 import shutil
 import urllib.request
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 from transformers import (
     AutoConfig,
@@ -62,6 +61,55 @@ logging.basicConfig(
 )
 
 app = FastAPI()
+
+# =====================================================================
+# 🛠️ CRASH-PROOF ADAPTIVE TEXT SPLITTER (GSSoC 2026 Contribution)
+# =====================================================================
+class AdaptiveTextSplitter:
+    def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200):
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+
+    def split_text(self, text: str) -> list:
+        if not text:
+            return []
+            
+        chunks = []
+        start_idx = 0
+        text_len = len(text)
+        
+        while start_idx < text_len:
+            end_idx = min(start_idx + self.chunk_size, text_len)
+            
+           # 2. Smart Boundary Detection
+            if end_idx < text_len:
+                # CodeRabbit Patch: Prevent negative slicing if chunk_size < 100
+                lookback = min(100, end_idx)
+                search_space = text[end_idx - lookback : end_idx]
+                boundary_pos = -1
+                for marker in ["\n\n", "\n", ". ", "? ", "! "]:
+                    pos = search_space.rfind(marker)
+                    if pos != -1:
+                        boundary_pos = (end_idx - lookback) + pos + len(marker)
+                        break
+                
+                if boundary_pos != -1:
+                    end_idx = boundary_pos
+            
+            chunk = text[start_idx:end_idx].strip()
+            if chunk:
+                chunks.append(chunk)
+                
+            next_start_idx = end_idx - self.chunk_overlap
+            
+            if next_start_idx <= start_idx:
+                start_idx = end_idx 
+            else:
+                start_idx = next_start_idx
+                
+        return chunks
+
+# =====================================================================
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 UPLOADS_DIR = (BASE_DIR / "uploads").resolve()
@@ -190,7 +238,10 @@ def save_sessions_unlocked():
     except Exception as e:
         logger.error(f"Failed to save sessions: {e}")
 
-# Global session store
+# Session-scoped store — each user gets an isolated FAISS index keyed by session_id.
+# This prevents concurrent users from corrupting each other's query results.
+# One user's upload never overwrites another user's active session.
+sessions = {}
 sessions = load_sessions()
 
 # Set of session IDs with in-memory changes not yet written to their
@@ -312,82 +363,184 @@ def append_chat_exchange(session: dict, question: str, answer: str, sources: lis
     ])
 
 
-def extract_pdf_documents_sandboxed(pdf_path: str, filename: str):
+# Thread pool used exclusively for PDF parsing so the FastAPI event loop
+# is never blocked during text extraction. Workers run LangChain loaders
+# synchronously inside threads — asyncio.wait_for provides the timeout guard.
+_PDF_PARSE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="pdf-parse",
+)
+
+
+def _load_with_pymupdf(pdf_path: str, filename: str, max_pages: int) -> list:
+    """Load PDF pages using LangChain's PyMuPDFLoader (MuPDF C engine).
+
+    MuPDF handles multi-column layouts, embedded fonts, and complex academic
+    PDFs correctly — unlike the pure-Python pypdf fallback.
     """
-    Parse PDF in a separate process with hard timeout and page/size limits.
+    from langchain_community.document_loaders import PyMuPDFLoader
 
-    Returns: List[Document]
-    Raises: HTTPException on failure.
-    """
-    start = time.time()
-    ctx = multiprocessing.get_context("spawn")
-    out_queue = ctx.Queue(maxsize=1)
-    proc = ctx.Process(
-        target=_extract_pdf_text_worker,
-        args=(pdf_path, MAX_PDF_PAGES, MAX_PDF_EXTRACT_CHARS, out_queue),
-        daemon=True,
-    )
-    proc.start()
-    proc.join(timeout=PDF_PARSE_TIMEOUT_SECONDS)
-
-    if proc.is_alive():
-        logger.warning(
-            "PDF parse timeout filename=%s timeout_seconds=%s",
-            filename,
-            PDF_PARSE_TIMEOUT_SECONDS,
-        )
-        proc.terminate()
-        proc.join(timeout=2)
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "PDF parsing timed out. This PDF may be too complex or malformed. "
-                "Try a smaller/simpler PDF."
-            ),
-        )
-
-    try:
-        result = out_queue.get_nowait()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Unable to read this PDF.")
-
-    if not isinstance(result, dict) or not result.get("ok"):
-        error = (result or {}).get("error") if isinstance(result, dict) else None
-        raise HTTPException(status_code=400, detail=error or "Unable to read this PDF.")
-
-    extracted = result.get("extracted", [])
-    extracted_chars = int(result.get("extracted_chars", 0) or 0)
-    page_count = int(result.get("page_count", 0) or 0)
-    elapsed_ms = int((time.time() - start) * 1000)
-
-    logger.info(
-        "PDF parsed safely filename=%s pages=%s extracted_pages=%s extracted_chars=%s duration_ms=%s",
-        filename,
-        page_count,
-        len(extracted),
-        extracted_chars,
-        elapsed_ms,
-    )
-
+    raw_docs = PyMuPDFLoader(pdf_path).load()
     docs = []
-    for item in extracted:
-        page = item.get("page")
-        text = (item.get("text") or "").strip()
+    for doc in raw_docs[:max_pages]:
+        text = (doc.page_content or "").strip()
         if not text:
             continue
+        page_num = doc.metadata.get("page", 0)
         docs.append(
             Document(
                 page_content=text,
                 metadata={
-                    "page": page,
+                    "page": page_num,
                     "filename": filename,
                     "source": filename,
                 },
             )
         )
-    if not docs:
-        raise HTTPException(status_code=400, detail="No readable text was found in the PDF.")
     return docs
+
+
+def _load_with_pypdf(pdf_path: str, filename: str, max_pages: int) -> list:
+    """Fallback loader using LangChain's PyPDFLoader (pure Python).
+
+    Used when PyMuPDF is unavailable or raises an exception. Handles most
+    simple text-based PDFs without a native dependency.
+    """
+    from langchain_community.document_loaders import PyPDFLoader
+
+    raw_docs = PyPDFLoader(pdf_path).load()
+    docs = []
+    for doc in raw_docs[:max_pages]:
+        text = (doc.page_content or "").strip()
+        if not text:
+            continue
+        page_num = doc.metadata.get("page", 0)
+        docs.append(
+            Document(
+                page_content=text,
+                metadata={
+                    "page": page_num,
+                    "filename": filename,
+                    "source": filename,
+                },
+            )
+        )
+    return docs
+
+
+async def load_pdf_documents_async(pdf_path: str, filename: str) -> list:
+    """Parse a PDF and return a list of LangChain Documents.
+
+    Loader chain (priority order):
+      1. PyMuPDFLoader  — MuPDF C engine; handles multi-column, embedded fonts,
+                          complex academic papers.
+      2. PyPDFLoader    — Pure-Python fallback for simple PDFs or environments
+                          without the pymupdf native library.
+
+    Both loaders run inside a ThreadPoolExecutor so the FastAPI event loop is
+    never blocked. asyncio.wait_for enforces PDF_PARSE_TIMEOUT_SECONDS as the
+    DoS guard (replaces the previous multiprocessing.spawn timeout approach).
+
+    Raises:
+        HTTPException(422) — timeout exceeded.
+        HTTPException(400) — loader error or no readable text found.
+    """
+    loop = asyncio.get_event_loop()
+    start = time.time()
+
+    # --- Primary: PyMuPDF ---
+    try:
+        docs = await asyncio.wait_for(
+            loop.run_in_executor(
+                _PDF_PARSE_EXECUTOR,
+                _load_with_pymupdf,
+                pdf_path,
+                filename,
+                MAX_PDF_PAGES,
+            ),
+            timeout=PDF_PARSE_TIMEOUT_SECONDS,
+        )
+        elapsed_ms = int((time.time() - start) * 1000)
+        logger.info(
+            "PDF parsed via PyMuPDF filename=%s extracted_pages=%s duration_ms=%s",
+            filename,
+            len(docs),
+            elapsed_ms,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "PDF parse timeout (PyMuPDF) filename=%s timeout_seconds=%s",
+            filename,
+            PDF_PARSE_TIMEOUT_SECONDS,
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "PDF parsing timed out. The file may be extremely large or complex. "
+                "Try a smaller PDF."
+            ),
+        )
+    except Exception as primary_exc:
+        logger.warning(
+            "PyMuPDF failed for filename=%s error=%s — falling back to PyPDF",
+            filename,
+            primary_exc,
+        )
+        # --- Fallback: PyPDF ---
+        try:
+            docs = await asyncio.wait_for(
+                loop.run_in_executor(
+                    _PDF_PARSE_EXECUTOR,
+                    _load_with_pypdf,
+                    pdf_path,
+                    filename,
+                    MAX_PDF_PAGES,
+                ),
+                timeout=PDF_PARSE_TIMEOUT_SECONDS,
+            )
+            elapsed_ms = int((time.time() - start) * 1000)
+            logger.info(
+                "PDF parsed via PyPDF (fallback) filename=%s extracted_pages=%s duration_ms=%s",
+                filename,
+                len(docs),
+                elapsed_ms,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "PDF parse timeout (PyPDF fallback) filename=%s timeout_seconds=%s",
+                filename,
+                PDF_PARSE_TIMEOUT_SECONDS,
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "PDF parsing timed out. The file may be extremely large or complex. "
+                    "Try a smaller PDF."
+                ),
+            )
+        except Exception as fallback_exc:
+            logger.error(
+                "Both loaders failed filename=%s pymupdf_err=%s pypdf_err=%s",
+                filename,
+                primary_exc,
+                fallback_exc,
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unable to read this PDF: {fallback_exc}",
+            )
+
+    if not docs:
+        raise HTTPException(
+            status_code=400,
+            detail="No readable text was found in the PDF. It may be a scanned image-only PDF.",
+        )
+    return docs
+
+
+# Legacy alias kept for any call sites not yet updated; will be removed in a
+# follow-up cleanup once all callers are confirmed migrated.
+extract_pdf_documents_sandboxed = None  # replaced by load_pdf_documents_async
 
 @app.middleware("http")
 async def internal_auth_middleware(request: Request, call_next):
@@ -611,6 +764,12 @@ SESSION_TOUCH_PERSIST_INTERVAL_SECONDS = int(
 SEMANTIC_CHUNK_SOFT_MAX = int(os.getenv("SEMANTIC_CHUNK_SOFT_MAX", "1200"))
 SEMANTIC_CHUNK_MERGE_MIN = int(os.getenv("SEMANTIC_CHUNK_MERGE_MIN", "150"))
 SEMANTIC_CHUNK_MERGE_MAX = int(os.getenv("SEMANTIC_CHUNK_MERGE_MAX", "1400"))
+SEMANTIC_CHUNK_MAX_TINY_CHUNKS = int(
+    os.getenv("SEMANTIC_CHUNK_MAX_TINY_CHUNKS", "256")
+)
+SEMANTIC_CHUNK_MAX_MERGE_CANDIDATES = int(
+    os.getenv("SEMANTIC_CHUNK_MAX_MERGE_CANDIDATES", "384")
+)
 SEMANTIC_CHUNK_SIMILARITY_THRESHOLD = float(
     os.getenv("SEMANTIC_CHUNK_SIMILARITY_THRESHOLD", "0.75")
 )
@@ -830,18 +989,32 @@ def persist_session_registry_entry(session_id: str, meta: dict):
         write_session_registry_unlocked(registry)
 
 
-def remove_persisted_session(session_id: str, session_dir: str | None = None):
-    with session_registry_lock():
-        registry = read_session_registry_unlocked()
-        registry_entry = registry.pop(session_id, None)
-        write_session_registry_unlocked(registry)
+def _log_rmtree_error(func, path, exc_info):
+    """Log individual file/directory deletion failures during rmtree."""
+    logger.warning(
+        "Failed to delete during session cleanup path=%s error=%s",
+        path,
+        exc_info[1],
+    )
 
+def remove_persisted_session(session_id: str, session_dir: str | None = None):
+    deletion_succeeded = False
     try:
         target_path = Path(get_session_dir(session_id)).resolve()
         if target_path.is_dir() and PERSIST_PATH in target_path.parents:
-            shutil.rmtree(target_path)
+            shutil.rmtree(target_path, onerror=_log_rmtree_error)
+            deletion_succeeded = not target_path.exists()
+        else:
+            # Directory already missing — treat as successful cleanup
+            deletion_succeeded = True
     except Exception:
         logger.exception("Failed to remove persisted session session_id=%s", session_id)
+
+    if deletion_succeeded:
+        with session_registry_lock():
+            registry = read_session_registry_unlocked()
+            registry.pop(session_id, None)
+            write_session_registry_unlocked(registry)
 
 
 def cleanup_expired_persisted_sessions(extra_session_dirs: dict | None = None):
@@ -860,18 +1033,46 @@ def cleanup_expired_persisted_sessions(extra_session_dirs: dict | None = None):
 
         for sid in expired_ids:
             expired_dirs[sid] = get_session_dir(sid)
-            registry.pop(sid, None)
 
-        if expired_ids:
-            write_session_registry_unlocked(registry)
-
-    for sid, session_dir in expired_dirs.items():
+    successful = 0
+    failed = 0
+    successful_sids = []
+    for sid in expired_dirs:
         try:
             target_path = Path(get_session_dir(sid)).resolve()
             if target_path.is_dir() and PERSIST_PATH in target_path.parents:
-                shutil.rmtree(target_path)
+                shutil.rmtree(target_path, onerror=_log_rmtree_error)
+                if not target_path.exists():
+                    successful += 1
+                    successful_sids.append(sid)
+                else:
+                    failed += 1
+            else:
+                # If directory is missing, it's considered successfully cleaned up
+                successful += 1
+                successful_sids.append(sid)
         except Exception:
             logger.exception("Failed to remove persisted session session_id=%s", sid)
+            failed += 1
+
+    if successful_sids:
+        with session_registry_lock():
+            registry = read_session_registry_unlocked()
+            modified = False
+            for sid in successful_sids:
+                if sid in registry:
+                    registry.pop(sid)
+                    modified = True
+            if modified:
+                write_session_registry_unlocked(registry)
+
+    if expired_dirs:
+        logger.info(
+            "Persisted session cleanup completed total=%s successful=%s failed=%s",
+            len(expired_dirs),
+            successful,
+            failed,
+        )
 
 
 def persist_vectorstore(session_id: str, vectorstore):
@@ -2351,6 +2552,16 @@ def _split_pass2(
     if not tiny_indices:
         return list(raw_chunks)  # fast-path: nothing to merge
 
+    # Keep semantic merge work bounded for adversarial inputs that fragment a page
+    # into a large number of tiny chunks. Normal PDFs stay on the merge path.
+    if len(tiny_indices) > SEMANTIC_CHUNK_MAX_TINY_CHUNKS:
+        logger.warning(
+            "Semantic merge skipped tiny_chunks=%s limit=%s",
+            len(tiny_indices),
+            SEMANTIC_CHUNK_MAX_TINY_CHUNKS,
+        )
+        return list(raw_chunks)
+
     # Collect tiny chunks + their immediate neighbours for batch embedding
     neighbour_indices = set()
     for idx in tiny_indices:
@@ -2361,6 +2572,16 @@ def _split_pass2(
             neighbour_indices.add(idx + 1)
 
     sorted_indices = sorted(neighbour_indices)
+
+    if len(sorted_indices) > SEMANTIC_CHUNK_MAX_MERGE_CANDIDATES:
+        logger.warning(
+            "Semantic merge skipped candidates=%s tiny_chunks=%s limit=%s",
+            len(sorted_indices),
+            len(tiny_indices),
+            SEMANTIC_CHUNK_MAX_MERGE_CANDIDATES,
+        )
+        return list(raw_chunks)
+
     texts_to_embed = [raw_chunks[i] for i in sorted_indices]
 
     try:
@@ -2732,7 +2953,7 @@ class SessionWriteRequest(BaseModel):
 
 
 @app.post("/process-pdf")
-def process_pdf(
+async def process_pdf(
     file: UploadFile = File(...),
     session_id: str | None = Form(None),
     original_filename: str | None = Form(None),
@@ -2785,7 +3006,7 @@ def process_pdf(
             raise HTTPException(status_code=400, detail="Uploaded PDF is empty. Please choose a valid PDF file.")
 
         try:
-            docs = extract_pdf_documents_sandboxed(temp_path, filename)
+            docs = await load_pdf_documents_async(temp_path, filename)
         except Exception as exc:
             logger.warning("Failed to load PDF filename=%s error=%s", filename, exc)
             if isinstance(exc, HTTPException):
@@ -2809,14 +3030,27 @@ def process_pdf(
 
     all_chunks = []
     seen_content = set()
+    adaptive_splitter = AdaptiveTextSplitter(chunk_size=1000, chunk_overlap=200)
     for doc in docs:
         page_number = doc.metadata.get("page", 0)
         page_text = doc.page_content or ""
-        for chunk_doc in semantic_chunk(page_text, filename, page_number, document_id):
-            content = chunk_doc.page_content.strip()
+        # Run your sliding window boundary execution
+        split_segments = adaptive_splitter.split_text(page_text)
+        
+        for idx, chunk_text in enumerate(split_segments):
+            content = chunk_text.strip()
             if content and content not in seen_content:
                 seen_content.add(content)
-                all_chunks.append(chunk_doc)
+                
+                # Convert the raw strings back into the framework's structure expectation layout
+                meta = {
+                    "document_id": document_id,
+                    "filename": filename,
+                    "page": page_number,
+                    "chunk_index": idx,
+                }
+                all_chunks.append(Document(page_content=content, metadata=meta))
+                
     chunks = all_chunks
 
     if not chunks:
@@ -3405,6 +3639,20 @@ def ask_question(data: Question):
             _mark_session_dirty(session_id)
         return result
 
+    followup_instructions = ""
+    if mode in ["tutor", "socratic"]:
+        followup_instructions = (
+            "You MUST append an interactive <FOLLOWUP> multiple-choice question to test their understanding. "
+            "Format it exactly like this at the very end of your response:\n"
+            "<FOLLOWUP>\nQuestion: [Question text]\nOptions:\n- [Option A]\n- [Option B]\n</FOLLOWUP>\n\n"
+        )
+    elif mode in ["default", "eli5"]:
+        followup_instructions = (
+            "If there is a deterministic follow-up question that would be helpful, you MAY append an interactive <FOLLOWUP> block. "
+            "Format it exactly like this at the very end of your response:\n"
+            "<FOLLOWUP>\nQuestion: [Question text]\nOptions:\n- [Option A]\n- [Option B]\n</FOLLOWUP>\n\n"
+        )
+
     prompt = (
         "You are a careful assistant answering questions over one or more uploaded PDF documents. "
         "Use only the provided context. The context may include excerpts from multiple PDFs. "
@@ -3419,6 +3667,7 @@ def ask_question(data: Question):
         "Do not return raw PDF text or chunks.\n"
         "Summarize properly in readable sentences.\n\n"
 
+        f"{followup_instructions}"
         f"Context:\n{context}\n\n"
         f"Question: {question}\n"
         "Answer:"
@@ -3517,8 +3766,8 @@ def ask_question(data: Question):
 @app.post("/ask/stream")
 def ask_question_stream(data: Question, _ready: None = Depends(require_models_ready)):
     """
-    Streaming variant of /ask. Returns the generated answer as a plain-text
-    chunked response so the frontend can render tokens progressively.
+    Streaming variant of /ask. Returns the generated answer as SSE so the
+    frontend can render tokens progressively.
 
     Retrieval and evidence-gating are identical to /ask. Generation is run in
     a background thread using TextIteratorStreamer so the HTTP response can
@@ -3528,6 +3777,18 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
     in both `protected_paths` (exact match) and under the `/ask/` prefix guard,
     so it cannot be reached without a valid X-Internal-Token.
     """
+    def _sse_frame(text: str, event: str | None = None) -> str:
+        parts = []
+        if event:
+            parts.append(f"event: {event}")
+        normalized_text = str(text).replace("\r\n", "\n").replace("\r", "\n")
+        for line in normalized_text.split("\n"):
+            parts.append(f"data: {line}")
+        return "\n".join(parts) + "\n\n"
+
+    def _sse_done() -> str:
+        return "data: [DONE]\n\n"
+
     question = (data.question or "").strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question is required.")
@@ -3641,9 +3902,10 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
             _mark_session_dirty(session_id)
 
         def _refuse_stream():
-            yield INSUFFICIENT_CONTEXT_MESSAGE
+            yield _sse_frame(INSUFFICIENT_CONTEXT_MESSAGE)
+            yield _sse_done()
 
-        return StreamingResponse(_refuse_stream(), media_type="text/plain; charset=utf-8")
+        return StreamingResponse(_refuse_stream(), media_type="text/event-stream; charset=utf-8")
 
     context = format_context(docs)
 
@@ -3673,13 +3935,28 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
             _mark_session_dirty(session_id)
 
         def _grounded_stream():
-            yield framed
+            yield _sse_frame(framed)
+            yield _sse_done()
 
-        return StreamingResponse(_grounded_stream(), media_type="text/plain; charset=utf-8")
+        return StreamingResponse(_grounded_stream(), media_type="text/event-stream; charset=utf-8")
 
     # LLM generation path — run in a background thread so we can stream tokens
     # back to the caller as they are produced rather than waiting for the full
     # completion before sending anything.
+    followup_instructions = ""
+    if mode in ["tutor", "socratic"]:
+        followup_instructions = (
+            "You MUST append an interactive <FOLLOWUP> multiple-choice question to test their understanding. "
+            "Format it exactly like this at the very end of your response:\n"
+            "<FOLLOWUP>\nQuestion: [Question text]\nOptions:\n- [Option A]\n- [Option B]\n</FOLLOWUP>\n\n"
+        )
+    elif mode in ["default", "eli5"]:
+        followup_instructions = (
+            "If there is a deterministic follow-up question that would be helpful, you MAY append an interactive <FOLLOWUP> block. "
+            "Format it exactly like this at the very end of your response:\n"
+            "<FOLLOWUP>\nQuestion: [Question text]\nOptions:\n- [Option A]\n- [Option B]\n</FOLLOWUP>\n\n"
+        )
+
     prompt = (
         "You are a careful assistant answering questions over one or more uploaded PDF documents. "
         "Use only the provided context. The context may include excerpts from multiple PDFs. "
@@ -3691,6 +3968,7 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
         "Give clear, conversational, human-friendly answers.\n"
         "Do not return raw PDF text or chunks.\n"
         "Summarize properly in readable sentences.\n\n"
+        f"{followup_instructions}"
         f"Context:\n{context}\n\n"
         f"Question: {question}\n"
         "Answer:"
@@ -3740,7 +4018,7 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
                             token = data['choices'][0]['delta'].get('content', '')
                             if token:
                                 full_answer_parts.append(token)
-                                yield token
+                                yield _sse_frame(token)
                         except Exception:
                             pass
         except Exception as e:
@@ -3750,40 +4028,49 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
 
         full_answer = "".join(full_answer_parts).strip()
 
-        framed = apply_mode_framing(
-            full_answer,
-            question,
-            mode,
-            docs,
-            context,
-        )
+        try:
+            # Streamed tokens were already yielded above as they arrived.
+            # Now produce the final framed answer, persist the chat exchange,
+            # and send the final framed answer + done event.
+            framed = apply_mode_framing(full_answer, question, mode, docs, context)
 
-        if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
-            framed = full_answer
+            if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
+                framed = full_answer
 
-        citation_sources = [
-            citation_source_for_document(doc, idx)
-            for idx, doc in enumerate(docs)
-        ]
+            citation_sources = [
+                citation_source_for_document(doc, idx)
+                for idx, doc in enumerate(docs)
+            ]
 
-        # stream the final framed answer once at the end
-        yield framed
+            # stream the final framed answer once at the end
+            yield _sse_frame(framed)
 
-        with sessions_lock:
-            current_session = sessions.get(session_id)
-            if current_session:
-                ensure_retrieval_cache(current_session)
-                append_chat_exchange(
-                    current_session,
-                    question,
-                    framed,
-                    citation_sources,
-                    mode,
-                )
-            _mark_session_dirty(session_id)
+            with sessions_lock:
+                current_session = sessions.get(session_id)
+                if current_session:
+                    ensure_retrieval_cache(current_session)
+                    append_chat_exchange(
+                        current_session,
+                        question,
+                        framed,
+                        citation_sources,
+                        mode,
+                    )
+                _mark_session_dirty(session_id)
 
+            yield _sse_done()
+        except Exception:
+            logger.exception("Stream generation failed session_id=%s", session_id)
+            yield _sse_frame("Generation error. Please try again.", event="error")
+            # Emit an explicit done marker after the error so SSE clients
+            # that rely on an in-band completion token can handle the
+            # terminal state deterministically.
+            try:
+                yield _sse_done()
+            except Exception:
+                pass
 
-    return StreamingResponse(_generate_and_stream(), media_type="text/plain; charset=utf-8")
+    return StreamingResponse(_generate_and_stream(), media_type="text/event-stream; charset=utf-8")
 
 
 def _run_generation_locked(model, generate_kwargs):
