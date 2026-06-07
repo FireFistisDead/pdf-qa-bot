@@ -7,9 +7,11 @@ const fs = require("fs");
 const fsPromises = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
+const { domainToASCII } = require("url");
 const { rateLimit } = require("express-rate-limit");
 const slowDown = require("express-slow-down");
 const helmet = require("helmet");
+const jwt = require("jsonwebtoken");
 const {
   askSchema,
   askCredentialSchema,
@@ -29,6 +31,7 @@ const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
 const getInternalRagToken = () => (process.env.INTERNAL_RAG_TOKEN || "").trim();
 const PORT = process.env.PORT || 4000;
 const auditLogger = createAuditLogger("gateway");
+const SUPABASE_JWT_SECRET = (process.env.SUPABASE_JWT_SECRET || "").trim();
 
 // ─── Credential Validation Cache ─────────────────────────────────────────────
 // session_id and session_secret are structurally identical on every request
@@ -722,6 +725,42 @@ const propagateRagError = (err, res, fallback) => {
 const normalizeSessionSecret = (value) =>
   typeof value === "string" ? value.trim() || null : null;
 
+const SUPABASE_ALLOWED_HOST_SUFFIXES = new Set(["supabase.co", "supabase.in"]);
+
+const normalizeHostnameForAllowlist = (hostname) => {
+  if (typeof hostname !== "string") return null;
+
+  const normalizedHostname = hostname.trim().toLowerCase().replace(/\.+$/, "");
+  if (!normalizedHostname) return null;
+
+  const asciiHostname = domainToASCII(normalizedHostname);
+  if (!asciiHostname) return null;
+
+  return asciiHostname.toLowerCase().replace(/\.+$/, "");
+};
+
+const isAllowedSupabaseHostname = (hostname) => {
+  const normalizedHostname = normalizeHostnameForAllowlist(hostname);
+  if (!normalizedHostname) return false;
+
+  const hostnameLabels = normalizedHostname.split(".");
+  return Array.from(SUPABASE_ALLOWED_HOST_SUFFIXES).some((suffix) => {
+    const suffixLabels = suffix.split(".");
+    if (hostnameLabels.length < suffixLabels.length + 1) return false;
+
+    return hostnameLabels.slice(-suffixLabels.length).join(".") === suffix;
+  });
+};
+
+const getTrustedSupabaseOrigin = (hostname) => {
+  const normalizedHostname = normalizeHostnameForAllowlist(hostname);
+  if (!normalizedHostname) return null;
+
+  if (!isAllowedSupabaseHostname(normalizedHostname)) return null;
+
+  return `https://${normalizedHostname}`;
+};
+
 // ─── Multer Error Handler ───────────────────────────────────────────────────────
 // Catches file size violations (413 Payload Too Large) and other multer errors.
 // CWE-209 Mitigation: Sanitizes error messages to prevent leaking internal implementation
@@ -997,20 +1036,18 @@ const requireSupabaseAuth = (req, res, next) => {
   }
   
   const token = authHeader.split(" ")[1];
-  const secret = process.env.SUPABASE_JWT_SECRET;
-  
-  // If the server admin hasn't configured the JWT secret, we at least enforce 
-  // that a token is provided (to satisfy basic security checks), but we can't 
-  // cryptographically verify it without the secret.
-  if (secret) {
-    const jwt = require("jsonwebtoken");
-    try {
-      req.user = jwt.verify(token, secret);
-    } catch (err) {
-      return res.status(401).json({ error: "Invalid token" });
-    }
+  const secret = SUPABASE_JWT_SECRET;
+
+  if (!secret) {
+    return res.status(500).json({ error: "Server misconfiguration: missing SUPABASE_JWT_SECRET" });
   }
-  
+
+  try {
+    req.user = jwt.verify(token, secret);
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+
   next();
 };
 
@@ -1024,10 +1061,10 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
     return res.status(400).json({ error: "Missing or invalid 'url' field." });
   }
   
-  // SSRF Protection: Validate URL format, protocol, and hostname
+  // SSRF Protection: Validate URL format, protocol, and hostname.
   let parsedUrl;
   try {
-    parsedUrl = new URL(url);
+    parsedUrl = new URL(url.trim());
   } catch (err) {
     return res.status(400).json({ error: "Invalid URL format." });
   }
@@ -1036,10 +1073,8 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
     return res.status(400).json({ error: "Only HTTPS URLs are allowed." });
   }
 
-  const allowedHosts = [".supabase.co", ".supabase.in"];
-  const isAllowedHost = allowedHosts.some(host => parsedUrl.hostname.endsWith(host));
-  
-  if (!isAllowedHost) {
+  const trustedSupabaseOrigin = getTrustedSupabaseOrigin(parsedUrl.hostname);
+  if (!trustedSupabaseOrigin) {
     return res.status(403).json({ error: "URL host is not allowed." });
   }
 
@@ -1057,7 +1092,11 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
     // Download the PDF from the remote URL into a Buffer
     let pdfBuffer;
     try {
-      const dlResponse = await axios.get(url, {
+      const downloadUrl = new URL(trustedSupabaseOrigin);
+      downloadUrl.pathname = parsedUrl.pathname;
+      downloadUrl.search = parsedUrl.search;
+
+      const dlResponse = await axios.get(downloadUrl.toString(), {
         responseType: "arraybuffer",
         timeout: 30000,
         maxContentLength: 50 * 1024 * 1024, // 50 MB cap
@@ -1145,7 +1184,7 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
         session_secret,
         mode,
       },
-      { headers: ragAuthHeaders() },
+      { headers: ragAuthHeaders(), timeout: 30000 },
     );
 
     return res.json({
@@ -1180,19 +1219,42 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
 
   const { question, session_id, mode } = validation.data;
   const session_secret = validation.data.session_secret;
+  const upstreamAbort = new AbortController();
+  let upstreamStream = null;
+  let cleanedUp = false;
+
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    upstreamAbort.abort();
+    if (upstreamStream && typeof upstreamStream.destroy === "function") {
+      upstreamStream.destroy();
+    }
+  };
 
   try {
     const ragResponse = await axios.post(
       `${RAG_SERVICE_URL}/ask/stream`,
       { question, session_id, session_secret, mode },
-      { headers: ragAuthHeaders(), responseType: "stream", timeout: 120000 }
+{
+  headers: ragAuthHeaders(),
+  responseType: "stream",
+  timeout: 120000,
+  signal: upstreamAbort.signal,
+}
     );
 
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    upstreamStream = ragResponse.data;
+
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Transfer-Encoding", "chunked");
     res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
     res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders();
+
+    req.on("close", cleanup);
+    res.on("close", cleanup);
 
     ragResponse.data.pipe(res);
 
@@ -1204,9 +1266,13 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
       if (!res.headersSent) {
         res.status(502).json({ error: "Streaming response failed." });
       } else {
+        res.write("event: error\ndata: Streaming response failed.\n\n");
+        // End the response after signalling the error to the client.
         res.end();
       }
     });
+
+    ragResponse.data.on("end", cleanup);
   } catch (err) {
     const statusCode = err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
     const details = extractServiceDetails(err, "Error answering question");
@@ -1361,6 +1427,9 @@ app.use((err, req, res, next) => {
 
 if (require.main === module) {
   requireInternalRagToken();
+  if (!SUPABASE_JWT_SECRET) {
+    throw new Error("SUPABASE_JWT_SECRET missing in .env – required for /process-from-url authentication");
+  }
 
   (async () => {
     requireInternalRagToken();
@@ -1407,4 +1476,6 @@ module.exports = {
   MAX_QUESTION_LENGTH,
   ragAuthHeaders,
   requireInternalRagToken,
+  normalizeHostnameForAllowlist,
+  isAllowedSupabaseHostname,
 };

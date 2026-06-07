@@ -247,8 +247,10 @@ export default function StudyHub({
             </div>
           </div>
 
-          <div
+          <button
+            type="button"
             className={`flashcard-card-perspective`}
+            style={{ background: 'transparent', border: 'none', padding: 0, display: 'block', width: '100%', textAlign: 'left' }}
             onClick={() => setIsFlipped(!isFlipped)}
           >
             <div className={`flashcard-card ${isFlipped ? "flipped" : ""}`}>
@@ -278,7 +280,7 @@ export default function StudyHub({
                 <div className="flashcard-card-hint">Click card to see question</div>
               </div>
             </div>
-          </div>
+          </button>
 
           {/* Rating controls when flipped */}
           <div
@@ -303,6 +305,7 @@ export default function StudyHub({
           <div className="deck-navigation">
             <button
               className="nav-circle-btn"
+              aria-label="Previous card"
               disabled={currentCardIdx === 0}
               onClick={() => {
                 setIsFlipped(false);
@@ -316,6 +319,7 @@ export default function StudyHub({
             </span>
             <button
               className="nav-circle-btn"
+              aria-label="Next card"
               disabled={currentCardIdx === flashcards.length - 1}
               onClick={() => {
                 setIsFlipped(false);
