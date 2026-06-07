@@ -189,7 +189,10 @@ def save_sessions_unlocked():
     except Exception as e:
         logger.error(f"Failed to save sessions: {e}")
 
-# Global session store
+# Session-scoped store — each user gets an isolated FAISS index keyed by session_id.
+# This prevents concurrent users from corrupting each other's query results.
+# One user's upload never overwrites another user's active session.
+sessions = {}
 sessions = load_sessions()
 
 # Set of session IDs with in-memory changes not yet written to their
