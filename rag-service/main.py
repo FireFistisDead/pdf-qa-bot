@@ -180,7 +180,10 @@ def load_sessions():
                     meta["lock"] = threading.Lock()
                     meta["vectorstore"] = None
                     meta.setdefault("chat", [])
-                    meta["chat"] = normalize_chat_history(meta.get("chat", []))
+                    chat_history = normalize_chat_history(meta.get("chat", []))
+                    if len(chat_history) > MAX_CHAT_HISTORY_SIZE * 2:
+                        chat_history = chat_history[-(MAX_CHAT_HISTORY_SIZE * 2):]
+                    meta["chat"] = chat_history
                     meta.setdefault("flashcards", [])
                     base[sid] = meta
         except Exception as e:
@@ -197,7 +200,10 @@ def load_sessions():
                 with open(meta_path, "r", encoding="utf-8") as f:
                     per = json.load(f)
                 if isinstance(per.get("chat"), list):
-                    meta["chat"] = normalize_chat_history(per["chat"])
+                    chat_history = normalize_chat_history(per["chat"])
+                    if len(chat_history) > MAX_CHAT_HISTORY_SIZE * 2:
+                        chat_history = chat_history[-(MAX_CHAT_HISTORY_SIZE * 2):]
+                    meta["chat"] = chat_history
                 if isinstance(per.get("flashcards"), list):
                     meta["flashcards"] = per["flashcards"]
                 if per.get("last_accessed") and float(per["last_accessed"] or 0) > float(meta.get("last_accessed") or 0):
@@ -227,7 +233,7 @@ def save_sessions_unlocked():
                 "last_accessed": meta.get("last_accessed"),
                 "documents": clean_docs,
                 "retrieval_cache": {},  # Do not persist retrieval cache (contains Document objects)
-                "chat": meta.get("chat", []),
+                "chat": meta.get("chat", [])[-(MAX_CHAT_HISTORY_SIZE * 2):] if meta.get("chat") else [],
                 "flashcards": meta.get("flashcards", []),
                 "hashed_session_secret": meta.get("hashed_session_secret") or _hash_secret(meta.get("session_secret", "")),
             }
@@ -361,6 +367,10 @@ def append_chat_exchange(session: dict, question: str, answer: str, sources: lis
         },
         bot_message,
     ])
+    
+    if len(chat) > MAX_CHAT_HISTORY_SIZE * 2:
+        chat = chat[-(MAX_CHAT_HISTORY_SIZE * 2):]
+        session["chat"] = chat
 
 
 # Thread pool used exclusively for PDF parsing so the FastAPI event loop
@@ -731,6 +741,7 @@ generation_lock = threading.Lock()
 # Configurable session TTL and max cap
 SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "43200"))  # 30 days default for persistence
 MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "1000"))
+MAX_CHAT_HISTORY_SIZE = int(os.getenv("MAX_CHAT_HISTORY_SIZE", "100"))
 # How often the background cleanup task sweeps for expired sessions (minutes).
 SESSION_CLEANUP_INTERVAL_MINUTES = max(1, int(os.getenv("SESSION_CLEANUP_INTERVAL_MINUTES", "5")))
 MAX_DOCUMENTS_PER_SESSION = int(os.getenv("MAX_DOCUMENTS_PER_SESSION", "5"))
@@ -1484,7 +1495,7 @@ def _snapshot_session_for_persistence(meta: dict) -> dict:
         "created_at": meta.get("created_at"),
         "last_accessed": meta.get("last_accessed"),
         "documents": list(meta.get("documents", [])),
-        "chat": list(meta.get("chat", [])),
+        "chat": list(meta.get("chat", [])[-(MAX_CHAT_HISTORY_SIZE * 2):]) if meta.get("chat") else [],
         "flashcards": list(meta.get("flashcards", [])),
         "hashed_session_secret": meta.get("hashed_session_secret") or _hash_secret(meta.get("session_secret", "")),
     }
