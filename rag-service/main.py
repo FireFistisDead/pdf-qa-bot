@@ -1,5 +1,5 @@
 from fastapi import Depends, FastAPI, Request, HTTPException, File, UploadFile, Form
-from fastapi import FastAPI, Request, HTTPException, File, UploadFile, Form, Header
+from fastapi import FastAPI, Request, HTTPException, File, UploadFile, Form, Header, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.exceptions import RequestValidationError
 from contextlib import asynccontextmanager
@@ -273,6 +273,7 @@ PROTECTED_RAG_PATHS = {
     "/knowledge-gaps",
     "/validate-session-write",
     "/sessions/lookup",
+    "/demo-query-validation",
 }
 PROTECTED_RAG_PREFIXES = (
     "/ask/",
@@ -4557,6 +4558,21 @@ def update_flashcard_progress(data: FlashcardProgressRequest):
         _dirty_sessions.add(session_id)
         
     return {"status": "success", "flashcards": flashcards}
+
+
+@app.get("/demo-query-validation", include_in_schema=False)
+def demo_query_validation(max_length: int = Query(default=1000, ge=1, le=10000, description="Maximum length")):
+    """
+    Demonstrates native FastAPI query parameter validation.
+    
+    Showcases both type validation and range constraints, resolving
+    issue #438 regarding Unhandled ValueError on Query Params.
+    
+    Example valid request: ?max_length=500
+    Example invalid type: ?max_length=abc -> 422 Unprocessable Entity
+    Example invalid range: ?max_length=-1 -> 422 Unprocessable Entity
+    """
+    return {"max_length": max_length}
 
 
 if __name__ == "__main__":
