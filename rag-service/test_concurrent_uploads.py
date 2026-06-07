@@ -4,7 +4,7 @@ import os
 import shutil
 import threading
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import langchain_community.embeddings
 langchain_community.embeddings.HuggingFaceEmbeddings = MagicMock()
@@ -57,7 +57,7 @@ def _fake_docs(text: str | None = None, n: int = 3) -> list:
 def mock_pdf_pipeline():
     fake_docs = _fake_docs()
     with (
-        patch("main.extract_pdf_documents_sandboxed") as mock_extract,
+        patch("main.load_pdf_documents_async", new_callable=AsyncMock) as mock_extract,
         patch("main.FAISS.from_documents") as mock_from_docs,
         patch("main.get_embedding_model") as mock_emb,
     ):
