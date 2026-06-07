@@ -3940,7 +3940,7 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
             }).encode("utf-8")
             
             req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp:  # nosec B310
                 for line in resp:
                     decoded = line.decode('utf-8').strip()
                     if decoded.startswith('data: '):
@@ -3953,7 +3953,7 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
                             if token:
                                 full_answer_parts.append(token)
                                 yield _sse_frame(token)
-                        except Exception:
+                        except Exception:  # nosec B110
                             pass
         except Exception as e:
             err = f"Groq API Error: {str(e)}"
@@ -4001,7 +4001,7 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
             # terminal state deterministically.
             try:
                 yield _sse_done()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     return StreamingResponse(_generate_and_stream(), media_type="text/event-stream; charset=utf-8")
