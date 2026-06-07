@@ -1103,6 +1103,21 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
   }
 });
 
+app.get("/processing-status/:sessionId", async (req, res) => {
+  try {
+    const response = await axios.get(
+      `${RAG_SERVICE_URL}/processing-status/${req.params.sessionId}`,
+      { headers: ragAuthHeaders(), timeout: 5000 }
+    );
+    return res.json(response.data);
+  } catch (err) {
+    if (err.response?.status === 404) {
+      return res.status(404).json({ error: "Processing status not found." });
+    }
+    return propagateRagError(err, res, "Error fetching processing status");
+  }
+});
+
 app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
   const validation = validateAskBody(req.body);
 
