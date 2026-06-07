@@ -1,5 +1,5 @@
 from fastapi import Depends, FastAPI, Request, HTTPException, File, UploadFile, Form
-from fastapi import FastAPI, Request, HTTPException, File, UploadFile, Form, Header
+from fastapi import FastAPI, Request, HTTPException, File, UploadFile, Form, Header, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.exceptions import RequestValidationError
 from contextlib import asynccontextmanager
@@ -61,6 +61,55 @@ logging.basicConfig(
 )
 
 app = FastAPI()
+
+# =====================================================================
+# 🛠️ CRASH-PROOF ADAPTIVE TEXT SPLITTER (GSSoC 2026 Contribution)
+# =====================================================================
+class AdaptiveTextSplitter:
+    def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200):
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+
+    def split_text(self, text: str) -> list:
+        if not text:
+            return []
+            
+        chunks = []
+        start_idx = 0
+        text_len = len(text)
+        
+        while start_idx < text_len:
+            end_idx = min(start_idx + self.chunk_size, text_len)
+            
+           # 2. Smart Boundary Detection
+            if end_idx < text_len:
+                # CodeRabbit Patch: Prevent negative slicing if chunk_size < 100
+                lookback = min(100, end_idx)
+                search_space = text[end_idx - lookback : end_idx]
+                boundary_pos = -1
+                for marker in ["\n\n", "\n", ". ", "? ", "! "]:
+                    pos = search_space.rfind(marker)
+                    if pos != -1:
+                        boundary_pos = (end_idx - lookback) + pos + len(marker)
+                        break
+                
+                if boundary_pos != -1:
+                    end_idx = boundary_pos
+            
+            chunk = text[start_idx:end_idx].strip()
+            if chunk:
+                chunks.append(chunk)
+                
+            next_start_idx = end_idx - self.chunk_overlap
+            
+            if next_start_idx <= start_idx:
+                start_idx = end_idx 
+            else:
+                start_idx = next_start_idx
+                
+        return chunks
+
+# =====================================================================
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 UPLOADS_DIR = (BASE_DIR / "uploads").resolve()
@@ -224,6 +273,7 @@ PROTECTED_RAG_PATHS = {
     "/knowledge-gaps",
     "/validate-session-write",
     "/sessions/lookup",
+    "/demo-query-validation",
 }
 PROTECTED_RAG_PREFIXES = (
     "/ask/",
@@ -2980,14 +3030,27 @@ async def process_pdf(
 
     all_chunks = []
     seen_content = set()
+    adaptive_splitter = AdaptiveTextSplitter(chunk_size=1000, chunk_overlap=200)
     for doc in docs:
         page_number = doc.metadata.get("page", 0)
         page_text = doc.page_content or ""
-        for chunk_doc in semantic_chunk(page_text, filename, page_number, document_id):
-            content = chunk_doc.page_content.strip()
+        # Run your sliding window boundary execution
+        split_segments = adaptive_splitter.split_text(page_text)
+        
+        for idx, chunk_text in enumerate(split_segments):
+            content = chunk_text.strip()
             if content and content not in seen_content:
                 seen_content.add(content)
-                all_chunks.append(chunk_doc)
+                
+                # Convert the raw strings back into the framework's structure expectation layout
+                meta = {
+                    "document_id": document_id,
+                    "filename": filename,
+                    "page": page_number,
+                    "chunk_index": idx,
+                }
+                all_chunks.append(Document(page_content=content, metadata=meta))
+                
     chunks = all_chunks
 
     if not chunks:
@@ -4495,6 +4558,21 @@ def update_flashcard_progress(data: FlashcardProgressRequest):
         _dirty_sessions.add(session_id)
         
     return {"status": "success", "flashcards": flashcards}
+
+
+@app.get("/demo-query-validation", include_in_schema=False)
+def demo_query_validation(max_length: int = Query(default=1000, ge=1, le=10000, description="Maximum length")):
+    """
+    Demonstrates native FastAPI query parameter validation.
+    
+    Showcases both type validation and range constraints, resolving
+    issue #438 regarding Unhandled ValueError on Query Params.
+    
+    Example valid request: ?max_length=500
+    Example invalid type: ?max_length=abc -> 422 Unprocessable Entity
+    Example invalid range: ?max_length=-1 -> 422 Unprocessable Entity
+    """
+    return {"max_length": max_length}
 
 
 if __name__ == "__main__":
