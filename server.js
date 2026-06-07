@@ -1035,6 +1035,15 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
     .replace(/[^a-zA-Z0-9._\- ]/g, "_")
     .slice(0, 200);
 
+  // Validate session credential parity — must provide both or neither.
+  // Silently ignoring a partial pair would create a new orphan session
+  // instead of extending the intended one.
+  if ((session_id || session_secret) && !(session_id && session_secret)) {
+    return res.status(403).json({
+      error: "session_id and session_secret must be provided together to extend an existing session.",
+    });
+  }
+
   let tempFilePath = null;
   try {
     // Stream the remote PDF to a temporary file — avoids holding the entire
