@@ -4,6 +4,8 @@ import ReactMarkdown from "react-markdown";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import BookmarkBorderIcon from "@mui/icons-material/BookmarkBorder";
 import BookmarkIcon from "@mui/icons-material/Bookmark";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import CheckIcon from "@mui/icons-material/Check";
 
 // Strict allowlist for AI-generated markdown content.
 //
@@ -57,6 +59,13 @@ const MessageBubble = ({
   highlighted = false,
   registerMessageRef,
 }) => {
+  const [copied, setCopied] = React.useState(false);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(msg.text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   const getSourceLabel = (source) => source.document || "Source Document";
   const hasOpenablePage = (source) => Boolean(source.page && source.document);
@@ -148,6 +157,7 @@ const MessageBubble = ({
               marginTop: "12px",
               display: "flex",
               justifyContent: "flex-start",
+              gap: "8px",
             }}
           >
             <button
@@ -185,6 +195,40 @@ const MessageBubble = ({
                 <BookmarkBorderIcon sx={{ fontSize: 16 }} />
               )}
               {isBookmarked ? "Saved" : "Save Answer"}
+            </button>
+            <button
+              type="button"
+              onClick={handleCopy}
+              aria-label="Copy to clipboard"
+              title="Copy answer"
+              className="copy-answer-button"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                padding: "6px 10px",
+                borderRadius: "12px",
+                border: darkMode
+                  ? "1px solid rgba(255,255,255,0.12)"
+                  : "1px solid rgba(0,0,0,0.1)",
+                background: copied
+                  ? "rgba(34,197,94,0.12)"
+                  : darkMode
+                  ? "rgba(255,255,255,0.05)"
+                  : "rgba(255,255,255,0.7)",
+                color: copied ? "#22C55E" : darkMode ? "#D1D5DB" : "#4B5563",
+                fontSize: "12px",
+                fontWeight: 700,
+                cursor: "pointer",
+                transition: "all 0.2s",
+              }}
+            >
+              {copied ? (
+                <CheckIcon sx={{ fontSize: 16 }} />
+              ) : (
+                <ContentCopyIcon sx={{ fontSize: 16 }} />
+              )}
+              {copied ? "Copied!" : "Copy"}
             </button>
           </div>
         )}
