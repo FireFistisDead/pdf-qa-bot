@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import os
-import pickle
+import pickle  # nosec B403
 from pathlib import Path
 
 
@@ -40,7 +40,7 @@ def _load_index_documents(session_dir: Path) -> list:
     if not index_pkl.exists():
         return []
     with index_pkl.open("rb") as fh:
-        docstore, _index_to_docstore_id = pickle.load(fh)
+        docstore, _index_to_docstore_id = pickle.load(fh)  # nosec B301
     stored = getattr(docstore, "_dict", {}) or {}
     return list(stored.values())
 

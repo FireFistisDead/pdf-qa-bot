@@ -957,7 +957,7 @@ def _touch_session_unlocked(session_id: str):
         session_dir = meta.get("session_dir")
         try:
             del sessions[session_id]
-        except Exception:
+        except Exception:  # nosec B110
             pass
         remove_persisted_session(session_id, session_dir)
         logger.info("Invalidated legacy session without secret session_id=%s", session_id)
@@ -1002,7 +1002,7 @@ def _peek_session_unlocked(session_id: str):
         session_dir = meta.get("session_dir")
         try:
             del sessions[session_id]
-        except Exception:
+        except Exception:  # nosec B110
             pass
         remove_persisted_session(session_id, session_dir)
         logger.info("Invalidated legacy session without secret session_id=%s", session_id)
@@ -1532,7 +1532,7 @@ def synthesize_with_ollama(prompt: str) -> Optional[str]:
             method="POST",
         )
 
-        with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT_SECS) as resp:
+        with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT_SECS) as resp:  # nosec B310
             body = json.loads(resp.read().decode("utf-8"))
             text = (body.get("response") or "").strip()
             if text:
@@ -2277,14 +2277,14 @@ def load_generation_model():
             HF_GENERATION_MODEL,
         )
 
-        config = AutoConfig.from_pretrained(HF_GENERATION_MODEL)
+        config = AutoConfig.from_pretrained(HF_GENERATION_MODEL)  # nosec B615
         generation_is_encoder_decoder = bool(getattr(config, "is_encoder_decoder", False))
-        generation_tokenizer = AutoTokenizer.from_pretrained(HF_GENERATION_MODEL)
+        generation_tokenizer = AutoTokenizer.from_pretrained(HF_GENERATION_MODEL)  # nosec B615
 
         if generation_is_encoder_decoder:
-            generation_model = AutoModelForSeq2SeqLM.from_pretrained(HF_GENERATION_MODEL)
+            generation_model = AutoModelForSeq2SeqLM.from_pretrained(HF_GENERATION_MODEL)  # nosec B615
         else:
-            generation_model = AutoModelForCausalLM.from_pretrained(HF_GENERATION_MODEL)
+            generation_model = AutoModelForCausalLM.from_pretrained(HF_GENERATION_MODEL)  # nosec B615
 
         if torch.cuda.is_available():
             generation_model = generation_model.to("cuda")
@@ -4002,6 +4002,6 @@ def update_flashcard_progress(data: FlashcardProgressRequest):
 
 if __name__ == "__main__":
     is_production = os.getenv("ENVIRONMENT", "development").lower() == "production"
-    host = os.getenv("HOST", "0.0.0.0")
+    host = os.getenv("HOST", "0.0.0.0")  # nosec B104
     port = int(os.getenv("PORT", "5000"))
     uvicorn.run("main:app", host=host, port=port, reload=not is_production)

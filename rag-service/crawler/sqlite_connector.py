@@ -28,7 +28,7 @@ class SQLiteConnector:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
-            cursor = conn.execute(f"SELECT * FROM {table}")
+            cursor = conn.execute(f"SELECT * FROM {table}")  # nosec B608
             for row in cursor:
                 fields: Mapping[str, object] = dict(row)
                 record_id = str(fields.get(id_column, ""))

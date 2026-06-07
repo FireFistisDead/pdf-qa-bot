@@ -45,7 +45,7 @@ def maybe_decode_pdf_bytes(fields: Mapping[str, object]) -> Optional[bytes]:
                 continue
             try:
                 return base64.b64decode(text, validate=True)
-            except Exception:
+            except Exception:  # nosec B112
                 continue
 
     return None

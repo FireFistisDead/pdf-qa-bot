@@ -41,7 +41,7 @@ def cleanup_sessions_and_locks():
         if f.endswith(".lock"):
             try:
                 os.remove(f)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
 

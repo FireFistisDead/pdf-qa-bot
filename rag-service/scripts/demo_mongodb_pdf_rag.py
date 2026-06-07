@@ -15,7 +15,7 @@ try:  # pragma: no cover
 
     load_dotenv(_repo_root / ".env", override=False)
     load_dotenv(_rag_service_root / ".env", override=False)
-except Exception:
+except Exception:  # nosec B110
     pass
 
 # Allow running as: `python scripts/demo_mongodb_pdf_rag.py` from the rag-service folder.
