@@ -1035,53 +1035,81 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
     .replace(/[^a-zA-Z0-9._\- ]/g, "_")
     .slice(0, 200);
 
+  let tempFilePath = null;
   try {
-    // Download the PDF from the remote URL into a Buffer
-    let pdfBuffer;
+    // Stream the remote PDF to a temporary file — avoids holding the entire
+    // document in memory as a Buffer + Blob copy (the double-buffer problem).
+    // The file is deleted immediately after forwarding to the RAG service.
+    const tempFilename = `${crypto.randomUUID()}.pdf`;
+    tempFilePath = path.join(UPLOADS_DIR, tempFilename);
+
     try {
       const downloadUrl = new URL(trustedSupabaseOrigin);
       downloadUrl.pathname = parsedUrl.pathname;
       downloadUrl.search = parsedUrl.search;
 
       const dlResponse = await axios.get(downloadUrl.toString(), {
-        responseType: "arraybuffer",
+        responseType: "stream",
         timeout: 30000,
-        maxContentLength: 50 * 1024 * 1024, // 50 MB cap
+        maxContentLength: 50 * 1024 * 1024,
       });
-      pdfBuffer = Buffer.from(dlResponse.data);
+
+      const writer = fs.createWriteStream(tempFilePath);
+      dlResponse.data.pipe(writer);
+
+      await new Promise((resolve, reject) => {
+        writer.on("finish", resolve);
+        writer.on("error", reject);
+        dlResponse.data.on("error", reject);
+      });
     } catch (dlErr) {
+      if (tempFilePath) {
+        await fsPromises.unlink(tempFilePath).catch(() => {});
+      }
       console.error("Failed to download PDF from URL:", dlErr.message);
       return res.status(502).json({ error: "Could not download PDF from the provided URL." });
     }
 
-    // Verify PDF magic bytes
-    if (pdfBuffer.slice(0, 4).toString() !== "%PDF") {
+    // Verify PDF magic bytes from the temp file
+    const fileHandle = await fsPromises.open(tempFilePath, "r");
+    const signatureBuffer = Buffer.alloc(4);
+    try {
+      await fileHandle.read(signatureBuffer, 0, 4, 0);
+    } finally {
+      await fileHandle.close();
+    }
+
+    if (signatureBuffer.toString() !== "%PDF") {
+      await fsPromises.unlink(tempFilePath).catch(() => {});
       return res.status(415).json({ error: "The file at the provided URL is not a valid PDF." });
     }
 
-    // Build multipart form and forward to RAG service
-    // Uses axios.postForm with a FormData blob — no extra form-data package needed
-    const form = new FormData();
-    const pdfBlob = new Blob([pdfBuffer], { type: 'application/pdf' });
-    form.append("file", pdfBlob, safeFilename);
-    form.append("original_filename", safeFilename);
+    // Stream the temp file to the RAG service using axios.postForm — no
+    // additional in-memory Blob needed. This is the same pattern used by /upload.
+    const formData = {
+      file: fs.createReadStream(tempFilePath),
+      original_filename: safeFilename,
+    };
 
-    // Optionally extend an existing session
     if (session_id && session_secret) {
-      form.append("session_id", session_id);
-      form.append("session_secret", session_secret);
+      formData.session_id = session_id;
+      formData.session_secret = session_secret;
     }
 
-    const ragResponse = await axios.post(
+    const ragResponse = await axios.postForm(
       `${RAG_SERVICE_URL}/process-pdf`,
-      form,
+      formData,
       {
         headers: ragAuthHeaders(),
-        timeout: 120000, // 2 min — embedding generation can be slow
+        timeout: 120000,
         maxContentLength: Infinity,
         maxBodyLength: Infinity,
       }
     );
+
+    // Delete the temp file immediately after the RAG service has consumed it.
+    await fsPromises.unlink(tempFilePath).catch(() => {});
+    tempFilePath = null;
 
     return res.json({
       message: "PDF processed and indexed successfully.",
@@ -1091,6 +1119,10 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
       documents: ragResponse.data.documents || [],
     });
   } catch (err) {
+    if (tempFilePath) {
+      await fsPromises.unlink(tempFilePath).catch(() => {});
+    }
+
     const statusCode =
       err.response?.status || (err.code === "ECONNREFUSED" ? 502 : 500);
     const details = extractServiceDetails(err, "RAG processing failed");
