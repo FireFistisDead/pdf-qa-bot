@@ -63,15 +63,7 @@ jobs:
       - name: Run RAG tests
         run: |
           cd rag-service
-          python -m pytest . -v --tb=short > test_output.txt 2>&1; exit_code=$?; cat test_output.txt; exit $exit_code
-
-      - name: Upload RAG test output
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: rag-test-output
-          path: rag-service/test_output.txt
-          if-no-files-found: ignore
+          python -m pytest . -v --tb=short
 
   frontend:
     name: Frontend Build Check
