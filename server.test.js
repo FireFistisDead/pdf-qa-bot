@@ -4,6 +4,7 @@ const http = require("node:http");
 const { spawnSync } = require("node:child_process");
 const axios = require("axios");
 const { Blob } = require("node:buffer");
+const { Readable } = require("node:stream");
 const jwt = require("jsonwebtoken");
 
 const originalInternalRagToken = process.env.INTERNAL_RAG_TOKEN;
@@ -46,8 +47,7 @@ let app,
   normalizeHostnameForAllowlist,
   isAllowedSupabaseHostname;
 
-let _credCache,
-  _credKey,
+let _credKey,
   _credCacheHit,
   _credCacheStore,
   _credCacheDrop;
@@ -63,7 +63,6 @@ before(() => {
   askSchema = mod.askSchema;
   summarizeSchema = mod.summarizeSchema;
   extractServiceDetails = mod.extractServiceDetails;
-  _credCache = mod._credCache;
   _credKey = mod._credKey;
   _credCacheHit = mod._credCacheHit;
   _credCacheStore = mod._credCacheStore;
@@ -496,28 +495,29 @@ describe("route error responses", () => {
 
   test("POST /process-from-url keeps protocol-relative paths on the trusted host", async () => {
     const originalGet = axios.get;
-    const originalPost = axios.post;
+    const originalPostForm = axios.postForm;
     let requestedDownloadUrl = null;
 
     axios.get = async (url) => {
       requestedDownloadUrl = url;
-      return { data: Buffer.from("%PDF-1.4\n%%EOF") };
+      return { data: Readable.from(Buffer.from("%PDF-1.4\n%%EOF")) };
     };
-    axios.post = async () => ({
-      data: {
+    axios.postForm = async (_url, formData) => {
+      await consumeUploadStream(formData);
+      return { data: {
         session_id: "550e8400-e29b-41d4-a716-446655440000",
         session_secret: "session-secret-123",
         document: { filename: "safe.pdf" },
         documents: [],
-      },
-    });
+      }};
+    };
 
     try {
       const res = await fetch(`${baseUrl}/process-from-url`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: "Bearer test-token",
+          Authorization: `Bearer ${jwt.sign({ role: "authenticated" }, process.env.SUPABASE_JWT_SECRET)}`,
         },
         body: JSON.stringify({
           url: "https://xyz.supabase.co//evil.com/file.pdf?download=1",
@@ -533,34 +533,35 @@ describe("route error responses", () => {
       assert.equal(downloadUrl.search, "?download=1");
     } finally {
       axios.get = originalGet;
-      axios.post = originalPost;
+      axios.postForm = originalPostForm;
     }
   });
 
   test("POST /process-from-url accepts whitespace-trimmed Supabase URLs", async () => {
     const originalGet = axios.get;
-    const originalPost = axios.post;
+    const originalPostForm = axios.postForm;
     let requestedDownloadUrl = null;
 
     axios.get = async (url) => {
       requestedDownloadUrl = url;
-      return { data: Buffer.from("%PDF-1.4\n%%EOF") };
+      return { data: Readable.from(Buffer.from("%PDF-1.4\n%%EOF")) };
     };
-    axios.post = async () => ({
-      data: {
+    axios.postForm = async (_url, formData) => {
+      await consumeUploadStream(formData);
+      return { data: {
         session_id: "550e8400-e29b-41d4-a716-446655440000",
         session_secret: "session-secret-123",
         document: { filename: "trimmed.pdf" },
         documents: [],
-      },
-    });
+      }};
+    };
 
     try {
       const res = await fetch(`${baseUrl}/process-from-url`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: "Bearer test-token",
+          Authorization: `Bearer ${jwt.sign({ role: "authenticated" }, process.env.SUPABASE_JWT_SECRET)}`,
         },
         body: JSON.stringify({
           url: "  https://xyz.supabase.co/storage/v1/object/public/docs/trimmed.pdf  ",
@@ -574,7 +575,7 @@ describe("route error responses", () => {
       assert.equal(downloadUrl.pathname, "/storage/v1/object/public/docs/trimmed.pdf");
     } finally {
       axios.get = originalGet;
-      axios.post = originalPost;
+      axios.postForm = originalPostForm;
     }
   });
 
