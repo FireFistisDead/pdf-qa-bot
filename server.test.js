@@ -493,15 +493,16 @@ describe("route error responses", () => {
   });
 
   test("POST /process-from-url keeps protocol-relative paths on the trusted host", async () => {
+    const { Readable } = require("node:stream");
     const originalGet = axios.get;
-    const originalPost = axios.post;
+    const originalPostForm = axios.postForm;
     let requestedDownloadUrl = null;
 
     axios.get = async (url) => {
       requestedDownloadUrl = url;
-      return { data: Buffer.from("%PDF-1.4\n%%EOF") };
+      return { data: Readable.from(Buffer.from("%PDF-1.4\n%%EOF")) };
     };
-    axios.post = async () => ({
+    axios.postForm = async () => ({
       data: {
         session_id: "550e8400-e29b-41d4-a716-446655440000",
         session_secret: "session-secret-123",
@@ -531,20 +532,21 @@ describe("route error responses", () => {
       assert.equal(downloadUrl.search, "?download=1");
     } finally {
       axios.get = originalGet;
-      axios.post = originalPost;
+      axios.postForm = originalPostForm;
     }
   });
 
   test("POST /process-from-url accepts whitespace-trimmed Supabase URLs", async () => {
+    const { Readable } = require("node:stream");
     const originalGet = axios.get;
-    const originalPost = axios.post;
+    const originalPostForm = axios.postForm;
     let requestedDownloadUrl = null;
 
     axios.get = async (url) => {
       requestedDownloadUrl = url;
-      return { data: Buffer.from("%PDF-1.4\n%%EOF") };
+      return { data: Readable.from(Buffer.from("%PDF-1.4\n%%EOF")) };
     };
-    axios.post = async () => ({
+    axios.postForm = async () => ({
       data: {
         session_id: "550e8400-e29b-41d4-a716-446655440000",
         session_secret: "session-secret-123",
@@ -572,7 +574,7 @@ describe("route error responses", () => {
       assert.equal(downloadUrl.pathname, "/storage/v1/object/public/docs/trimmed.pdf");
     } finally {
       axios.get = originalGet;
-      axios.post = originalPost;
+      axios.postForm = originalPostForm;
     }
   });
 
