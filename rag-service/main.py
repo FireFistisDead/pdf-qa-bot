@@ -1671,6 +1671,8 @@ def detect_question_intent(question):
     normalized_question = question.lower()
     terms = tokenize_text(normalized_question)
 
+    if "quiz" in normalized_question or "test" in normalized_question or "questions" in normalized_question or "question paper" in normalized_question:
+        return "quiz"
     if "what is this document about" in normalized_question or "what are these documents about" in normalized_question:
         return "overview"
     if "how is" in normalized_question and terms.intersection(RELATIONSHIP_QUERY_TERMS):
@@ -1989,6 +1991,8 @@ def synthesize_with_ollama(prompt: str) -> Optional[str]:
 
 
 def build_answer_from_documents(question, documents, intent, source_id_by_key=None):
+    if intent == "quiz":
+        return None
     if not has_grounded_keyword_overlap(question, documents) and intent != "overview":
         return INSUFFICIENT_CONTEXT_MESSAGE
     if intent == "relationship":
@@ -2831,7 +2835,7 @@ def validate_uploaded_pdf(file_path: str) -> str:
     return trusted_path
 
 
-VALID_MODES = {"default", "tutor", "socratic", "eli5", "concise"}
+VALID_MODES = {"default", "tutor", "socratic", "eli5", "concise", "quiz"}
 
 class Question(BaseModel):
     question: str = Field(..., min_length=1, description="Question cannot be empty")
@@ -3639,6 +3643,44 @@ def ask_question(data: Question):
             _mark_session_dirty(session_id)
         return result
 
+
+    if intent == "quiz" or mode == "quiz":
+        prompt = (
+            "You are an expert educator. Based on the provided document context, generate a quiz with 5 multiple-choice questions. "
+            "Each question must have 4 options (A, B, C, D) and specify the correct answer. "
+            "Format the output exactly as follows in clean markdown. Do not include any introductory or concluding text, only the quiz itself:\n\n"
+            "# Quiz: [Quiz Title]\n\n"
+            "1. **Question:** [Question text]\n"
+            "   - A) [Option A]\n"
+            "   - B) [Option B]\n"
+            "   - C) [Option C]\n"
+            "   - D) [Option D]\n"
+            "   **Correct Answer:** [Correct Option, e.g., A]\n\n"
+            "2. ...\n\n"
+            f"Context:\n{context}\n\n"
+            f"Question/Request: {question}\n"
+            "Quiz:"
+        )
+    else:
+        prompt = (
+            "You are a careful assistant answering questions over one or more uploaded PDF documents. "
+            "Use only the provided context. The context may include excerpts from multiple PDFs. "
+            "When the question asks for a relationship, comparison, or synthesis, connect the relevant facts across documents. "
+            "If the context does not contain enough information, say that briefly and do not invent details.\n\n"
+
+            "Reference the provided source numbers naturally whenever the answer is directly supported by the context.\n"
+            "Cite sources using formats like 'According to Source 1' or 'Source 2 explains that...'\n"
+
+            "You are a helpful AI assistant.\n"
+            "Give clear, conversational, human-friendly answers.\n"
+            "Do not return raw PDF text or chunks.\n"
+            "Summarize properly in readable sentences.\n\n"
+
+            f"Context:\n{context}\n\n"
+            f"Question: {question}\n"
+            "Answer:"
+        )
+
     followup_instructions = ""
     if mode in ["tutor", "socratic"]:
         followup_instructions = (
@@ -3672,6 +3714,7 @@ def ask_question(data: Question):
         f"Question: {question}\n"
         "Answer:"
     )
+
 
     logger.info(
         "Executing query session_id=%s retrieved_chunks=%s sources=%s",
@@ -3723,7 +3766,7 @@ def ask_question(data: Question):
     logger.info("Falling back to HuggingFace generate_response session_id=%s", session_id)
     answer = generate_response(
         prompt,
-        max_new_tokens=256
+        max_new_tokens=512 if (intent == "quiz" or mode == "quiz") else 256
     )
 
     framed = apply_mode_framing(answer, question, mode, docs, context)
@@ -3943,6 +3986,41 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
     # LLM generation path — run in a background thread so we can stream tokens
     # back to the caller as they are produced rather than waiting for the full
     # completion before sending anything.
+
+    if intent == "quiz" or mode == "quiz":
+        prompt = (
+            "You are an expert educator. Based on the provided document context, generate a quiz with 5 multiple-choice questions. "
+            "Each question must have 4 options (A, B, C, D) and specify the correct answer. "
+            "Format the output exactly as follows in clean markdown. Do not include any introductory or concluding text, only the quiz itself:\n\n"
+            "# Quiz: [Quiz Title]\n\n"
+            "1. **Question:** [Question text]\n"
+            "   - A) [Option A]\n"
+            "   - B) [Option B]\n"
+            "   - C) [Option C]\n"
+            "   - D) [Option D]\n"
+            "   **Correct Answer:** [Correct Option, e.g., A]\n\n"
+            "2. ...\n\n"
+            f"Context:\n{context}\n\n"
+            f"Question/Request: {question}\n"
+            "Quiz:"
+        )
+    else:
+        prompt = (
+            "You are a careful assistant answering questions over one or more uploaded PDF documents. "
+            "Use only the provided context. The context may include excerpts from multiple PDFs. "
+            "When the question asks for a relationship, comparison, or synthesis, connect the relevant facts across documents. "
+            "If the context does not contain enough information, say that briefly and do not invent details.\n\n"
+            "Reference the provided source numbers naturally whenever the answer is directly supported by the context.\n"
+            "Cite sources using formats like 'According to Source 1' or 'Source 2 explains that...'\n"
+            "You are a helpful AI assistant.\n"
+            "Give clear, conversational, human-friendly answers.\n"
+            "Do not return raw PDF text or chunks.\n"
+            "Summarize properly in readable sentences.\n\n"
+            f"Context:\n{context}\n\n"
+            f"Question: {question}\n"
+            "Answer:"
+        )
+
     followup_instructions = ""
     if mode in ["tutor", "socratic"]:
         followup_instructions = (
@@ -3974,6 +4052,7 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
         "Answer:"
     )
 
+
     logger.info(
         "Stream executing query session_id=%s retrieved_chunks=%s",
         session_id,
@@ -3987,6 +4066,14 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
             yield err
             return
 
+
+            generate_kwargs = {
+                **encoded,
+                "max_new_tokens": 512 if (intent == "quiz" or mode == "quiz") else 256,
+                "do_sample": False,
+                "pad_token_id": pad_token_id,
+                "streamer": streamer,
+
         full_answer_parts = []
         try:
             import urllib.request
@@ -3997,6 +4084,7 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
                 "Authorization": f"Bearer {groq_api_key}",
                 "Content-Type": "application/json",
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+
             }
             payload = json.dumps({
                 "model": "llama-3.1-8b-instant",

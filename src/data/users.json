@@ -1,5 +1,13 @@
 [
   {
+
+    "email": "testuser-1780934845930@example.com",
+    "password": "$2b$10$9AAsvzxfwNp9haLU2oKNMuMTeY3icNBzPYcPHTx3Wv4w78ZUVD7Ry"
+  },
+  {
+    "email": "testuser2-1780934846010@example.com",
+    "password": "$2b$10$6oXLfmhPAQzfCVLwS5iy/Oqoi5THfbxdKVMjxpWIB/29FwmLnPcTC"
+
     "email": "testuser-1780133113651@example.com",
     "password": "$2b$10$VlcKirFc6zLReabLg97GeOslLoXzPF5WUigQ/JjPrQi5pMpwBuMMe"
   },
@@ -14,5 +22,6 @@
   {
     "email": "testuser2-1780133179757@example.com",
     "password": "$2b$10$Qae0TsUBvMMjZ0Ofog1B6uHp0GmV5hlbL1q6mVgFtUX6/STIJJliO"
+
   }
 ]

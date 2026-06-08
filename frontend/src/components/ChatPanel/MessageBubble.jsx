@@ -2,8 +2,12 @@ import React from "react";
 
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+
+import { exportQuizToPdf, exportQuizToWord } from "../../utils/quizExporter";
+
 import BookmarkBorderIcon from "@mui/icons-material/BookmarkBorder";
 import BookmarkIcon from "@mui/icons-material/Bookmark";
+
 
 // Strict allowlist for AI-generated markdown content.
 //
@@ -46,6 +50,7 @@ const MODE_BADGE = {
   socratic: { label: "Socratic",  bg: "rgba(139,92,246,0.15)", color: "#8B5CF6" },
   eli5:     { label: "Simple",    bg: "rgba(34,197,94,0.15)",  color: "#22C55E" },
   concise:  { label: "Concise",   bg: "rgba(249,115,22,0.15)", color: "#F97316" },
+  quiz:     { label: "Quiz",      bg: "rgba(139,92,246,0.15)", color: "#8B5CF6" },
 };
 
 const MessageBubble = ({
@@ -153,6 +158,43 @@ const MessageBubble = ({
           <span>{msg.text}</span>
         )}
 
+
+        {msg.role === "bot" && !msg.streaming && (msg.mode === "quiz" || msg.text.includes("# Quiz") || msg.text.toLowerCase().includes("quiz:")) && (
+          <div style={{ marginTop: "14px", display: "flex", gap: "10px" }}>
+            <button
+              onClick={() => exportQuizToPdf(msg.text, "quiz")}
+              style={{
+                padding: "6px 14px",
+                borderRadius: "10px",
+                border: "none",
+                background: "linear-gradient(135deg, #8B5CF6 0%, #6366F1 100%)",
+                color: "white",
+                fontWeight: 600,
+                fontSize: "12px",
+                cursor: "pointer",
+                boxShadow: "0 4px 10px rgba(139, 92, 246, 0.2)",
+                transition: "all 0.2s ease"
+              }}
+            >
+              📄 Download PDF
+            </button>
+            <button
+              onClick={() => exportQuizToWord(msg.text, "quiz")}
+              style={{
+                padding: "6px 14px",
+                borderRadius: "10px",
+                border: darkMode ? "1px solid rgba(255,255,255,0.15)" : "1px solid rgba(0,0,0,0.15)",
+                background: "transparent",
+                color: darkMode ? "#D1D5DB" : "#4B5563",
+                fontWeight: 600,
+                fontSize: "12px",
+                cursor: "pointer",
+                transition: "all 0.2s ease"
+              }}
+            >
+              📝 Download Word
+            </button>
+
         {followup && !msg.streaming && (
           <div style={{
             marginTop: "16px",
@@ -202,6 +244,7 @@ const MessageBubble = ({
                 </button>
               ))}
             </div>
+
           </div>
         )}
 
