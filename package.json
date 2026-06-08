@@ -8,6 +8,7 @@
   "main": "index.js",
   "scripts": {
     "test": "node --test server.test.js",
+    "lint": "eslint . --ext .js",
     "build": "npm --prefix frontend run build"
   },
   "keywords": [],
@@ -30,5 +31,8 @@
     "redis": "^4.7.1",
     "sqlite3": "^6.0.1",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0"
   }
 }

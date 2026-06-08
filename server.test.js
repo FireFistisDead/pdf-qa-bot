@@ -4,15 +4,57 @@ const http = require("node:http");
 const { spawnSync } = require("node:child_process");
 const axios = require("axios");
 const { Blob } = require("node:buffer");
+const jwt = require("jsonwebtoken");
 
-process.env.JWT_SECRET = "test-secret-for-ci";
-process.env.INTERNAL_RAG_TOKEN = "test-internal-token-for-ci";
+const originalInternalRagToken = process.env.INTERNAL_RAG_TOKEN;
+const originalJwtSecret = process.env.JWT_SECRET;
+const originalSupabaseJwtSecret = process.env.SUPABASE_JWT_SECRET;
+
+before(() => {
+  process.env.INTERNAL_RAG_TOKEN = process.env.INTERNAL_RAG_TOKEN || "test-internal-rag-token";
+  process.env.JWT_SECRET = process.env.JWT_SECRET || "test-jwt-secret";
+  process.env.SUPABASE_JWT_SECRET = process.env.SUPABASE_JWT_SECRET || "test-supabase-jwt-secret";
+});
+
+after(() => {
+  if (originalInternalRagToken === undefined) {
+    delete process.env.INTERNAL_RAG_TOKEN;
+  } else {
+    process.env.INTERNAL_RAG_TOKEN = originalInternalRagToken;
+  }
+
+  if (originalJwtSecret === undefined) {
+    delete process.env.JWT_SECRET;
+  } else {
+    process.env.JWT_SECRET = originalJwtSecret;
+  }
+
+  if (originalSupabaseJwtSecret === undefined) {
+    delete process.env.SUPABASE_JWT_SECRET;
+  } else {
+    process.env.SUPABASE_JWT_SECRET = originalSupabaseJwtSecret;
+  }
+});
 
 // Module-load test: would throw at require time if any undefined
 // variable (e.g. fsSync) or broken import exists
-let app, askSchema, summarizeSchema, extractServiceDetails, ragAuthHeaders;
-let _credCache, _credKey, _credCacheHit, _credCacheStore, _credCacheDrop;
-let validateAskBody, validateSummarizeBody, MAX_QUESTION_LENGTH;
+let app,
+  askSchema,
+  summarizeSchema,
+  extractServiceDetails,
+  ragAuthHeaders,
+  normalizeHostnameForAllowlist,
+  isAllowedSupabaseHostname;
+
+let _credCache,
+  _credKey,
+  _credCacheHit,
+  _credCacheStore,
+  _credCacheDrop;
+
+let validateAskBody,
+  validateSummarizeBody,
+  MAX_QUESTION_LENGTH;
 let clientIpFromRequest, normalizeIp;
 before(() => {
   process.env.JWT_SECRET = "test-secret-for-ci";
@@ -30,6 +72,8 @@ before(() => {
   validateSummarizeBody = mod.validateSummarizeBody;
   MAX_QUESTION_LENGTH = mod.MAX_QUESTION_LENGTH;
   ragAuthHeaders = mod.ragAuthHeaders;
+  normalizeHostnameForAllowlist = mod.normalizeHostnameForAllowlist;
+  isAllowedSupabaseHostname = mod.isAllowedSupabaseHostname;
 
   ({ clientIpFromRequest, normalizeIp } = require("./security/ip"));
 });
@@ -45,6 +89,28 @@ test("module loads without error", () => {
 
 test("ragAuthHeaders forwards the internal token", () => {
   assert.deepEqual(ragAuthHeaders(), { "X-Internal-Token": process.env.INTERNAL_RAG_TOKEN.trim() });
+});
+
+describe("Supabase URL allowlist", () => {
+  test("normalizes hostname case and trailing dot", () => {
+    assert.equal(normalizeHostnameForAllowlist("XyZ.SUPABASE.CO."), "xyz.supabase.co");
+  });
+
+  test("normalizes multiple trailing dots deterministically", () => {
+    assert.equal(normalizeHostnameForAllowlist("XyZ.SUPABASE.CO..."), "xyz.supabase.co");
+  });
+
+  test("accepts valid Supabase project hostnames", () => {
+    assert.equal(isAllowedSupabaseHostname("xyz.supabase.co"), true);
+    assert.equal(isAllowedSupabaseHostname("xyz.supabase.in"), true);
+    assert.equal(isAllowedSupabaseHostname("XYZ.SUPABASE.CO."), true);
+  });
+
+  test("rejects lookalike and unrelated hostnames", () => {
+    assert.equal(isAllowedSupabaseHostname("supabase.co"), false);
+    assert.equal(isAllowedSupabaseHostname("evil.com"), false);
+    assert.equal(isAllowedSupabaseHostname("xyz.supabase.co.evil.com"), false);
+  });
 });
 
 test("server module can be imported when INTERNAL_RAG_TOKEN is unset", () => {
@@ -83,6 +149,27 @@ test("server startup fails when INTERNAL_RAG_TOKEN is unset", () => {
 
   assert.notEqual(result.status, 0);
   assert.match(`${result.stderr}${result.stdout}`, /INTERNAL_RAG_TOKEN must be configured/);
+});
+
+test("server startup fails when SUPABASE_JWT_SECRET is unset", () => {
+  const result = spawnSync(
+    process.execPath,
+    ["server.js"],
+    {
+      cwd: __dirname,
+      env: {
+        ...process.env,
+        SUPABASE_JWT_SECRET: "",
+        JWT_SECRET: "test-jwt-secret",
+        INTERNAL_RAG_TOKEN: "test-internal-rag-token",
+      },
+      encoding: "utf8",
+      timeout: 5000,
+    },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stderr}${result.stdout}`, /SUPABASE_JWT_SECRET missing/);
 });
 
 const createPdfUploadBody = ({ sessionId = null, sessionSecret = null } = {}) => {
@@ -401,8 +488,92 @@ describe("route error responses", () => {
         }),
       });
       assert.equal(res.status, 200);
-      assert.equal(forwardedHeaders["X-Internal-Token"], "test-internal-token-for-ci");
+      assert.equal(forwardedHeaders["X-Internal-Token"], process.env.INTERNAL_RAG_TOKEN);
     } finally {
+      axios.post = originalPost;
+    }
+  });
+
+  test("POST /process-from-url keeps protocol-relative paths on the trusted host", async () => {
+    const originalGet = axios.get;
+    const originalPost = axios.post;
+    let requestedDownloadUrl = null;
+
+    axios.get = async (url) => {
+      requestedDownloadUrl = url;
+      return { data: Buffer.from("%PDF-1.4\n%%EOF") };
+    };
+    axios.post = async () => ({
+      data: {
+        session_id: "550e8400-e29b-41d4-a716-446655440000",
+        session_secret: "session-secret-123",
+        document: { filename: "safe.pdf" },
+        documents: [],
+      },
+    });
+
+    try {
+      const res = await fetch(`${baseUrl}/process-from-url`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer test-token",
+        },
+        body: JSON.stringify({
+          url: "https://xyz.supabase.co//evil.com/file.pdf?download=1",
+          filename: "safe.pdf",
+        }),
+      });
+
+      assert.equal(res.status, 200);
+      const downloadUrl = new URL(requestedDownloadUrl);
+      assert.equal(downloadUrl.protocol, "https:");
+      assert.equal(downloadUrl.hostname, "xyz.supabase.co");
+      assert.equal(downloadUrl.pathname, "//evil.com/file.pdf");
+      assert.equal(downloadUrl.search, "?download=1");
+    } finally {
+      axios.get = originalGet;
+      axios.post = originalPost;
+    }
+  });
+
+  test("POST /process-from-url accepts whitespace-trimmed Supabase URLs", async () => {
+    const originalGet = axios.get;
+    const originalPost = axios.post;
+    let requestedDownloadUrl = null;
+
+    axios.get = async (url) => {
+      requestedDownloadUrl = url;
+      return { data: Buffer.from("%PDF-1.4\n%%EOF") };
+    };
+    axios.post = async () => ({
+      data: {
+        session_id: "550e8400-e29b-41d4-a716-446655440000",
+        session_secret: "session-secret-123",
+        document: { filename: "trimmed.pdf" },
+        documents: [],
+      },
+    });
+
+    try {
+      const res = await fetch(`${baseUrl}/process-from-url`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer test-token",
+        },
+        body: JSON.stringify({
+          url: "  https://xyz.supabase.co/storage/v1/object/public/docs/trimmed.pdf  ",
+          filename: "trimmed.pdf",
+        }),
+      });
+
+      assert.equal(res.status, 200);
+      const downloadUrl = new URL(requestedDownloadUrl);
+      assert.equal(downloadUrl.hostname, "xyz.supabase.co");
+      assert.equal(downloadUrl.pathname, "/storage/v1/object/public/docs/trimmed.pdf");
+    } finally {
+      axios.get = originalGet;
       axios.post = originalPost;
     }
   });
@@ -1004,5 +1175,78 @@ describe("credential validation cache", () => {
   test("validateSummarizeBody rejects missing session_id", () => {
     const result = validateSummarizeBody({ session_secret: "some-secret" });
     assert.equal(result.success, false);
+  });
+});
+
+describe("requireSupabaseAuth", () => {
+  let server;
+  let baseUrl;
+
+  before(() => {
+    return new Promise((resolve) => {
+      server = http.createServer(app);
+      server.listen(0, () => {
+        const address = server.address();
+        baseUrl = `http://127.0.0.1:${address.port}`;
+        resolve();
+      });
+    });
+  });
+
+  after(() => {
+    if (server) server.close();
+  });
+
+  test("rejects missing Authorization header", async () => {
+    const res = await fetch(`${baseUrl}/process-from-url`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "https://example.com/test.pdf" }),
+    });
+    assert.equal(res.status, 401);
+    const data = await res.json();
+    assert.equal(data.error, "Missing or invalid authorization token");
+  });
+
+  test("rejects malformed token", async () => {
+    const res = await fetch(`${baseUrl}/process-from-url`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer invalid.jwt.token",
+      },
+      body: JSON.stringify({ url: "https://example.com/test.pdf" }),
+    });
+    assert.equal(res.status, 401);
+    const data = await res.json();
+    assert.equal(data.error, "Invalid token");
+  });
+
+  test("rejects token signed with wrong secret", async () => {
+    const token = jwt.sign({ role: "authenticated" }, "wrong-secret");
+    const res = await fetch(`${baseUrl}/process-from-url`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ url: "https://example.com/test.pdf" }),
+    });
+    assert.equal(res.status, 401);
+    const data = await res.json();
+    assert.equal(data.error, "Invalid token");
+  });
+
+  test("accepts valid token and proceeds to route handler", async () => {
+    const token = jwt.sign({ role: "authenticated" }, process.env.SUPABASE_JWT_SECRET);
+    const res = await fetch(`${baseUrl}/process-from-url`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ url: "https://example.com/test.pdf" }),
+    });
+    assert.notEqual(res.status, 401, "Valid token should not be rejected");
   });
 });

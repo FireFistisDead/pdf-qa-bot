@@ -1,0 +1,9 @@
+node_modules/
+frontend/
+rag-service/
+.git/
+src/App.js
+src/App.test.js
+src/index.js
+src/reportWebVitals.js
+src/setupTests.js
