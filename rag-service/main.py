@@ -780,6 +780,19 @@ SEMANTIC_CHUNK_HIERARCHICAL = os.getenv(
     "SEMANTIC_CHUNK_HIERARCHICAL", "true"
 ).strip().lower() in {"1", "true", "yes", "on"}
 
+# ── LLM Provider Configuration ────────────────────────────────────────────────
+# LLM_PROVIDER selects the cloud provider for answer generation.
+# Supported values: "openai", "anthropic", "groq", "ollama", "huggingface"
+# When set to "huggingface" (or empty), only the local model is used.
+# Cloud providers require their respective API keys to be set.
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "").strip().lower()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-haiku-20240307")
+ANTHROPIC_TIMEOUT_SECS = int(os.getenv("ANTHROPIC_TIMEOUT_SECS", "30"))
+OPENAI_TIMEOUT_SECS = int(os.getenv("OPENAI_TIMEOUT_SECS", "30"))
+
 # ── Ollama LLM Synthesis ─────────────────────────────────────────────────────
 # When Ollama is running locally the /ask endpoint will use it as the primary
 # generative synthesiser. If Ollama is unreachable the pipeline falls back to
@@ -984,6 +997,7 @@ def persist_session_registry_entry(session_id: str, meta: dict):
             "expires_at": session_expires_at(last_accessed),
             "documents": list(meta.get("documents", [])),
             "session_dir": session_dir,
+            "session_secret": meta.get("session_secret", ""),
             "hashed_session_secret": meta.get("hashed_session_secret") or _hash_secret(meta.get("session_secret", "")),
         }
         write_session_registry_unlocked(registry)
@@ -1986,6 +2000,302 @@ def synthesize_with_ollama(prompt: str) -> Optional[str]:
     except Exception as exc:  # noqa: BLE001 — intentional catch-all for fallback
         logger.info("Ollama unavailable, falling back to extractive path: %s", exc)
         return None
+
+
+def synthesize_with_openai(prompt: str) -> Optional[str]:
+    """Send a RAG prompt to OpenAI's API and return the generated text.
+    Returns None on any failure so the caller can fall back gracefully.
+    """
+    if not OPENAI_API_KEY:
+        return None
+
+    try:
+        payload = json.dumps({
+            "model": OPENAI_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "max_tokens": 512,
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+            },
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=OPENAI_TIMEOUT_SECS) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            text = (body.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+            if text:
+                logger.info("OpenAI synthesis succeeded model=%s chars=%d", OPENAI_MODEL, len(text))
+                return text
+            logger.warning("OpenAI returned an empty response")
+            return None
+
+    except Exception as exc:
+        logger.info("OpenAI unavailable, falling back: %s", exc)
+        return None
+
+
+def synthesize_with_anthropic(prompt: str) -> Optional[str]:
+    """Send a RAG prompt to Anthropic's API and return the generated text.
+    Returns None on any failure so the caller can fall back gracefully.
+    """
+    if not ANTHROPIC_API_KEY:
+        return None
+
+    try:
+        payload = json.dumps({
+            "model": ANTHROPIC_MODEL,
+            "max_tokens": 512,
+            "messages": [{"role": "user", "content": prompt}],
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+            },
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=ANTHROPIC_TIMEOUT_SECS) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            content_blocks = body.get("content", [])
+            text = ""
+            for block in content_blocks:
+                if block.get("type") == "text":
+                    text += block.get("text", "")
+            text = text.strip()
+            if text:
+                logger.info("Anthropic synthesis succeeded model=%s chars=%d", ANTHROPIC_MODEL, len(text))
+                return text
+            logger.warning("Anthropic returned an empty response")
+            return None
+
+    except Exception as exc:
+        logger.info("Anthropic unavailable, falling back: %s", exc)
+        return None
+
+
+def _select_cloud_synthesizer(prompt: str) -> Optional[str]:
+    """Try the configured cloud LLM provider and return the answer or None.
+
+    Provider priority: LLM_PROVIDER env var → Ollama → HuggingFace fallback.
+    When LLM_PROVIDER is explicitly set, only that provider is attempted.
+    When empty, the legacy Ollama-first fallback chain is preserved.
+    """
+    if LLM_PROVIDER == "openai":
+        return synthesize_with_openai(prompt)
+    if LLM_PROVIDER == "anthropic":
+        return synthesize_with_anthropic(prompt)
+    if LLM_PROVIDER == "groq":
+        return synthesize_with_groq(prompt)
+    if LLM_PROVIDER == "ollama":
+        return synthesize_with_ollama(prompt)
+    if LLM_PROVIDER == "huggingface":
+        return None
+
+    # Legacy fallback chain when no explicit provider is configured
+    ollama_result = synthesize_with_ollama(prompt)
+    if ollama_result:
+        return ollama_result
+    openai_result = synthesize_with_openai(prompt)
+    if openai_result:
+        return openai_result
+    anthropic_result = synthesize_with_anthropic(prompt)
+    if anthropic_result:
+        return anthropic_result
+    return None
+
+
+def synthesize_with_groq(prompt: str) -> Optional[str]:
+    """Send a RAG prompt to Groq's API and return the generated text.
+    Returns None on any failure so the caller can fall back gracefully.
+    """
+    groq_api_key = os.environ.get("GROQ_API_KEY")
+    if not groq_api_key:
+        return None
+
+    try:
+        payload = json.dumps({
+            "model": "llama-3.1-8b-instant",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "max_tokens": 512,
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            "https://api.groq.com/openai/v1/chat/completions",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {groq_api_key}",
+            },
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            text = (body.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+            if text:
+                logger.info("Groq synthesis succeeded chars=%d", len(text))
+                return text
+            logger.warning("Groq returned an empty response")
+            return None
+
+    except Exception as exc:
+        logger.info("Groq unavailable, falling back: %s", exc)
+        return None
+
+
+def _stream_with_openai(prompt: str):
+    """Yield tokens from OpenAI's streaming API."""
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+
+    payload = json.dumps({
+        "model": OPENAI_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "stream": True,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(req, timeout=OPENAI_TIMEOUT_SECS) as resp:
+        for line in resp:
+            decoded = line.decode("utf-8").strip()
+            if decoded.startswith("data: "):
+                data_str = decoded[6:]
+                if data_str == "[DONE]":
+                    break
+                try:
+                    data = json.loads(data_str)
+                    token = data["choices"][0]["delta"].get("content", "")
+                    if token:
+                        yield token
+                except Exception:
+                    pass
+
+
+def _stream_with_anthropic(prompt: str):
+    """Yield tokens from Anthropic's streaming API."""
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY is not configured")
+
+    payload = json.dumps({
+        "model": ANTHROPIC_MODEL,
+        "max_tokens": 512,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": True,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(req, timeout=ANTHROPIC_TIMEOUT_SECS) as resp:
+        for line in resp:
+            decoded = line.decode("utf-8").strip()
+            if decoded.startswith("data: "):
+                data_str = decoded[6:]
+                try:
+                    data = json.loads(data_str)
+                    if data.get("type") == "content_block_delta":
+                        delta = data.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            yield delta.get("text", "")
+                except Exception:
+                    pass
+
+
+def _stream_with_groq(prompt: str):
+    """Yield tokens from Groq's streaming API."""
+    groq_api_key = os.environ.get("GROQ_API_KEY")
+    if not groq_api_key:
+        raise RuntimeError("GROQ_API_KEY is not configured")
+
+    payload = json.dumps({
+        "model": "llama-3.1-8b-instant",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "stream": True,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.groq.com/openai/v1/chat/completions",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {groq_api_key}",
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        for line in resp:
+            decoded = line.decode("utf-8").strip()
+            if decoded.startswith("data: "):
+                data_str = decoded[6:]
+                if data_str == "[DONE]":
+                    break
+                try:
+                    data = json.loads(data_str)
+                    token = data["choices"][0]["delta"].get("content", "")
+                    if token:
+                        yield token
+                except Exception:
+                    pass
+
+
+def _select_streaming_provider(prompt: str):
+    """Return a generator that yields tokens from the configured streaming provider.
+
+    Raises RuntimeError if no streaming-capable provider is configured.
+    """
+    if LLM_PROVIDER == "openai":
+        return _stream_with_openai(prompt)
+    if LLM_PROVIDER == "anthropic":
+        return _stream_with_anthropic(prompt)
+    if LLM_PROVIDER == "groq":
+        return _stream_with_groq(prompt)
+
+    # When no explicit provider is set, try configured cloud providers
+    if OPENAI_API_KEY and not LLM_PROVIDER:
+        return _stream_with_openai(prompt)
+    if ANTHROPIC_API_KEY and not LLM_PROVIDER:
+        return _stream_with_anthropic(prompt)
+    if os.environ.get("GROQ_API_KEY") and not LLM_PROVIDER:
+        return _stream_with_groq(prompt)
+
+    raise RuntimeError(
+        "No streaming-capable LLM provider configured. "
+        "Set LLM_PROVIDER to 'openai', 'anthropic', or 'groq', "
+        "or configure OPENAI_API_KEY / ANTHROPIC_API_KEY / GROQ_API_KEY."
+    )
 
 
 def build_answer_from_documents(question, documents, intent, source_id_by_key=None):
@@ -3674,34 +3984,34 @@ def ask_question(data: Question):
     )
 
     logger.info(
-        "Executing query session_id=%s retrieved_chunks=%s sources=%s",
+        "Executing query session_id=%s retrieved_chunks=%s sources=%s provider=%s",
         session_id,
         len(docs),
         retrieved_sources,
+        LLM_PROVIDER or "auto",
     )
 
-    # ── Step 1: Try Ollama (local generative LLM) ────────────────────────────
-    # synthesize_with_ollama() returns None on any failure so the pipeline
-    # falls through to the HuggingFace model transparently.
-    ollama_answer = synthesize_with_ollama(prompt)
+    # ── Step 1: Try cloud / Ollama synthesizer via unified provider ───────────
+    cloud_answer = _select_cloud_synthesizer(prompt)
 
-    if ollama_answer:
-        framed = apply_mode_framing(ollama_answer, question, mode, docs, context)
+    if cloud_answer:
+        framed = apply_mode_framing(cloud_answer, question, mode, docs, context)
         # Mode-framing can strip citations for non-standard modes; keep the
-        # raw Ollama answer as-is — it already cited sources in the prompt.
+        # raw answer as-is — it already cited sources in the prompt.
         if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
             logger.info(
-                "Mode framing stripped citations from Ollama answer; reverting session_id=%s mode=%s",
+                "Mode framing stripped citations from LLM answer; reverting session_id=%s mode=%s",
                 session_id,
                 mode,
             )
-            framed = ollama_answer
+            framed = cloud_answer
 
+        answer_mode = f"{LLM_PROVIDER}-generative" if LLM_PROVIDER else "generative"
         response_payload = {
             "answer": framed,
             "sources": citation_sources,
             "retrieval_type": "citation-aware",
-            "answer_mode": "generative",
+            "answer_mode": answer_mode,
             "cache_hit": cache_hit,
             "mode": mode,
         }
@@ -3975,20 +4285,23 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
     )
 
     logger.info(
-        "Stream executing query session_id=%s retrieved_chunks=%s",
+        "Stream executing query session_id=%s retrieved_chunks=%s provider=%s",
         session_id,
         len(docs),
+        LLM_PROVIDER or "auto",
     )
 
     def _generate_and_stream():
-        groq_api_key = os.environ.get("GROQ_API_KEY")
-        if not groq_api_key:
-            err = "Groq API Key is missing! Please provide your GROQ_API_KEY in the environment."
-            yield err
-            return
-
         full_answer_parts = []
         try:
+            token_stream = _select_streaming_provider(prompt)
+            for token in token_stream:
+                full_answer_parts.append(token)
+                yield token
+        except RuntimeError as exc:
+            err = str(exc)
+            yield err
+            full_answer_parts.append(err)
             import urllib.request
             import json
             
@@ -4022,7 +4335,7 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
                         except Exception:
                             pass
         except Exception as e:
-            err = f"Groq API Error: {str(e)}"
+            err = f"LLM API Error: {str(e)}"
             yield err
             full_answer_parts.append(err)
 
