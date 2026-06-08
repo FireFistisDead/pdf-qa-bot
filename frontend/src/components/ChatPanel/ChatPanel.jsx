@@ -5,7 +5,8 @@ import toast from "react-hot-toast";
 
 import MessageBubble from "./MessageBubble";
 import ExportMenu from "./ExportMenu";
-import { askQuestionApi, askQuestionStreamApi, extractApiErrorMessage, summarizePdfApi } from "../../services/api";
+import KnowledgeGapMap from "./KnowledgeGapMap";
+import { askQuestionApi, askQuestionStreamApi, extractApiErrorMessage, summarizePdfApi, mapKnowledgeGapsApi } from "../../services/api";
 
 const MODE_OPTIONS = [
   { value: "default",  label: "Standard",  tooltip: "Balanced answers grounded in your document. Best for general-purpose reading." },
@@ -22,14 +23,22 @@ const ChatPanel = ({
   currentPdfName,
   currentPdfSessionId,
   currentPdfSessionSecret,
+  currentDocumentId,
+  knowledgeGapResult,
+  onKnowledgeGapResult,
   onUpdateLastBotMessage,
   onAppendMessage,
   onOpenSource,
   handleClearChat,
+  savedMessageIds,
+  onToggleBookmark,
+  highlightedMessageId,
+  onRegisterMessageRef,
 }) => {
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
   const [summarizing, setSummarizing] = useState(false);
+  const [mappingGaps, setMappingGaps] = useState(false);
   const [mode, setMode] = useState(() => {
     const saved = localStorage.getItem("pdfqa_preferred_mode");
     return MODE_OPTIONS.some(opt => opt.value === saved) ? saved : "default";
@@ -46,8 +55,9 @@ const ChatPanel = ({
       behavior: "smooth",
     });
   }, [currentChat, asking]);
-const askQuestion = async () => {
-  if (!question.trim()) {
+const askQuestion = async (overrideQuestion = null) => {
+  const queryToAsk = typeof overrideQuestion === 'string' ? overrideQuestion : question;
+  if (!queryToAsk.trim()) {
     toast.error("Please enter a question before submitting.");
     return;
   }
@@ -56,11 +66,13 @@ const askQuestion = async () => {
     return;
   }
 
-  const trimmedQuestion = question;
+  const trimmedQuestion = queryToAsk.trim();
   setAsking(true);
-  setQuestion("");
+  if (typeof overrideQuestion !== 'string') {
+    setQuestion("");
+  }
   onAppendMessage({ role: "user", text: trimmedQuestion });
-  onAppendMessage({ role: "bot", text: "", streaming: true, sources: [], mode });
+  onAppendMessage({ role: "bot", text: "", question: trimmedQuestion, streaming: true, sources: [], mode });
 
   try {
     await askQuestionStreamApi(trimmedQuestion, currentPdfSessionId, currentPdfSessionSecret, mode, (partialText) => {
@@ -103,7 +115,7 @@ const askQuestion = async () => {
 
     try {
       const data = await summarizePdfApi(currentPdfName, currentPdfSessionId, currentPdfSessionSecret);
-      onAppendMessage({ role: "bot", text: data.summary });
+      onAppendMessage({ role: "bot", text: data.summary, question: `Summarize ${currentPdfName || "document"}` });
       toast.success("PDF summarized successfully!", {
         id: loadingToast,
       });
@@ -127,9 +139,42 @@ const askQuestion = async () => {
       toast.error(errorMessage, {
         id: loadingToast,
       });
-      onAppendMessage({ role: "bot", text: errorMessage });
+      onAppendMessage({ role: "bot", text: errorMessage, question: `Summarize ${currentPdfName || "document"}` });
     }
     setSummarizing(false);
+  };
+
+  const mapKnowledgeGaps = async () => {
+    if (!selectedPdf || !currentPdfSessionId || !currentPdfSessionSecret) {
+      toast.error("Please upload and select a PDF document first.");
+      return;
+    }
+    setMappingGaps(true);
+    const loadingToast = toast.loading("Analysing knowledge prerequisites…");
+    try {
+      const data = await mapKnowledgeGapsApi(
+        currentPdfSessionId,
+        currentPdfSessionSecret,
+        currentDocumentId || null,
+      );
+      onKnowledgeGapResult?.(data);
+      toast.success("Knowledge gap map ready!", { id: loadingToast });
+    } catch (e) {
+      let errorMessage = "Error mapping knowledge gaps. Please try again.";
+      if (e.code === "ECONNABORTED") {
+        errorMessage = "Request timed out. Please try again.";
+      } else if (!e.response) {
+        errorMessage = "Network error. Please check if the backend is running.";
+      } else if (e.response?.status === 422) {
+        errorMessage = extractApiErrorMessage(e, errorMessage);
+      } else if (e.response?.status === 404) {
+        errorMessage = "Session not found. Please re-upload the PDF.";
+      } else {
+        errorMessage = extractApiErrorMessage(e, errorMessage);
+      }
+      toast.error(errorMessage, { id: loadingToast });
+    }
+    setMappingGaps(false);
   };
 
   return (
@@ -179,6 +224,7 @@ const askQuestion = async () => {
           </div>
           <div className="d-flex gap-2">
             <Button
+              id="btn-summarize"
               variant="warning"
               size="sm"
               onClick={summarizePDF}
@@ -191,6 +237,24 @@ const askQuestion = async () => {
               )}
             </Button>
 
+            <Button
+              id="btn-knowledge-gaps"
+              variant="outline-info"
+              size="sm"
+              onClick={mapKnowledgeGaps}
+              disabled={mappingGaps || !selectedPdf}
+              title={`Map prerequisite concepts${currentPdfName ? ` in ${currentPdfName}` : ""}`}
+              style={{ whiteSpace: "nowrap" }}
+            >
+              {mappingGaps ? (
+                <><Spinner animation="border" size="sm" /> Analysing…</>
+              ) : knowledgeGapResult ? (
+                "🔄 Re-run Gap Map"
+              ) : (
+                "📚 Map Knowledge Gaps"
+              )}
+            </Button>
+
             <ExportMenu currentChat={currentChat} selectedPdfName={currentPdfName} />
             <Button
             variant="danger"
@@ -200,6 +264,16 @@ const askQuestion = async () => {
             </Button>
           </div>
         </div>
+
+        {/* KNOWLEDGE GAP MAP — rendered above chat, not as a chat message */}
+        {knowledgeGapResult && (
+          <KnowledgeGapMap
+            result={knowledgeGapResult}
+            darkMode={darkMode}
+            onOpenSource={onOpenSource}
+            onDismiss={() => onKnowledgeGapResult?.(null)}
+          />
+        )}
 
         {/* CHAT AREA */}
         <div
@@ -255,14 +329,24 @@ const askQuestion = async () => {
                   </div>
                 </div>
               </div>
-              {currentChat.map((msg, i) => (
-                <MessageBubble
-                  key={i}
-                  msg={msg}
-                  darkMode={darkMode}
-                  onOpenSource={onOpenSource}
-                />
-              ))}
+              {currentChat.map((msg, i) => {
+                const messageId = msg.id || `legacy-message-${i}`;
+                const messageWithId = { ...msg, id: messageId };
+
+                return (
+                  <MessageBubble
+                    key={messageId}
+                    msg={messageWithId}
+                    darkMode={darkMode}
+                    onOpenSource={onOpenSource}
+                    isBookmarked={savedMessageIds?.has(messageId)}
+                    onToggleBookmark={onToggleBookmark}
+                    highlighted={highlightedMessageId === messageId}
+                    registerMessageRef={(node) => onRegisterMessageRef?.(messageId, node)}
+                    onOptionClick={(opt) => askQuestion(opt)}
+                  />
+                );
+              })}
 
               {asking && (
                 <div className="d-flex justify-content-start mb-3 chat-message">

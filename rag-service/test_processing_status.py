@@ -27,6 +27,23 @@ def test_processing_status_requires_internal_token_when_enabled(monkeypatch):
     assert res.status_code == 404
 
 
+def test_processing_status_rejects_query_string_secret(monkeypatch):
+    """Verify that session_secret passed as query parameter is rejected."""
+    monkeypatch.setattr(main, "INTERNAL_RAG_TOKEN", "secret")
+
+    with main.sessions_lock:
+        main.sessions.clear()
+
+    client = TestClient(main.app)
+    res = client.get(
+        "/processing-status/00000000-0000-0000-0000-000000000000?session_secret=any",
+        headers={"X-Internal-Token": "secret"},
+    )
+    # The query param should be ignored; request fails with 404 (no session)
+    # rather than being processed with the URL-embedded secret.
+    assert res.status_code == 404
+
+
 def test_processing_status_is_pruned_with_session_ttl(monkeypatch):
     monkeypatch.setattr(main, "INTERNAL_RAG_TOKEN", "secret")
 
@@ -51,12 +68,17 @@ def test_processing_status_is_pruned_with_session_ttl(monkeypatch):
 
     # With a long TTL, the status should be available.
     monkeypatch.setattr(main, "SESSION_TTL_MINUTES", 60)
-    res = client.get(f"/processing-status/{session_id}?session_secret=s", headers={"X-Internal-Token": "secret"})
+    res = client.get(
+        f"/processing-status/{session_id}",
+        headers={"X-Internal-Token": "secret", "X-Session-Secret": "s"},
+    )
     assert res.status_code == 200
     assert res.json()["stage"] == "Starting"
 
     # With a zero TTL, the session should be pruned and status should disappear.
     monkeypatch.setattr(main, "SESSION_TTL_MINUTES", 0)
-    res = client.get(f"/processing-status/{session_id}?session_secret=s", headers={"X-Internal-Token": "secret"})
+    res = client.get(
+        f"/processing-status/{session_id}",
+        headers={"X-Internal-Token": "secret", "X-Session-Secret": "s"},
+    )
     assert res.status_code == 404
-

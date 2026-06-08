@@ -1,6 +1,9 @@
+import os
 import sys
 from unittest.mock import MagicMock
 import multiprocessing
+
+os.environ.setdefault("INTERNAL_RAG_TOKEN", "test-secret")
 
 # Prevent downloading/loading Hugging Face embeddings during testing by mocking the class
 import langchain_community.embeddings
@@ -24,9 +27,16 @@ from main import (
     document_dedupe_key,
     citation_source_for_document,
     internal_token_valid,
+    append_chat_exchange,
+    normalize_chat_history,
+    require_internal_rag_token_configured,
     normalize_session_id,
     get_session_dir,
     _extract_pdf_text_worker,
+    cleanup_expired_sessions,
+    _background_cleanup_loop,
+    SESSION_CLEANUP_INTERVAL_MINUTES,
+    _hash_secret,
 )
 
 import secrets as _secrets
@@ -34,9 +44,14 @@ import secrets as _secrets
 
 def is_authorized_session_update(session: dict, provided_secret) -> bool:
     """Replicate the session-secret check from the endpoint (moved inline upstream)."""
-    expected = (session.get("session_secret") or "").strip()
     candidate = (provided_secret or "").strip()
-    if not expected or not candidate:
+    if not candidate:
+        return False
+    stored_hash = (session.get("hashed_session_secret") or "").strip()
+    if stored_hash:
+        return _secrets.compare_digest(_hash_secret(candidate), stored_hash)
+    expected = (session.get("session_secret") or "").strip()
+    if not expected:
         return False
     return _secrets.compare_digest(candidate, expected)
 
@@ -48,6 +63,15 @@ def test_session_secret_authorizes_only_matching_secret():
     assert is_authorized_session_update(session, "wrong-secret") is False
     assert is_authorized_session_update(session, None) is False
     assert is_authorized_session_update({}, "expected-secret") is False
+
+
+def test_session_secret_authorizes_with_hashed_secret():
+    hashed = _hash_secret("my-secret")
+    session = {"hashed_session_secret": hashed}
+
+    assert is_authorized_session_update(session, "my-secret") is True
+    assert is_authorized_session_update(session, "wrong") is False
+    assert is_authorized_session_update(session, None) is False
 
 
 def test_detect_question_intent():
@@ -80,9 +104,9 @@ def test_sanitize_upload_filename_invalid():
         sanitize_upload_filename("test$file.pdf")
 
 
-def test_internal_token_valid_allows_when_unset():
-    assert internal_token_valid(None, "") is True
-    assert internal_token_valid("", "") is True
+def test_internal_token_valid_rejects_when_unset():
+    assert internal_token_valid(None, "") is False
+    assert internal_token_valid("", "") is False
 
 
 def test_internal_token_valid_rejects_missing_when_set():
@@ -95,6 +119,22 @@ def test_internal_token_valid_accepts_exact_match():
     assert internal_token_valid("secret", "secret") is True
 
 
+def test_require_internal_token_config_fails_when_unset(monkeypatch):
+    import main as main_module
+
+    monkeypatch.setattr(main_module, "INTERNAL_RAG_TOKEN", "")
+
+    assert require_internal_rag_token_configured() is False
+
+
+def test_internal_token_validation_passes_when_configured(monkeypatch):
+    import main as main_module
+
+    monkeypatch.setattr(main_module, "INTERNAL_RAG_TOKEN", "configured-secret")
+
+    assert require_internal_rag_token_configured() is True
+
+
 def test_internal_auth_middleware_protects_validate_session_write():
     import main as main_module
 
@@ -103,6 +143,20 @@ def test_internal_auth_middleware_protects_validate_session_write():
     try:
         client = TestClient(app)
         response = client.post("/validate-session-write")
+        assert response.status_code == 403
+        assert response.json()["error"] == "Forbidden"
+    finally:
+        main_module.INTERNAL_RAG_TOKEN = original_token
+
+
+def test_internal_auth_middleware_protects_trailing_slash_paths():
+    import main as main_module
+
+    original_token = main_module.INTERNAL_RAG_TOKEN
+    main_module.INTERNAL_RAG_TOKEN = "test-secret"
+    try:
+        client = TestClient(app)
+        response = client.post("/process-pdf/")
         assert response.status_code == 403
         assert response.json()["error"] == "Forbidden"
     finally:
@@ -135,13 +189,13 @@ def test_normalize_session_id_returns_canonical_uuid():
 
 
 def test_extract_pdf_text_worker_enforces_page_limit(tmp_path):
-    from pypdf import PdfWriter
+    import fitz
 
     pdf_path = tmp_path / "hello.pdf"
-    writer = PdfWriter()
-    writer.add_blank_page(width=300, height=144)
-    with pdf_path.open("wb") as fp:
-        writer.write(fp)
+    doc = fitz.open()
+    doc.new_page(width=300, height=144)
+    doc.save(str(pdf_path))
+    doc.close()
 
     # Use a local queue and call the worker directly (no subprocess) to validate limit logic.
     q = multiprocessing.Queue(maxsize=1)
@@ -367,35 +421,95 @@ def test_citation_source_for_document_handles_missing_metadata():
     assert source["chunk_index"] == 2
 
 
+def test_normalize_chat_history_converts_legacy_exchange_shape():
+    legacy_chat = [
+        {
+            "question": "What is covered?",
+            "answer": "The document covers onboarding.",
+            "sources": [{"document": "policy.pdf", "page": 1}],
+            "mode": "default",
+        }
+    ]
+
+    assert normalize_chat_history(legacy_chat) == [
+        {"role": "user", "text": "What is covered?"},
+        {
+            "role": "bot",
+            "text": "The document covers onboarding.",
+            "sources": [{"document": "policy.pdf", "page": 1}],
+            "streaming": False,
+            "mode": "default",
+        },
+    ]
+
+
+def test_append_chat_exchange_normalizes_and_persists_message_schema():
+    session = {
+        "chat": [
+            {
+                "question": "Old question?",
+                "answer": "Old answer.",
+                "sources": [],
+            }
+        ]
+    }
+
+    append_chat_exchange(
+        session,
+        "New question?",
+        "New answer.",
+        [{"document": "new.pdf", "page": 2}],
+        None,
+    )
+
+    assert session["chat"] == [
+        {"role": "user", "text": "Old question?"},
+        {
+            "role": "bot",
+            "text": "Old answer.",
+            "sources": [],
+            "streaming": False,
+            "mode": "default",
+        },
+        {"role": "user", "text": "New question?"},
+        {
+            "role": "bot",
+            "text": "New answer.",
+            "sources": [{"document": "new.pdf", "page": 2}],
+            "streaming": False,
+            "mode": "default",
+        },
+    ]
+
+
 # ─── Session dirty-flag and per-session persistence helpers ─────────────────
 
-def test_append_chat_and_mark_dirty_adds_entry_and_marks_dirty():
+def test_mark_session_dirty_marks_dirty_without_mutating_chat():
     from main import (
         sessions,
         _dirty_sessions,
-        _append_chat_and_mark_dirty,
+        _mark_session_dirty,
         sessions_lock,
     )
     import threading
     sid = "test-dirty-" + _secrets.token_hex(4)
     with sessions_lock:
         sessions[sid] = {"chat": [], "created_at": 0, "last_accessed": 0, "documents": [], "session_secret": None, "lock": threading.Lock(), "vectorstore": None}
-        _append_chat_and_mark_dirty(sid, {"question": "q", "answer": "a", "sources": [], "mode": "default"})
+        _mark_session_dirty(sid)
 
     assert sid in _dirty_sessions
-    assert len(sessions[sid]["chat"]) == 1
-    assert sessions[sid]["chat"][0]["question"] == "q"
+    assert len(sessions[sid]["chat"]) == 0
 
     with sessions_lock:
         del sessions[sid]
         _dirty_sessions.discard(sid)
 
 
-def test_append_chat_and_mark_dirty_ignores_unknown_session():
-    from main import _append_chat_and_mark_dirty, _dirty_sessions, sessions_lock
+def test_mark_session_dirty_ignores_unknown_session():
+    from main import _mark_session_dirty, _dirty_sessions, sessions_lock
     unknown_sid = "no-such-session-" + _secrets.token_hex(4)
     with sessions_lock:
-        _append_chat_and_mark_dirty(unknown_sid, {"question": "q", "answer": "a"})
+        _mark_session_dirty(unknown_sid)
     assert unknown_sid not in _dirty_sessions
 
 
@@ -417,7 +531,7 @@ def test_snapshot_session_for_persistence_excludes_runtime_fields():
     assert "lock" not in snap
     assert "vectorstore" not in snap
     assert snap["created_at"] == 1000.0
-    assert snap["session_secret"] == "s3cr3t"
+    assert snap["hashed_session_secret"] == _hash_secret("s3cr3t")
     assert snap["chat"] == [{"question": "q", "answer": "a"}]
     assert snap["documents"] == ["doc1.pdf"]
 
@@ -595,33 +709,23 @@ def test_ask_stream_passes_middleware_with_correct_token():
     finally:
         main_module.INTERNAL_RAG_TOKEN = original
 
-
-def test_ask_stream_allowed_when_no_token_configured():
-    """When INTERNAL_RAG_TOKEN is empty, /ask/stream must be reachable without a header.
-
-    This preserves the open-by-default development experience: in local dev where
-    the token is not set, the middleware must not block anything.
-    """
+@pytest.mark.parametrize("path", ["/process-pdf", "/ask", "/summarize"])
+def test_protected_endpoints_rejected_when_token_is_cleared_after_startup(path):
+    """Protected endpoints fail closed if token config becomes unavailable."""
     import main as main_module
 
     original = main_module.INTERNAL_RAG_TOKEN
     main_module.INTERNAL_RAG_TOKEN = ""
     try:
         client = TestClient(app, raise_server_exceptions=False)
-        response = client.post(
-            "/ask/stream",
-            json={
-                "question": "What is this document about?",
-                "session_id": "00000000-0000-0000-0000-000000000004",
-                "session_secret": "irrelevant",
-            },
-        )
-        # No token configured → middleware is inactive → route handler ran.
-        # Expect 404 (no session) or 422 (validation), never 403 (auth block).
-        assert response.status_code != 403, (
-            "Middleware must not block requests when INTERNAL_RAG_TOKEN is unset. "
+        response = client.post(path)
+        # Fail-closed behavior: when INTERNAL_RAG_TOKEN is unset, the
+        # middleware should reject protected requests with 503.
+        assert response.status_code == 503, (
+            "Middleware must reject protected requests when INTERNAL_RAG_TOKEN is unset. "
             f"Got {response.status_code}"
         )
+        assert response.json()["detail"] == "INTERNAL_RAG_TOKEN is not configured"
     finally:
         main_module.INTERNAL_RAG_TOKEN = original
 
@@ -632,11 +736,9 @@ def test_protected_paths_set_includes_ask_stream():
     This test directly inspects the middleware source to verify the set is correct,
     providing a fast feedback loop even when integration tests are not run.
     """
-    import inspect
     import main as main_module
 
-    source = inspect.getsource(main_module.internal_auth_middleware)
-    assert '"/ask/stream"' in source, (
+    assert "/ask/stream" in main_module.PROTECTED_RAG_PATHS, (
         "/ask/stream is missing from protected_paths in internal_auth_middleware. "
         "This is the root cause of issue #233."
     )
@@ -649,11 +751,9 @@ def test_ask_subtree_prefix_guard_is_present():
     /ask/v2/stream) are automatically protected without requiring a manual
     update to the exact-match set — closing the class of bug that caused #233.
     """
-    import inspect
     import main as main_module
 
-    source = inspect.getsource(main_module.internal_auth_middleware)
-    assert '"/ask/"' in source, (
+    assert "/ask/" in main_module.PROTECTED_RAG_PREFIXES, (
         "The /ask/ prefix is missing from the protected_prefixes tuple. "
         "Without it, any new sub-route under /ask/ could bypass auth."
     )
@@ -673,7 +773,322 @@ def test_internal_token_valid_case_sensitive():
     assert internal_token_valid("Secret", "secret") is False
     assert internal_token_valid("secret", "secret") is True
 
-def test_stream_lazy_load_faiss_uses_get_embedding_model():
+
+# ─── Model readiness gate tests ───────────────────────────────────────────────
+
+def test_health_returns_200_while_models_loading():
+    """/health must stay 200 regardless of model load state (liveness probe)."""
+    import main as m
+    from fastapi.testclient import TestClient
+    original = m._models_ready.is_set()
+    m._models_ready.clear()
+    try:
+        resp = TestClient(app).get("/health")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
+    finally:
+        m._models_ready.set() if original else m._models_ready.clear()
+
+
+def test_ready_returns_503_before_models_loaded():
+    """/ready must return 503 while _models_ready is unset."""
+    import main as m
+    from fastapi.testclient import TestClient
+    original = m._models_ready.is_set()
+    m._models_ready.clear()
+    try:
+        resp = TestClient(app, raise_server_exceptions=False).get("/ready")
+        assert resp.status_code == 503
+        assert "Retry-After" in resp.headers
+    finally:
+        m._models_ready.set() if original else m._models_ready.clear()
+
+
+def test_ready_returns_200_after_models_loaded():
+    """/ready must return 200 once _models_ready is set."""
+    import main as m
+    from fastapi.testclient import TestClient
+    original = m._models_ready.is_set()
+    m._models_ready.set()
+    try:
+        resp = TestClient(app).get("/ready")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ready"
+        assert "embedding_model" in data
+        assert "generation_model" in data
+    finally:
+        m._models_ready.set() if original else m._models_ready.clear()
+
+
+def test_ready_503_includes_retry_after_header():
+    """/ready 503 must include Retry-After so callers know when to retry."""
+    import main as m
+    from fastapi.testclient import TestClient
+    original = m._models_ready.is_set()
+    m._models_ready.clear()
+    try:
+        resp = TestClient(app, raise_server_exceptions=False).get("/ready")
+        assert resp.status_code == 503
+        retry = resp.headers.get("Retry-After")
+        assert retry is not None
+        assert int(retry) > 0
+    finally:
+        m._models_ready.set() if original else m._models_ready.clear()
+
+
+def test_liveness_and_readiness_differ_during_startup():
+    """/health stays 200 and /ready stays 503 while models are loading."""
+    import main as m
+    from fastapi.testclient import TestClient
+    original = m._models_ready.is_set()
+    m._models_ready.clear()
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+        assert client.get("/health").status_code == 200
+        assert client.get("/ready").status_code == 503
+    finally:
+        m._models_ready.set() if original else m._models_ready.clear()
+# ── Issue #264: background session cleanup ────────────────────────────────────
+#
+# cleanup_expired_sessions() must no longer be called inline inside request
+# handlers. These tests verify:
+#   1. The function is not referenced in the hot path of /ask, /summarize,
+#      /process-pdf, /ask/stream, or /sessions/lookup.
+#   2. The background loop coroutine exists and is wired up.
+#   3. SESSION_CLEANUP_INTERVAL_MINUTES is a positive integer.
+#   4. cleanup_expired_sessions() handles an empty session map without error.
+#   5. cleanup_expired_sessions() evicts expired sessions and releases the
+#      sessions_lock before performing any shutil.rmtree calls.
+#   6. cleanup_expired_sessions() enforces MAX_ACTIVE_SESSIONS by evicting
+#      the oldest session when the cap is exceeded.
+
+import inspect
+import asyncio as _asyncio
+import threading as _threading
+from unittest.mock import patch, call as mock_call
+import main as _main_module
+
+
+def test_cleanup_not_called_inline_in_ask_handler():
+    """
+    /ask handler must not call cleanup_expired_sessions().
+    Cleanup now runs on a background schedule; calling it inline on every
+    inference request causes O(N) session scan and sessions_lock contention.
+    """
+    source = inspect.getsource(_main_module.ask_question)
+    assert "cleanup_expired_sessions()" not in source, (
+        "/ask handler must not call cleanup_expired_sessions() inline. "
+        "Cleanup should only run via the background asyncio task."
+    )
+
+
+def test_cleanup_not_called_inline_in_ask_stream_handler():
+    """/ask/stream handler must not call cleanup_expired_sessions() inline."""
+    source = inspect.getsource(_main_module.ask_question_stream)
+    assert "cleanup_expired_sessions()" not in source, (
+        "/ask/stream handler must not call cleanup_expired_sessions() inline."
+    )
+
+
+def test_cleanup_not_called_inline_in_summarize_handler():
+    """/summarize handler must not call cleanup_expired_sessions() inline."""
+    source = inspect.getsource(_main_module.summarize_pdf)
+    assert "cleanup_expired_sessions()" not in source, (
+        "/summarize handler must not call cleanup_expired_sessions() inline."
+    )
+
+
+def test_cleanup_not_called_inline_in_process_pdf_handler():
+    """/process-pdf handler must not call cleanup_expired_sessions() inline.
+
+    Note: _cleanup_expired_sessions_unlocked() is a different, narrower helper
+    called inside sessions_lock during session creation — its presence in this
+    handler is intentional. Only the broad O(N) cleanup_expired_sessions() call
+    must be absent.
+    """
+    source = inspect.getsource(_main_module.process_pdf)
+    # Use the exact call signature so _cleanup_expired_sessions_unlocked() does
+    # not trigger a false positive (it does not contain this exact substring).
+    assert "cleanup_expired_sessions()" not in source, (
+        "/process-pdf handler must not call cleanup_expired_sessions() inline. "
+        "Cleanup should only run via the background asyncio task."
+    )
+
+
+def test_cleanup_not_called_inline_in_lookup_sessions_handler():
+    """/sessions/lookup handler must not call cleanup_expired_sessions() inline."""
+    source = inspect.getsource(_main_module.lookup_sessions)
+    assert "cleanup_expired_sessions()" not in source, (
+        "/sessions/lookup handler must not call cleanup_expired_sessions() inline."
+    )
+
+
+def test_session_cleanup_interval_is_positive_integer():
+    """SESSION_CLEANUP_INTERVAL_MINUTES must be a positive integer >= 1."""
+    assert isinstance(SESSION_CLEANUP_INTERVAL_MINUTES, int), (
+        "SESSION_CLEANUP_INTERVAL_MINUTES must be an int"
+    )
+    assert SESSION_CLEANUP_INTERVAL_MINUTES >= 1, (
+        "SESSION_CLEANUP_INTERVAL_MINUTES must be >= 1 to prevent a tight spin loop"
+    )
+
+
+def test_background_cleanup_loop_is_async_coroutine():
+    """_background_cleanup_loop must be an async function (coroutine function)."""
+    assert _asyncio.iscoroutinefunction(_background_cleanup_loop), (
+        "_background_cleanup_loop must be declared with 'async def' so it can "
+        "yield control to the event loop between cleanup runs."
+    )
+
+
+def test_cleanup_expired_sessions_noop_on_empty_sessions():
+    """cleanup_expired_sessions() on an empty session map must not raise."""
+    original = _main_module.sessions.copy()
+    _main_module.sessions.clear()
+    try:
+        cleanup_expired_sessions()
+    finally:
+        _main_module.sessions.update(original)
+
+
+def test_cleanup_expired_sessions_removes_expired_entry():
+    """
+    An expired session (last_accessed far in the past) must be removed from
+    the sessions dict and its session_dir queued for deletion outside the lock.
+    """
+    import time as _time
+
+    sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    fake_dir = "/tmp/nonexistent-session-dir-test-only"
+
+    original = dict(_main_module.sessions)
+    _main_module.sessions[sid] = {
+        "last_accessed": 0,  # epoch — always expired
+        "created_at": 0,
+        "session_dir": fake_dir,
+        "session_secret": "test-secret",
+        "lock": _threading.Lock(),
+        "vectorstore": None,
+        "documents": [],
+        "chat": [],
+    }
+
+    rmtree_calls = []
+
+    def fake_rmtree(path, **kwargs):
+        rmtree_calls.append(path)
+
+    with patch.object(_main_module.shutil, "rmtree", side_effect=fake_rmtree):
+        with patch.object(_main_module, "save_sessions_unlocked"):
+            with patch.object(_main_module, "cleanup_expired_persisted_sessions"):
+                cleanup_expired_sessions()
+
+    try:
+        assert sid not in _main_module.sessions, (
+            "Expired session must be removed from the in-memory sessions dict"
+        )
+    finally:
+        # Restore any sessions that were there before the test.
+        _main_module.sessions.clear()
+        _main_module.sessions.update(original)
+
+
+def test_cleanup_expired_sessions_evicts_oldest_when_over_cap():
+    """
+    When the session count exceeds MAX_ACTIVE_SESSIONS, cleanup must evict
+    the oldest session (lowest created_at) to bring the count back to the cap.
+    """
+    import copy as _copy
+
+    original = dict(_main_module.sessions)
+    original_cap = _main_module.MAX_ACTIVE_SESSIONS
+
+    # Temporarily lower the cap to 1 so a second session causes eviction.
+    _main_module.MAX_ACTIVE_SESSIONS = 1
+
+    sid_old = "00000000-0000-0000-0000-000000000001"
+    sid_new = "00000000-0000-0000-0000-000000000002"
+    now = _main_module.now_ts()
+
+    def _make_session(created_at, last_accessed):
+        return {
+            "created_at": created_at,
+            "last_accessed": last_accessed,
+            "session_dir": None,
+            "session_secret": "s",
+            "lock": _threading.Lock(),
+            "vectorstore": None,
+            "documents": [],
+            "chat": [],
+        }
+
+    _main_module.sessions.clear()
+    _main_module.sessions[sid_old] = _make_session(now - 1000, now)
+    _main_module.sessions[sid_new] = _make_session(now, now)
+
+    try:
+        with patch.object(_main_module, "save_sessions_unlocked"):
+            with patch.object(_main_module, "cleanup_expired_persisted_sessions"):
+                cleanup_expired_sessions()
+
+        assert sid_old not in _main_module.sessions, (
+            "Oldest session must be evicted when MAX_ACTIVE_SESSIONS is exceeded"
+        )
+        assert sid_new in _main_module.sessions, (
+            "Newer session must be retained after eviction"
+        )
+    finally:
+        _main_module.sessions.clear()
+        _main_module.sessions.update(original)
+        _main_module.MAX_ACTIVE_SESSIONS = original_cap
+
+
+def test_cleanup_holds_lock_only_for_dict_mutation_not_disk_io():
+    """
+    shutil.rmtree must never be called while sessions_lock is held.
+    The lock should be released before any filesystem operation.
+    """
+    import threading as _t
+
+    sid = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    fake_dir = "/tmp/nonexistent-lock-test-dir"
+
+    original = dict(_main_module.sessions)
+    _main_module.sessions[sid] = {
+        "last_accessed": 0,
+        "created_at": 0,
+        "session_dir": fake_dir,
+        "session_secret": "x",
+        "lock": _t.Lock(),
+        "vectorstore": None,
+        "documents": [],
+        "chat": [],
+    }
+
+    lock_held_during_rmtree = []
+
+    def fake_rmtree(path, **kwargs):
+        # sessions_lock.locked() returns True if ANY thread holds the lock.
+        # Because this test runs single-threaded, the lock must be released
+        # before we get here.
+        lock_held_during_rmtree.append(_main_module.sessions_lock.locked())
+
+    with patch.object(_main_module.shutil, "rmtree", side_effect=fake_rmtree):
+        with patch.object(_main_module, "save_sessions_unlocked"):
+            with patch.object(_main_module, "cleanup_expired_persisted_sessions"):
+                cleanup_expired_sessions()
+
+    try:
+        for held in lock_held_during_rmtree:
+            assert not held, (
+                "sessions_lock must NOT be held during shutil.rmtree — "
+                "disk I/O inside the lock blocks all concurrent request handlers"
+            )
+    finally:
+        _main_module.sessions.clear()
+        _main_module.sessions.update(original)
+def test_stream_lazy_load_uses_secure_vectorstore_loader():
     import main as main_module
     from unittest.mock import patch, MagicMock
     import threading
@@ -683,7 +1098,7 @@ def test_stream_lazy_load_faiss_uses_get_embedding_model():
     main_module.embedding_model = None
 
     client = TestClient(main_module.app, raise_server_exceptions=False)
-    
+
     session_id = "00000000-0000-0000-0000-000000000009"
     with main_module.sessions_lock:
         main_module.sessions[session_id] = {
@@ -693,33 +1108,99 @@ def test_stream_lazy_load_faiss_uses_get_embedding_model():
             "documents": [],
             "last_accessed": main_module.now_ts(),
             "created_at": main_module.now_ts(),
-            "session_dir": main_module.get_session_dir(session_id)
         }
 
     try:
         with patch("main.get_embedding_model") as mock_get_embedding_model:
-            with patch("main.FAISS.load_local") as mock_faiss_load:
-                # We expect load_local to raise an exception or succeed, but either way it should call get_embedding_model
-                mock_get_embedding_model.return_value = MagicMock()
-                mock_faiss_load.return_value = MagicMock()
-                
-                client.post(
-                    "/ask/stream",
-                    json={
-                        "question": "test",
-                        "session_id": session_id,
-                        "session_secret": "test_secret"
-                    }
-                )
-                
-                mock_get_embedding_model.assert_called_once()
-                mock_faiss_load.assert_called_once()
-                
-                # Verify that load_local was called with the result of get_embedding_model()
-                # FAISS.load_local(str(FAISS_DIR / session_id), get_embedding_model(), allow_dangerous_deserialization=True)
-                call_args = mock_faiss_load.call_args
-                assert call_args[0][1] == mock_get_embedding_model.return_value
+            with patch("main._load_vectorstore_from_snapshot") as mock_snapshot_load:
+                with patch("main.FAISS.load_local") as mock_faiss_load:
+                    mock_get_embedding_model.return_value = MagicMock()
+                    mock_snapshot_load.return_value = MagicMock()
+
+                    client.post(
+                        "/ask/stream",
+                        json={
+                            "question": "test",
+                            "session_id": session_id,
+                            "session_secret": "test_secret"
+                        },
+                        headers={"X-Internal-Token": main_module.INTERNAL_RAG_TOKEN},
+                    )
+
+                    mock_get_embedding_model.assert_called_once()
+                    mock_snapshot_load.assert_called_once()
+                    mock_faiss_load.assert_not_called()
+
+                    # Verify that the secure loader was called with the session id and embedding model.
+                    call_args = mock_snapshot_load.call_args
+                    assert call_args[0][0] == session_id
+                    assert call_args[0][1] == mock_get_embedding_model.return_value
+
+                    with main_module.sessions_lock:
+                        assert main_module.sessions[session_id]["session_dir"] == main_module.get_session_dir(session_id)
     finally:
         main_module.embedding_model = original_embedding_model
         with main_module.sessions_lock:
             main_module.sessions.pop(session_id, None)
+
+
+def test_secure_vectorstore_loader_fails_closed_on_corrupt_snapshot(tmp_path):
+    import main as main_module
+    from unittest.mock import patch
+
+    session_id = "550e8400-e29b-41d4-a716-446655440000"
+    session_dir = tmp_path / session_id
+    session_dir.mkdir()
+    snapshot_path = session_dir / main_module.VECTORSTORE_SNAPSHOT_FILENAME
+    snapshot_path.write_text("{not-json}", encoding="utf-8")
+
+    with patch.object(main_module, "get_session_dir", return_value=str(session_dir)):
+        with pytest.raises(ValueError, match="Failed to load vectorstore snapshot"):
+            main_module._load_vectorstore_from_snapshot(session_id, MagicMock())
+
+
+def test_vectorstore_snapshot_round_trip_uses_same_session_dir(tmp_path):
+    import main as main_module
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    session_id = "550e8400-e29b-41d4-a716-446655440001"
+    session_dir = tmp_path / session_id
+    session_dir.mkdir()
+
+    fake_vectorstore = SimpleNamespace(
+        docstore=SimpleNamespace(
+            _dict={
+                "doc-1": SimpleNamespace(
+                    page_content="Alpha beta gamma.",
+                    metadata={"filename": "doc.pdf", "page": 0},
+                )
+            }
+        ),
+        index_to_docstore_id={0: "doc-1"},
+        save_local=MagicMock(),
+    )
+
+    loaded_vectorstore = object()
+
+    with patch.object(main_module, "get_session_dir", return_value=str(session_dir)):
+        with patch("langchain_community.vectorstores.faiss.dependable_faiss_import") as mock_faiss_import:
+            mock_faiss = MagicMock()
+            mock_faiss.read_index.return_value = "fake-index"
+            mock_faiss_import.return_value = mock_faiss
+            with patch.object(main_module, "FAISS", return_value=loaded_vectorstore) as mock_faiss_cls:
+                persisted_dir = main_module.persist_vectorstore(session_id, fake_vectorstore)
+                restored = main_module._load_vectorstore_from_snapshot(session_id, MagicMock())
+
+    assert persisted_dir == str(session_dir)
+    assert fake_vectorstore.save_local.call_args[0][0] == str(session_dir)
+    assert mock_faiss.read_index.call_args[0][0] == str(session_dir / "index.faiss")
+    assert mock_faiss_cls.call_count == 1
+    assert restored is loaded_vectorstore
+
+
+def test_vectorstore_loader_rejects_path_traversal_like_session_id():
+    import main as main_module
+
+    with pytest.raises(ValueError, match=r"(badly formed hexadecimal UUID string|Invalid persisted session id)"):
+        main_module._load_vectorstore_from_snapshot("../escape", MagicMock())

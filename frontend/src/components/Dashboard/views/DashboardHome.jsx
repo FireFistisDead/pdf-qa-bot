@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../../contexts/AuthContext';
 import { useDashboardData } from '../../../hooks/useDashboardData';
-import '../Dashboard.css';
+import './DashboardHome.css';
 
 /* ── Animated counter hook ── */
 const useCounter = (target, ms = 1400) => {
@@ -115,7 +115,7 @@ const DashboardHome = () => {
 
             <div className="hero-actions-front">
               <button className="front-btn primary" onClick={() => navigate('/dashboard/documents')}>UPLOAD DOCUMENT</button>
-              <button className="front-btn secondary">NEW QUERY</button>
+              <button className="front-btn secondary" onClick={() => navigate('/dashboard/chat')}>NEW QUERY</button>
             </div>
           </div>
 
@@ -214,7 +214,15 @@ const DashboardHome = () => {
                       <div className="insight-glint"/>
                       <strong className="text-hover-effect">{insight.title}</strong>
                       <p className="text-hover-effect">{insight.description}</p>
-                      <button className="insight-action-btn">{insight.actionLabel} →</button>
+                      <button
+                        className="insight-action-btn"
+                        onClick={() => {
+                          if (insight.actionLabel === 'Go to Documents' || insight.actionLabel === 'Upload Now') navigate('/dashboard/documents');
+                          else if (insight.actionLabel === 'Start Chat') navigate('/dashboard/chat');
+                        }}
+                      >
+                        {insight.actionLabel} →
+                      </button>
                     </div>
                   ))}
                 </div>

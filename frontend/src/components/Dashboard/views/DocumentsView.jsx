@@ -1,13 +1,42 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { supabase } from '../../../services/supabaseClient';
+import { useAuth } from '../../../contexts/AuthContext';
+import { processDocument, getProcessingStatus } from '../../../services/ragService';
+import './DocumentsView.css';
 
 const DocumentsView = () => {
+  const { user } = useAuth();
+  const navigate = useNavigate();
   const [isDragging, setIsDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
-  const [documents, setDocuments] = useState([
-    { id: 'SYS-8902', name: 'Q3_Financial_Report.pdf', size: '2.4MB', date: '2026-05-27', status: 'INDEXED', url: '#' }
-  ]);
+  const [documents, setDocuments] = useState([]);
   const [error, setError] = useState('');
+  // { [docId]: 'indexing' | 'ready' | 'error' }
+  const [processingDocs, setProcessingDocs] = useState({});
+  // { [docId]: 'Extracting text...' | 'Generating embeddings...' etc. }
+  const [processingStage, setProcessingStage] = useState({});
+  const pollingRefs = useRef({});
+
+  // Fetch documents on load
+  useEffect(() => {
+    const fetchDocuments = async () => {
+      if (!user) return;
+      const { data, error } = await supabase
+        .from('documents')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false });
+      
+      if (error) {
+        console.error('Error fetching documents:', error);
+      } else if (data) {
+        setDocuments(data);
+      }
+    };
+    fetchDocuments();
+  }, [user]);
 
   useEffect(() => {
     // Trigger entrance animation for new layout
@@ -28,35 +57,125 @@ const DocumentsView = () => {
     setIsDragging(false);
   };
 
-  const processUpload = (file) => {
-    if (!file) return;
+  const processUpload = async (file) => {
+    if (!file || !user) return;
     setUploading(true);
     setUploadProgress(0);
     setError('');
 
-    // Simulate an aggressive hacker-style upload
-    let progress = 0;
-    const interval = setInterval(() => {
-      progress += Math.floor(Math.random() * 15) + 5;
-      if (progress > 100) progress = 100;
-      setUploadProgress(progress);
+    try {
+      const fileExt = file.name.split('.').pop();
+      const fileName = `${Math.random().toString(36).substring(2, 15)}_${Date.now()}.${fileExt}`;
+      const filePath = `${user.id}/${fileName}`;
 
-      if (progress === 100) {
-        clearInterval(interval);
+      // Upload to Supabase Storage
+      const { error: uploadError } = await supabase.storage
+        .from('documents')
+        .upload(filePath, file, {
+          cacheControl: '3600',
+          upsert: false
+        });
+
+      if (uploadError) throw uploadError;
+
+      // Simulate the aggressive counting for UX, but bounded by actual upload
+      setUploadProgress(100);
+
+      // Get public URL or signed URL
+      const { data: { publicUrl } } = supabase.storage
+        .from('documents')
+        .getPublicUrl(filePath);
+
+      // Insert record into Supabase Database
+      const newDoc = {
+        user_id: user.id,
+        custom_id: `SYS-${Math.floor(Math.random() * 9000) + 1000}`,
+        name: file.name,
+        size: `${(file.size / (1024 * 1024)).toFixed(2)}MB`,
+        status: 'INDEXED',
+        url: publicUrl
+      };
+
+      const { data: dbData, error: dbError } = await supabase
+        .from('documents')
+        .insert([newDoc])
+        .select()
+        .single();
+
+      if (dbError) throw dbError;
+
+      setDocuments(prev => [dbData, ...prev]);
+
+    } catch (err) {
+      console.error('Upload Error:', err);
+      setError(err.message || 'Failed to initialize uplink.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleProcess = async (docId) => {
+    const doc = documents.find(d => d.id === docId);
+    if (!doc) return;
+
+    setProcessingDocs(prev => ({ ...prev, [docId]: 'indexing' }));
+    setProcessingStage(prev => ({ ...prev, [docId]: 'Connecting to RAG service...' }));
+
+    try {
+      // Call Node.js gateway → downloads PDF from Supabase → indexes in FAISS
+      const result = await processDocument(doc.url, doc.name);
+
+      const { session_id, session_secret } = result;
+
+      // Poll for real processing stages while RAG service works
+      if (session_id) {
+        const pollInterval = setInterval(async () => {
+          const status = await getProcessingStatus(session_id).catch(() => null);
+          if (status?.stage) {
+            setProcessingStage(prev => ({ ...prev, [docId]: status.stage }));
+          }
+        }, 1500);
+        pollingRefs.current[docId] = pollInterval;
+
+        // Stop polling after 3 minutes max
         setTimeout(() => {
-          const newDoc = {
-            id: `SYS-${Math.floor(Math.random() * 9000) + 1000}`,
-            name: file.name,
-            size: `${(file.size / (1024 * 1024)).toFixed(2)}MB`,
-            date: new Date().toISOString().split('T')[0],
-            status: 'INDEXED',
-            url: '#'
-          };
-          setDocuments(prev => [newDoc, ...prev]);
-          setUploading(false);
-        }, 500);
+          clearInterval(pollInterval);
+          delete pollingRefs.current[docId];
+        }, 180000);
       }
-    }, 200);
+
+      // Persist session_id + session_secret into Supabase DB
+      const { error: dbError } = await supabase
+        .from('documents')
+        .update({
+          status: 'READY FOR CHAT',
+          session_id,
+          session_secret,
+        })
+        .eq('id', docId);
+
+      if (dbError) throw dbError;
+
+      // Stop polling now that we're done
+      clearInterval(pollingRefs.current[docId]);
+      delete pollingRefs.current[docId];
+
+      // Sync local state
+      setDocuments(prevDocs => prevDocs.map(d =>
+        d.id === docId
+          ? { ...d, status: 'READY FOR CHAT', session_id, session_secret }
+          : d
+      ));
+      setProcessingDocs(prev => ({ ...prev, [docId]: 'ready' }));
+      setProcessingStage(prev => ({ ...prev, [docId]: 'Done' }));
+
+    } catch (err) {
+      console.error('Processing error:', err);
+      clearInterval(pollingRefs.current[docId]);
+      delete pollingRefs.current[docId];
+      setProcessingDocs(prev => ({ ...prev, [docId]: 'error' }));
+      setProcessingStage(prev => ({ ...prev, [docId]: err.message || 'Processing failed' }));
+    }
   };
 
   const handleDrop = (e) => {
@@ -158,24 +277,65 @@ const DocumentsView = () => {
           </div>
 
           <div className="doc-masonry-deck">
-            {documents.map(doc => (
-              <div key={doc.id} className="masonry-slate">
-                <div className="slate-top">
-                  <span className="slate-id">{doc.id}</span>
-                  <span className={`slate-status ${doc.status === 'ERROR' ? 'error' : 'ok'}`}>{doc.status}</span>
-                </div>
-                
-                <div className="slate-body">
-                  <h3 className="slate-name" title={doc.name}>{doc.name}</h3>
-                  <p className="slate-meta">{doc.size} {'//'} {doc.date}</p>
-                </div>
+            {documents.map(doc => {
+              const isIndexing = processingDocs[doc.id] === 'indexing';
+              const isReady = doc.status === 'READY FOR CHAT' || processingDocs[doc.id] === 'ready';
+              const isError = processingDocs[doc.id] === 'error';
+              const stage = processingStage[doc.id] || '';
 
-                <div className="slate-actions">
-                  <a href={doc.url} className="action-btn view">VIEW</a>
-                  <button className="action-btn process">PROCESS</button>
+              return (
+                <div key={doc.id} className={`masonry-slate ${isIndexing ? 'slate-processing' : ''}`}>
+                  <div className="slate-top">
+                    <span className="slate-id">{doc.custom_id || doc.id}</span>
+                    <span className={`slate-status ${isError ? 'error' : isReady ? 'ready' : 'ok'}`}>
+                      {isError ? 'ERROR' : isIndexing ? 'INDEXING...' : isReady ? 'READY FOR CHAT' : doc.status}
+                    </span>
+                  </div>
+                  
+                  <div className="slate-body">
+                    <h3 className="slate-name" title={doc.name}>{doc.name}</h3>
+                    <p className="slate-meta">{doc.size} {'//'} {doc.created_at ? new Date(doc.created_at).toISOString().split('T')[0] : 'Just now'}</p>
+                    {isIndexing && stage && (
+                      <p className="slate-stage">{stage}</p>
+                    )}
+                    {isError && stage && (
+                      <p className="slate-stage error">{stage}</p>
+                    )}
+                  </div>
+
+                  <div className="slate-actions">
+                    <a href={doc.url} target="_blank" rel="noopener noreferrer" className="action-btn view">VIEW</a>
+                    
+                    {isReady ? (
+                      <button 
+                        className="action-btn process ready" 
+                        style={{ color: 'var(--accent)', borderColor: 'var(--accent)' }}
+                        onClick={() => navigate('/dashboard/chat', { state: { documentId: doc.id } })}
+                      >
+                        START CHAT
+                      </button>
+                    ) : isError ? (
+                      <button 
+                        className="action-btn process"
+                        style={{ color: '#ff5f56', borderColor: '#ff5f56' }}
+                        onClick={() => handleProcess(doc.id)}
+                      >
+                        RETRY
+                      </button>
+                    ) : (
+                      <button 
+                        className="action-btn process" 
+                        disabled={isIndexing}
+                        style={{ color: isIndexing ? 'var(--accent)' : '' }}
+                        onClick={() => handleProcess(doc.id)}
+                      >
+                        {isIndexing ? 'INDEXING...' : 'PROCESS'}
+                      </button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </section>
       </div>
