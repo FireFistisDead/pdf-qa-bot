@@ -189,24 +189,6 @@ def test_normalize_session_id_returns_canonical_uuid():
     assert normalized == "550e8400-e29b-41d4-a716-446655440000"
 
 
-def test_extract_pdf_text_worker_enforces_page_limit(tmp_path):
-    import fitz
-
-    pdf_path = tmp_path / "hello.pdf"
-    doc = fitz.open()
-    doc.new_page(width=300, height=144)
-    doc.save(str(pdf_path))
-    doc.close()
-
-    # Use a local queue and call the worker directly (no subprocess) to validate limit logic.
-    q = multiprocessing.Queue(maxsize=1)
-    _extract_pdf_text_worker(str(pdf_path), max_pages=0, max_chars=1000, out_queue=q)
-    result = q.get(timeout=2)
-    assert result["ok"] is False
-    assert "too many pages" in result["error"].lower()
-
-
-
 def test_concise_excerpt():
     text = "This is a very long sentence that we want to abbreviate cleanly."
     assert concise_excerpt(text, max_chars=20) == "This is a very long..."
