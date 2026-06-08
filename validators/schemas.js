@@ -42,7 +42,7 @@ const questionSchema = z.preprocess(
 
 const modeSchema = z.preprocess(
   (val) => (typeof val === "string" ? val : "default"),
-  z.enum(["default", "tutor", "socratic", "eli5", "concise"]).default("default")
+  z.enum(["default", "tutor", "socratic", "eli5", "concise", "quiz"]).default("default")
 );
 
 const sessionSecretSchema = z.preprocess(
