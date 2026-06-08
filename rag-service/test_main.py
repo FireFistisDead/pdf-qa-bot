@@ -1,7 +1,9 @@
+import json
 import os
 import sys
 from unittest.mock import MagicMock
 import multiprocessing
+import logging
 
 os.environ.setdefault("INTERNAL_RAG_TOKEN", "test-secret")
 
@@ -32,6 +34,7 @@ from main import (
     require_internal_rag_token_configured,
     normalize_session_id,
     get_session_dir,
+    audit_event,
     _extract_pdf_text_worker,
     cleanup_expired_sessions,
     _background_cleanup_loop,
@@ -133,6 +136,24 @@ def test_internal_token_validation_passes_when_configured(monkeypatch):
     monkeypatch.setattr(main_module, "INTERNAL_RAG_TOKEN", "configured-secret")
 
     assert require_internal_rag_token_configured() is True
+
+
+def test_audit_event_remaps_reserved_logrecord_fields(monkeypatch):
+    import main as main_module
+
+    seen = {}
+
+    def fake_info(message, extra=None):
+        seen["message"] = message
+        seen["extra"] = extra
+
+    monkeypatch.setattr(main_module.logger, "info", fake_info)
+
+    audit_event("audit_test", filename="sample.pdf", session_id="550e8400-e29b-41d4-a716-446655440000")
+
+    assert seen["message"] == "audit_test"
+    assert seen["extra"]["audit_filename"] == "sample.pdf"
+    assert seen["extra"]["session_id"] == "550e8400-e29b-41d4-a716-446655440000"
 
 
 def test_internal_auth_middleware_protects_validate_session_write():
