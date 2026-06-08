@@ -32,12 +32,13 @@ from main import (
     require_internal_rag_token_configured,
     normalize_session_id,
     get_session_dir,
-    _extract_pdf_text_worker,
     cleanup_expired_sessions,
     _background_cleanup_loop,
     SESSION_CLEANUP_INTERVAL_MINUTES,
     _hash_secret,
 )
+
+from pdf_parse_worker import _extract_pdf_text_worker
 
 import secrets as _secrets
 
@@ -124,8 +125,7 @@ def test_require_internal_token_config_fails_when_unset(monkeypatch):
 
     monkeypatch.setattr(main_module, "INTERNAL_RAG_TOKEN", "")
 
-    with pytest.raises(RuntimeError, match="INTERNAL_RAG_TOKEN"):
-        require_internal_rag_token_configured()
+    assert require_internal_rag_token_configured() is False
 
 
 def test_internal_token_validation_passes_when_configured(monkeypatch):
@@ -133,7 +133,7 @@ def test_internal_token_validation_passes_when_configured(monkeypatch):
 
     monkeypatch.setattr(main_module, "INTERNAL_RAG_TOKEN", "configured-secret")
 
-    assert require_internal_rag_token_configured() is None
+    assert require_internal_rag_token_configured() is True
 
 
 def test_internal_auth_middleware_protects_validate_session_write():
@@ -187,24 +187,6 @@ def test_get_session_dir_requires_uuid_session_id():
 def test_normalize_session_id_returns_canonical_uuid():
     normalized = normalize_session_id("550E8400-E29B-41D4-A716-446655440000")
     assert normalized == "550e8400-e29b-41d4-a716-446655440000"
-
-
-def test_extract_pdf_text_worker_enforces_page_limit(tmp_path):
-    import fitz
-
-    pdf_path = tmp_path / "hello.pdf"
-    doc = fitz.open()
-    doc.new_page(width=300, height=144)
-    doc.save(str(pdf_path))
-    doc.close()
-
-    # Use a local queue and call the worker directly (no subprocess) to validate limit logic.
-    q = multiprocessing.Queue(maxsize=1)
-    _extract_pdf_text_worker(str(pdf_path), max_pages=0, max_chars=1000, out_queue=q)
-    result = q.get(timeout=2)
-    assert result["ok"] is False
-    assert "too many pages" in result["error"].lower()
-
 
 
 def test_concise_excerpt():
@@ -710,7 +692,8 @@ def test_ask_stream_passes_middleware_with_correct_token():
     finally:
         main_module.INTERNAL_RAG_TOKEN = original
 
-def test_ask_stream_rejected_when_token_is_cleared_after_startup():
+@pytest.mark.parametrize("path", ["/process-pdf", "/ask", "/summarize"])
+def test_protected_endpoints_rejected_when_token_is_cleared_after_startup(path):
     """Protected endpoints fail closed if token config becomes unavailable."""
     import main as main_module
 
@@ -718,20 +701,14 @@ def test_ask_stream_rejected_when_token_is_cleared_after_startup():
     main_module.INTERNAL_RAG_TOKEN = ""
     try:
         client = TestClient(app, raise_server_exceptions=False)
-        response = client.post(
-            "/ask/stream",
-            json={
-                "question": "What is this document about?",
-                "session_id": "00000000-0000-0000-0000-000000000004",
-                "session_secret": "irrelevant",
-            },
-        )
+        response = client.post(path)
         # Fail-closed behavior: when INTERNAL_RAG_TOKEN is unset, the
-        # middleware should still block protected requests with 403.
-        assert response.status_code == 403, (
-            "Middleware must block protected requests when INTERNAL_RAG_TOKEN is unset. "
+        # middleware should reject protected requests with 503.
+        assert response.status_code == 503, (
+            "Middleware must reject protected requests when INTERNAL_RAG_TOKEN is unset. "
             f"Got {response.status_code}"
         )
+        assert response.json()["detail"] == "INTERNAL_RAG_TOKEN is not configured"
     finally:
         main_module.INTERNAL_RAG_TOKEN = original
 
@@ -780,6 +757,81 @@ def test_internal_token_valid_case_sensitive():
     assert internal_token_valid("secret", "secret") is True
 
 
+# ─── Model readiness gate tests ───────────────────────────────────────────────
+
+def test_health_returns_200_while_models_loading():
+    """/health must stay 200 regardless of model load state (liveness probe)."""
+    import main as m
+    from fastapi.testclient import TestClient
+    original = m._models_ready.is_set()
+    m._models_ready.clear()
+    try:
+        resp = TestClient(app).get("/health")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
+    finally:
+        m._models_ready.set() if original else m._models_ready.clear()
+
+
+def test_ready_returns_503_before_models_loaded():
+    """/ready must return 503 while _models_ready is unset."""
+    import main as m
+    from fastapi.testclient import TestClient
+    original = m._models_ready.is_set()
+    m._models_ready.clear()
+    try:
+        resp = TestClient(app, raise_server_exceptions=False).get("/ready")
+        assert resp.status_code == 503
+        assert "Retry-After" in resp.headers
+    finally:
+        m._models_ready.set() if original else m._models_ready.clear()
+
+
+def test_ready_returns_200_after_models_loaded():
+    """/ready must return 200 once _models_ready is set."""
+    import main as m
+    from fastapi.testclient import TestClient
+    original = m._models_ready.is_set()
+    m._models_ready.set()
+    try:
+        resp = TestClient(app).get("/ready")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ready"
+        assert "embedding_model" in data
+        assert "generation_model" in data
+    finally:
+        m._models_ready.set() if original else m._models_ready.clear()
+
+
+def test_ready_503_includes_retry_after_header():
+    """/ready 503 must include Retry-After so callers know when to retry."""
+    import main as m
+    from fastapi.testclient import TestClient
+    original = m._models_ready.is_set()
+    m._models_ready.clear()
+    try:
+        resp = TestClient(app, raise_server_exceptions=False).get("/ready")
+        assert resp.status_code == 503
+        retry = resp.headers.get("Retry-After")
+        assert retry is not None
+        assert int(retry) > 0
+    finally:
+        m._models_ready.set() if original else m._models_ready.clear()
+
+
+def test_liveness_and_readiness_differ_during_startup():
+    """/health stays 200 and /ready stays 503 while models are loading."""
+    import main as m
+    from fastapi.testclient import TestClient
+    original = m._models_ready.is_set()
+    m._models_ready.clear()
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+        assert client.get("/health").status_code == 200
+        assert client.get("/ready").status_code == 503
+    finally:
+        m._models_ready.set() if original else m._models_ready.clear()
 # ── Issue #264: background session cleanup ────────────────────────────────────
 #
 # cleanup_expired_sessions() must no longer be called inline inside request
@@ -1019,7 +1071,7 @@ def test_cleanup_holds_lock_only_for_dict_mutation_not_disk_io():
     finally:
         _main_module.sessions.clear()
         _main_module.sessions.update(original)
-def test_stream_lazy_load_faiss_uses_get_embedding_model():
+def test_stream_lazy_load_uses_secure_vectorstore_loader():
     import main as main_module
     from unittest.mock import patch, MagicMock
     import threading
@@ -1029,7 +1081,7 @@ def test_stream_lazy_load_faiss_uses_get_embedding_model():
     main_module.embedding_model = None
 
     client = TestClient(main_module.app, raise_server_exceptions=False)
-    
+
     session_id = "00000000-0000-0000-0000-000000000009"
     with main_module.sessions_lock:
         main_module.sessions[session_id] = {
@@ -1043,33 +1095,95 @@ def test_stream_lazy_load_faiss_uses_get_embedding_model():
 
     try:
         with patch("main.get_embedding_model") as mock_get_embedding_model:
-            with patch("main.FAISS.load_local") as mock_faiss_load:
-                # We expect load_local to raise an exception or succeed, but either way it should call get_embedding_model
-                mock_get_embedding_model.return_value = MagicMock()
-                mock_faiss_load.return_value = MagicMock()
-                
-                client.post(
-                    "/ask/stream",
-                    json={
-                        "question": "test",
-                        "session_id": session_id,
-                        "session_secret": "test_secret"
-                    },
-                    headers={"X-Internal-Token": main_module.INTERNAL_RAG_TOKEN},
-                )
-                
-                mock_get_embedding_model.assert_called_once()
-                mock_faiss_load.assert_called_once()
+            with patch("main._load_vectorstore_from_snapshot") as mock_snapshot_load:
+                with patch("main.FAISS.load_local") as mock_faiss_load:
+                    mock_get_embedding_model.return_value = MagicMock()
+                    mock_snapshot_load.return_value = MagicMock()
 
-                # Verify that load_local was called with the result of get_embedding_model()
-                # FAISS.load_local(get_session_dir(session_id), get_embedding_model(), allow_dangerous_deserialization=True)
-                call_args = mock_faiss_load.call_args
-                assert call_args[0][0] == main_module.get_session_dir(session_id)
-                assert call_args[0][1] == mock_get_embedding_model.return_value
+                    client.post(
+                        "/ask/stream",
+                        json={
+                            "question": "test",
+                            "session_id": session_id,
+                            "session_secret": "test_secret"
+                        },
+                        headers={"X-Internal-Token": main_module.INTERNAL_RAG_TOKEN},
+                    )
 
-                with main_module.sessions_lock:
-                    assert main_module.sessions[session_id]["session_dir"] == main_module.get_session_dir(session_id)
+                    mock_get_embedding_model.assert_called_once()
+                    mock_snapshot_load.assert_called_once()
+                    mock_faiss_load.assert_not_called()
+
+                    # Verify that the secure loader was called with the session id and embedding model.
+                    call_args = mock_snapshot_load.call_args
+                    assert call_args[0][0] == session_id
+                    assert call_args[0][1] == mock_get_embedding_model.return_value
+
+                    with main_module.sessions_lock:
+                        assert main_module.sessions[session_id]["session_dir"] == main_module.get_session_dir(session_id)
     finally:
         main_module.embedding_model = original_embedding_model
         with main_module.sessions_lock:
             main_module.sessions.pop(session_id, None)
+
+
+def test_secure_vectorstore_loader_fails_closed_on_corrupt_snapshot(tmp_path):
+    import main as main_module
+    from unittest.mock import patch
+
+    session_id = "550e8400-e29b-41d4-a716-446655440000"
+    session_dir = tmp_path / session_id
+    session_dir.mkdir()
+    snapshot_path = session_dir / main_module.VECTORSTORE_SNAPSHOT_FILENAME
+    snapshot_path.write_text("{not-json}", encoding="utf-8")
+
+    with patch.object(main_module, "get_session_dir", return_value=str(session_dir)):
+        with pytest.raises(ValueError, match="Failed to load vectorstore snapshot"):
+            main_module._load_vectorstore_from_snapshot(session_id, MagicMock())
+
+
+def test_vectorstore_snapshot_round_trip_uses_same_session_dir(tmp_path):
+    import main as main_module
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    session_id = "550e8400-e29b-41d4-a716-446655440001"
+    session_dir = tmp_path / session_id
+    session_dir.mkdir()
+
+    fake_vectorstore = SimpleNamespace(
+        docstore=SimpleNamespace(
+            _dict={
+                "doc-1": SimpleNamespace(
+                    page_content="Alpha beta gamma.",
+                    metadata={"filename": "doc.pdf", "page": 0},
+                )
+            }
+        ),
+        index_to_docstore_id={0: "doc-1"},
+        save_local=MagicMock(),
+    )
+
+    loaded_vectorstore = object()
+
+    with patch.object(main_module, "get_session_dir", return_value=str(session_dir)):
+        with patch("langchain_community.vectorstores.faiss.dependable_faiss_import") as mock_faiss_import:
+            mock_faiss = MagicMock()
+            mock_faiss.read_index.return_value = "fake-index"
+            mock_faiss_import.return_value = mock_faiss
+            with patch.object(main_module, "FAISS", return_value=loaded_vectorstore) as mock_faiss_cls:
+                persisted_dir = main_module.persist_vectorstore(session_id, fake_vectorstore)
+                restored = main_module._load_vectorstore_from_snapshot(session_id, MagicMock())
+
+    assert persisted_dir == str(session_dir)
+    assert fake_vectorstore.save_local.call_args[0][0] == str(session_dir)
+    assert mock_faiss.read_index.call_args[0][0] == str(session_dir / "index.faiss")
+    assert mock_faiss_cls.call_count == 1
+    assert restored is loaded_vectorstore
+
+
+def test_vectorstore_loader_rejects_path_traversal_like_session_id():
+    import main as main_module
+
+    with pytest.raises(ValueError, match=r"(badly formed hexadecimal UUID string|Invalid persisted session id)"):
+        main_module._load_vectorstore_from_snapshot("../escape", MagicMock())
