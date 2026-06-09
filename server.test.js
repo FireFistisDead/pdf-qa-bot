@@ -893,6 +893,15 @@ describe("route error responses", () => {
     }
   });
 
+  test("GET /processing-status/:session_id with invalid session_id returns 400", async () => {
+    const res = await fetch(`${baseUrl}/processing-status/not-a-uuid`, {
+      method: "GET",
+    });
+    assert.equal(res.status, 400);
+    const data = await res.json();
+    assert.equal(data.error, "Invalid session ID format.");
+  });
+
   test("GET /health returns 200 and status ok", async () => {
     const res = await fetch(`${baseUrl}/health`);
     assert.equal(res.status, 200);
