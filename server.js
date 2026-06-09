@@ -1372,35 +1372,42 @@ app.use((err, req, res, next) => {
 });
 
 if (require.main === module) {
-  requireInternalRagToken();
-  if (!SUPABASE_JWT_SECRET) {
-    console.error("SUPABASE_JWT_SECRET missing in .env – required for /process-from-url authentication");
-    throw new Error("SUPABASE_JWT_SECRET missing in .env – required for /process-from-url authentication");
-  }
-
-  (async () => {
+  try {
     requireInternalRagToken();
-
-    if (redisConnectPromise) {
-      console.log("[redis] connecting for distributed rate limiting...");
-      await redisConnectPromise;
-      console.log("[redis] connected");
+    if (!SUPABASE_JWT_SECRET) {
+      console.error("SUPABASE_JWT_SECRET missing in .env – required for /process-from-url authentication");
+      process.exit(1);
     }
 
-    const server = app.listen(PORT, () =>
-      console.log(`Backend running on port ${PORT}`)
-    );
+    (async () => {
+      try {
+        requireInternalRagToken();
 
-    // ─── Server-Level Timeouts ───────────────────────────────────────────────
-    // Slow-loris and connection-exhaustion attacks open connections and then
-    // trickle data to keep the socket alive forever. These timeouts kill them.
-    server.keepAliveTimeout = 65_000;  // 65 s — slightly above typical LB (60 s)
-    server.headersTimeout = 70_000;    // Must be > keepAliveTimeout
-    server.requestTimeout = 120_000;   // Max time to fully receive a request (2 min)
-  })().catch((err) => {
+        if (redisConnectPromise) {
+          console.log("[redis] connecting for distributed rate limiting...");
+          await redisConnectPromise;
+          console.log("[redis] connected");
+        }
+
+        const server = app.listen(PORT, () =>
+          console.log(`Backend running on port ${PORT}`)
+        );
+
+        // ─── Server-Level Timeouts ───────────────────────────────────────────────
+        // Slow-loris and connection-exhaustion attacks open connections and then
+        // trickle data to keep the socket alive forever. These timeouts kill them.
+        server.keepAliveTimeout = 65_000;  // 65 s — slightly above typical LB (60 s)
+        server.headersTimeout = 70_000;    // Must be > keepAliveTimeout
+        server.requestTimeout = 120_000;   // Max time to fully receive a request (2 min)
+      } catch (err) {
+        console.error("Backend failed to start:", err?.message || err);
+        process.exit(1);
+      }
+    })();
+  } catch (err) {
     console.error("Backend failed to start:", err?.message || err);
-    process.exitCode = 1;
-  });
+    process.exit(1);
+  }
 }
 
 module.exports = {
