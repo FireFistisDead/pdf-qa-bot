@@ -46,8 +46,7 @@ let app,
   normalizeHostnameForAllowlist,
   isAllowedSupabaseHostname;
 
-let _credCache,
-  _credKey,
+let _credKey,
   _credCacheHit,
   _credCacheStore,
   _credCacheDrop;
@@ -63,17 +62,16 @@ before(() => {
   askSchema = mod.askSchema;
   summarizeSchema = mod.summarizeSchema;
   extractServiceDetails = mod.extractServiceDetails;
-  _credCache = mod._credCache;
-  _credKey = mod._credKey;
-  _credCacheHit = mod._credCacheHit;
-  _credCacheStore = mod._credCacheStore;
-  _credCacheDrop = mod._credCacheDrop;
   validateAskBody = mod.validateAskBody;
   validateSummarizeBody = mod.validateSummarizeBody;
   MAX_QUESTION_LENGTH = mod.MAX_QUESTION_LENGTH;
   ragAuthHeaders = mod.ragAuthHeaders;
   normalizeHostnameForAllowlist = mod.normalizeHostnameForAllowlist;
   isAllowedSupabaseHostname = mod.isAllowedSupabaseHostname;
+  _credKey = mod._credKey;
+  _credCacheHit = mod._credCacheHit;
+  _credCacheStore = mod._credCacheStore;
+  _credCacheDrop = mod._credCacheDrop;
 
   ({ clientIpFromRequest, normalizeIp } = require("./security/ip"));
 });
@@ -512,12 +510,15 @@ describe("route error responses", () => {
       },
     });
 
+    const jwt = require("jsonwebtoken");
+    const validToken = jwt.sign({ role: "authenticated" }, process.env.SUPABASE_JWT_SECRET);
+
     try {
       const res = await fetch(`${baseUrl}/process-from-url`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: "Bearer test-token",
+          Authorization: `Bearer ${validToken}`,
         },
         body: JSON.stringify({
           url: "https://xyz.supabase.co//evil.com/file.pdf?download=1",
@@ -555,12 +556,15 @@ describe("route error responses", () => {
       },
     });
 
+    const jwt = require("jsonwebtoken");
+    const validToken = jwt.sign({ role: "authenticated" }, process.env.SUPABASE_JWT_SECRET);
+
     try {
       const res = await fetch(`${baseUrl}/process-from-url`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: "Bearer test-token",
+          Authorization: `Bearer ${validToken}`,
         },
         body: JSON.stringify({
           url: "  https://xyz.supabase.co/storage/v1/object/public/docs/trimmed.pdf  ",
@@ -593,7 +597,7 @@ describe("route error responses", () => {
   test("POST /summarize with missing session_id returns 400", async () => {
     const res = await fetch(`${baseUrl}/summarize`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Connection": "close" },
       body: JSON.stringify({ session_id: "" }),
     });
     assert.equal(res.status, 400);
@@ -757,7 +761,7 @@ describe("route error responses", () => {
   test("POST /upload without file returns 400", async () => {
     const res = await fetch(`${baseUrl}/upload`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Connection": "close" },
       body: JSON.stringify({}),
     });
     assert.equal(res.status, 400);
