@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { pdfjs } from "react-pdf";
 import "bootstrap/dist/css/bootstrap.min.css";
 import { Container, Row, Col } from "react-bootstrap";
@@ -17,6 +17,16 @@ function App() {
   const [selectedPdf, setSelectedPdf] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
+
+  useEffect(() => {
+  return () => {
+    pdfs.forEach((pdf) => {
+      if (pdf.url) {
+        URL.revokeObjectURL(pdf.url);
+      }
+    });
+  };
+}, [pdfs]);
 
   const handleUpload = async (file) => {
     // Validate file type

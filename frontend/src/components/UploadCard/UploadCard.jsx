@@ -256,7 +256,7 @@ const UploadCard = ({ darkMode, onUpload, uploading }) => {
                         mr: 1,
                       }}
                     />
-                    Uploading...
+                    Processing PDF...
                   </>
                 ) : hasSelectedFiles && files.length > 1 ? (
                   "Upload PDFs"
