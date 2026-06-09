@@ -1,0 +1,205 @@
+/* ═══════════════════════════════════════════════════════════
+   DocuMind — Global Design System (Isolated for /new)
+   Adapted from CosmosLab (designed by Nitesh Agarwal)
+   ═══════════════════════════════════════════════════════════ */
+
+/* ─── CSS Variables ─────────────────────────────────────── */
+:root {
+  --bg: #000000;
+  --surface: #0c0c0c;
+  --border: #1c1c1c;
+  --border-hover: #2a2a2a;
+  --text: #e8e6e3;
+  --muted: #555555;
+  --accent: #c8ff00;
+  --accent-dim: rgba(200, 255, 0, 0.2);
+  --accent-glow: rgba(200, 255, 0, 0.12);
+
+  --font-display: 'Syne', sans-serif;
+  --font-body: 'Space Grotesk', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+/* ─── Base Styles Scoped to LandingPage ─────────────────── */
+.landing-page-root {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+  position: relative;
+  overflow-x: hidden;
+}
+
+.landing-page-root *,
+.landing-page-root *::before,
+.landing-page-root *::after {
+  box-sizing: border-box;
+}
+
+.landing-page-root a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.landing-page-root button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+}
+
+.landing-page-root img, .landing-page-root svg, .landing-page-root video {
+  display: block;
+  max-width: 100%;
+}
+
+/* ─── Film Grain Overlay ────────────────────────────────── */
+.landing-page-root::after {
+  content: '';
+  position: fixed;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 256px 256px;
+  opacity: 0.02;
+  pointer-events: none;
+  z-index: 9000;
+  animation: grainShift 0.4s steps(2) infinite;
+}
+
+@keyframes grainShift {
+  0%   { transform: translate(0); }
+  25%  { transform: translate(-2%, -3%); }
+  50%  { transform: translate(2%, 1%); }
+  75%  { transform: translate(-1%, 2%); }
+}
+
+/* ─── Typography Classes ────────────────────────────────── */
+.display-xl {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: clamp(3.5rem, 10vw, 8rem);
+  line-height: 0.92;
+  letter-spacing: -0.03em;
+  color: var(--text);
+}
+
+.display-lg {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: clamp(2rem, 5vw, 4rem);
+  line-height: 1;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.display-md {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: clamp(1.4rem, 3vw, 2.2rem);
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.label-mono {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* ─── Component Tokens ──────────────────────────────────── */
+.tag {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 4px 12px;
+  display: inline-block;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+.tag-accent {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  border: 1px solid var(--accent-dim);
+  color: var(--accent);
+  padding: 4px 12px;
+  display: inline-block;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  font-weight: 600;
+  padding: 14px 32px;
+  cursor: pointer;
+  border: none;
+  background: var(--accent);
+  color: #000;
+  text-transform: uppercase;
+  transition: filter 0.15s, transform 0.1s;
+  user-select: none;
+  animation: ctaPulse 2s ease-out infinite;
+}
+
+.btn-primary:hover {
+  filter: brightness(1.12);
+}
+
+.btn-primary:active {
+  transform: scale(0.97);
+}
+
+/* ─── Animations ────────────────────────────────────────── */
+@keyframes ctaPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(200, 255, 0, 0.55); }
+  50%      { box-shadow: 0 0 0 10px rgba(200, 255, 0, 0); }
+}
+
+@keyframes breatheGlow {
+  0%, 100% { text-shadow: 0 0 20px rgba(200, 255, 0, 0.12); }
+  50%      { text-shadow: 0 0 40px rgba(200, 255, 0, 0.32), 0 0 80px rgba(200, 255, 0, 0.1); }
+}
+
+@keyframes fadeSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes circuitTrace {
+  from { width: 0; }
+  to   { width: 100%; }
+}
+
+@keyframes staggerIn {
+  from {
+    opacity: 0;
+    transform: translateY(9px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

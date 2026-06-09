@@ -1,4 +1,6 @@
-fastapi
+fastapi>=0.104.0
+starlette>=0.27.0
+httpx
 uvicorn
 python-dotenv
 pydantic
@@ -8,7 +10,10 @@ langchain-text-splitters
 sentence-transformers
 transformers
 faiss-cpu
-pypdf
+PyMuPDF
 requests
 numpy
 rank-bm25==0.2.2
+python-multipart
+pypdf>=4.0.0
+flake8>=7,<8

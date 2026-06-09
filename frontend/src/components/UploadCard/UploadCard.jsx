@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import toast from "react-hot-toast";
 
 import {
   Box,
@@ -12,6 +13,39 @@ import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 
 const UploadCard = ({ darkMode, onUpload, uploading }) => {
   const [files, setFiles] = useState([]);
+  const [isDragging, setIsDragging] = useState(false);
+
+const handleDragOver = (e) => {
+  e.preventDefault();
+  setIsDragging(true);
+};
+
+const handleDragLeave = () => {
+  setIsDragging(false);
+};
+
+const isPdfFile = (file) =>
+  file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+
+const handleDrop = (e) => {
+  e.preventDefault();
+  setIsDragging(false);
+  const allDropped = Array.from(e.dataTransfer.files);
+  if (allDropped.length === 0) return;
+
+  const validFiles = allDropped.filter(isPdfFile);
+
+  if (validFiles.length === 0) {
+    toast.error("Only PDF files are allowed. Please drop a valid PDF document.");
+    return;
+  }
+
+  if (validFiles.length < allDropped.length) {
+    toast.error("Some files were skipped. Only PDF files are accepted.");
+  }
+
+  setFiles(validFiles);
+};
 
   const hasSelectedFiles = files.length > 0;
 
@@ -50,10 +84,15 @@ const UploadCard = ({ darkMode, onUpload, uploading }) => {
       }}
     >
       <Box
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
         sx={{
-          border: darkMode
-            ? "2px dashed rgba(255,255,255,0.12)"
-            : "2px dashed rgba(0,0,0,0.12)",
+          border: isDragging
+          ? "2px dashed rgba(139,92,246,0.75)"
+          : darkMode
+          ? "2px dashed rgba(255,255,255,0.12)"
+          : "2px dashed rgba(0,0,0,0.12)",
 
           position: "relative",
           overflow: "hidden",
