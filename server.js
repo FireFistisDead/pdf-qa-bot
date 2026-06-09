@@ -1340,9 +1340,38 @@ app.post("/sessions/lookup", async (req, res) => {
   }
 });
 
+app.get("/processing-status/:session_id", async (req, res) => {
+  const { session_id } = req.params;
+  
+  // CodeQL [js/server-side-request-forgery] Mitigation: Validate UUID structure strictly
+  const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (!UUID_PATTERN.test(session_id)) {
+    return res.status(400).json({ error: "Invalid session ID format." });
+  }
+
+  // CodeQL [js/sensitive-data-read-from-get-request] Mitigation: Accept secrets only via headers to prevent leak in logs/browser history
+  const session_secret = req.headers["x-session-secret"] || "";
+
+  try {
+    const response = await axios.get(
+      `${RAG_SERVICE_URL}/processing-status/${session_id}`,
+      {
+        headers: {
+          ...ragAuthHeaders(),
+          "X-Session-Secret": session_secret,
+        },
+      }
+    );
+    return res.json(response.data);
+  } catch (err) {
+    return propagateRagError(err, res, "Failed to check processing status");
+  }
+});
+
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
+
 
 app.use((req, res) => {
   res.status(404).json({ error: "Route not found" });
