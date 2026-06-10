@@ -1,3 +1,5 @@
+const config = require("./src/config");
+
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
@@ -25,6 +27,9 @@ const {
 const { clientIpFromRequest } = require("./security/ip");
 const { createRedisClient } = require("./security/redis");
 const authRoutes = require("./src/routes/authRoutes");
+
+const RAG_SERVICE_URL = config.ragServiceUrl;
+const PORT = config.port;
 
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
 const getInternalRagToken = () => (process.env.INTERNAL_RAG_TOKEN || "").trim();
@@ -159,7 +164,7 @@ if (RATE_LIMIT_STORE === "redis") {
 // Express only sees the load-balancer IP, so the rate limiter would lock out
 // ALL users the moment a single attacker spams the API.
 // Set to the number of reverse proxies in front of this server (e.g. PROXY_COUNT=1).
-const PROXY_COUNT = parseInt(process.env.PROXY_COUNT || "0", 10);
+const PROXY_COUNT = config.proxyCount;
 if (PROXY_COUNT > 0) {
   app.set("trust proxy", PROXY_COUNT);
 }
@@ -394,6 +399,9 @@ const globalLimiter = rateLimit({
   },
 });
 
+// Hard cap: configured uploads / hour per IP. Tripping this triggers the ban system.
+const uploadLimitMax = config.uploadLimitMax;
+
 // Route-specific cap for upload and inference endpoints.
 // Tripping this triggers the ban system.
 const uploadLimiter = rateLimit({
@@ -416,7 +424,7 @@ const uploadLimiter = rateLimit({
 // instead of jumping straight to multi-second delays on the very first hit over
 // the threshold. Kept separate from RATE_LIMIT_INFERENCE_MAX so operators can
 // tune slow-down friction and hard-block quota independently.
-const SLOWDOWN_DELAY_AFTER = parseInt(process.env.RATE_LIMIT_SLOWDOWN_AFTER || "10", 10);
+const SLOWDOWN_DELAY_AFTER = config.slowDownAfter;
 const inferenceSlowDown = slowDown({
   windowMs: 5 * 60 * 1000,
   delayAfter: SLOWDOWN_DELAY_AFTER,
@@ -429,6 +437,8 @@ const inferenceSlowDown = slowDown({
 // Inference hard limiter — fires after slow-down window if the attacker still
 // keeps hammering. Triggers the escalating ban on violation.
 const inferenceLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: config.inferenceMax,
   windowMs: RATE_LIMIT_WINDOW_MS,
   max: RATE_LIMIT_MAX,
   standardHeaders: "draft-7",
@@ -501,8 +511,7 @@ app.use("/api/auth", authRoutes);
 const MAX_PDF_SIZE_BYTES = parseUploadFileSizeLimitBytes();
 
 const UPLOADS_DIR = path.resolve("uploads");
-const isDevelopment = process.env.NODE_ENV !== "production";
-
+const isDevelopment = config.nodeEnv !== "production";
 if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }

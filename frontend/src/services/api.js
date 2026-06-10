@@ -1,6 +1,6 @@
 import axios from "axios";
-
-const API_BASE = process.env.REACT_APP_API_URL || "";
+import config from "../config";
+const API_BASE = config.apiBaseUrl;
 
 export const extractApiErrorMessage = (error, fallbackMessage) => {
   return (
