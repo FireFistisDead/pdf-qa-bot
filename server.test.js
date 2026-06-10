@@ -857,6 +857,52 @@ describe("route error responses", () => {
     assert.equal(res.status, 404);
   });
 
+  test("GET /processing-status/:session_id proxies to RAG service and forwards headers", async () => {
+    const originalGet = axios.get;
+    let forwardedUrl = null;
+    let forwardedHeaders = null;
+
+    axios.get = async (url, options) => {
+      forwardedUrl = url;
+      forwardedHeaders = options?.headers;
+      return {
+        data: {
+          stage: "Extracting text from PDF",
+          progress: 15,
+          updated_at: 1700000000,
+        },
+      };
+    };
+
+    try {
+      const res = await fetch(`${baseUrl}/processing-status/550e8400-e29b-41d4-a716-446655440000`, {
+        method: "GET",
+        headers: {
+          "X-Session-Secret": "test-session-secret",
+        },
+      });
+
+      assert.equal(res.status, 200);
+      const data = await res.json();
+      assert.equal(data.stage, "Extracting text from PDF");
+      assert.equal(data.progress, 15);
+      assert.equal(forwardedUrl.endsWith("/processing-status/550e8400-e29b-41d4-a716-446655440000"), true);
+      assert.equal(forwardedHeaders["X-Internal-Token"], process.env.INTERNAL_RAG_TOKEN);
+      assert.equal(forwardedHeaders["X-Session-Secret"], "test-session-secret");
+    } finally {
+      axios.get = originalGet;
+    }
+  });
+
+  test("GET /processing-status/:session_id with invalid session_id returns 400", async () => {
+    const res = await fetch(`${baseUrl}/processing-status/not-a-uuid`, {
+      method: "GET",
+    });
+    assert.equal(res.status, 400);
+    const data = await res.json();
+    assert.equal(data.error, "Invalid session ID format.");
+  });
+
   test("GET /health returns 200 and status ok", async () => {
     const res = await fetch(`${baseUrl}/health`);
     assert.equal(res.status, 200);

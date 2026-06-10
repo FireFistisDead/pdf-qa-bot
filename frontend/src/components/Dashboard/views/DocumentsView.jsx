@@ -130,7 +130,7 @@ const DocumentsView = () => {
       // Poll for real processing stages while RAG service works
       if (session_id) {
         const pollInterval = setInterval(async () => {
-          const status = await getProcessingStatus(session_id).catch(() => null);
+          const status = await getProcessingStatus(session_id, session_secret).catch(() => null);
           if (status?.stage) {
             setProcessingStage(prev => ({ ...prev, [docId]: status.stage }));
           }
