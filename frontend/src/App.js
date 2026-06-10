@@ -1,8 +1,8 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { pdfjs } from "react-pdf";
 import "bootstrap/dist/css/bootstrap.min.css";
-import { Container, Row, Col } from "react-bootstrap";
+import { Container, Row, Col } from "react-bootstrap";  
 import Navbar from "./components/Navbar/Navbar";
 import UploadCard from "./components/UploadCard/UploadCard";
 import PdfViewer from "./components/PdfViewer/PdfViewer";
@@ -202,6 +202,16 @@ function MainApp() {
 
 
 
+  useEffect(() => {
+  return () => {
+    pdfs.forEach((pdf) => {
+      if (pdf.url) {
+        URL.revokeObjectURL(pdf.url);
+      }
+    });
+  };
+}, [pdfs]);
+
   const handleUpload = async (file) => {
     // Validate file type
     if (
@@ -215,14 +225,13 @@ function MainApp() {
     }
 
     // Validate file size (20MB limit)
-    const maxSize = 20 * 1024 * 1024; // 20MB in bytes
+   const maxSize = 20 * 1024 * 1024; // 20MB in bytes
     if (file.size > maxSize) {
       toast.error(
-        "File size exceeds 20MB limit. Please choose a smaller file.",
+        "File too large. Maximum allowed size is 20MB. Please choose a smaller PDF file.",
       );
       return;
     }
-
     setUploading(true);
     const loadingToast = toast.loading("Uploading PDF...");
 

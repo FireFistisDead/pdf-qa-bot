@@ -138,7 +138,6 @@ module.exports = {
   sessionsLookupSchema,
   MAX_QUESTION_LENGTH,
   knowledgeGapsSchema,
-  sessionsLookupSchema,
   generateFlashcardsSchema,
   updateFlashcardProgressSchema,
 };

@@ -38,6 +38,8 @@ from main import (
     _hash_secret,
 )
 
+from pdf_parse_worker import _extract_pdf_text_worker
+
 import secrets as _secrets
 
 
@@ -203,7 +205,6 @@ def test_load_with_pymupdf_enforces_page_limit(tmp_path):
     docs = _load_with_pymupdf(str(pdf_path), "hello.pdf", max_pages=1)
     assert len(docs) == 1
     assert docs[0].page_content == "Page 1"
-
 def test_concise_excerpt():
     text = "This is a very long sentence that we want to abbreviate cleanly."
     assert concise_excerpt(text, max_chars=20) == "This is a very long..."

@@ -555,6 +555,7 @@ const startUploadsCleanup = () => {
     intervalId.unref();
   }
 };
+startUploadsCleanup();
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -659,6 +660,7 @@ const extractServiceDetails = (err, fallbackMessage = "Upstream service request 
 
 const requireInternalRagToken = () => {
   if (!getInternalRagToken()) {
+    console.error("INTERNAL_RAG_TOKEN must be configured for RAG service requests.");
     throw new Error("INTERNAL_RAG_TOKEN must be configured for RAG service requests.");
   }
 };
@@ -992,6 +994,7 @@ const requireSupabaseAuth = (req, res, next) => {
   try {
     req.user = jwt.verify(token, secret);
   } catch (err) {
+    console.error("requireSupabaseAuth JWT verification failed:", err.message);
     return res.status(401).json({ error: "Invalid token" });
   }
 
@@ -1337,14 +1340,44 @@ app.post("/sessions/lookup", async (req, res) => {
   }
 });
 
+app.get("/processing-status/:session_id", async (req, res) => {
+  const { session_id } = req.params;
+  
+  // CodeQL [js/server-side-request-forgery] Mitigation: Validate UUID structure strictly
+  const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (!UUID_PATTERN.test(session_id)) {
+    return res.status(400).json({ error: "Invalid session ID format." });
+  }
+
+  // CodeQL [js/sensitive-data-read-from-get-request] Mitigation: Accept secrets only via headers to prevent leak in logs/browser history
+  const session_secret = req.headers["x-session-secret"] || "";
+
+  try {
+    const response = await axios.get(
+      `${RAG_SERVICE_URL}/processing-status/${session_id}`,
+      {
+        headers: {
+          ...ragAuthHeaders(),
+          "X-Session-Secret": session_secret,
+        },
+      }
+    );
+    return res.json(response.data);
+  } catch (err) {
+    return propagateRagError(err, res, "Failed to check processing status");
+  }
+});
+
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-app.use((req, res, next) => {
-  res.status(404).json({ error: "Not found" });
+
+app.use((req, res) => {
+  res.status(404).json({ error: "Route not found" });
 });
 
+// eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   if (!err) {
     return next();
@@ -1368,34 +1401,42 @@ app.use((err, req, res, next) => {
 });
 
 if (require.main === module) {
-  requireInternalRagToken();
-  if (!SUPABASE_JWT_SECRET) {
-    throw new Error("SUPABASE_JWT_SECRET missing in .env – required for /process-from-url authentication");
-  }
-
-  (async () => {
+  try {
     requireInternalRagToken();
-
-    if (redisConnectPromise) {
-      console.log("[redis] connecting for distributed rate limiting...");
-      await redisConnectPromise;
-      console.log("[redis] connected");
+    if (!SUPABASE_JWT_SECRET) {
+      console.error("SUPABASE_JWT_SECRET missing in .env – required for /process-from-url authentication");
+      process.exit(1);
     }
 
-    const server = app.listen(PORT, () =>
-      console.log(`Backend running on port ${PORT}`)
-    );
+    (async () => {
+      try {
+        requireInternalRagToken();
 
-    // ─── Server-Level Timeouts ───────────────────────────────────────────────
-    // Slow-loris and connection-exhaustion attacks open connections and then
-    // trickle data to keep the socket alive forever. These timeouts kill them.
-    server.keepAliveTimeout = 65_000;  // 65 s — slightly above typical LB (60 s)
-    server.headersTimeout = 70_000;    // Must be > keepAliveTimeout
-    server.requestTimeout = 120_000;   // Max time to fully receive a request (2 min)
-  })().catch((err) => {
+        if (redisConnectPromise) {
+          console.log("[redis] connecting for distributed rate limiting...");
+          await redisConnectPromise;
+          console.log("[redis] connected");
+        }
+
+        const server = app.listen(PORT, () =>
+          console.log(`Backend running on port ${PORT}`)
+        );
+
+        // ─── Server-Level Timeouts ───────────────────────────────────────────────
+        // Slow-loris and connection-exhaustion attacks open connections and then
+        // trickle data to keep the socket alive forever. These timeouts kill them.
+        server.keepAliveTimeout = 65_000;  // 65 s — slightly above typical LB (60 s)
+        server.headersTimeout = 70_000;    // Must be > keepAliveTimeout
+        server.requestTimeout = 120_000;   // Max time to fully receive a request (2 min)
+      } catch (err) {
+        console.error("Backend failed to start:", err?.message || err);
+        process.exit(1);
+      }
+    })();
+  } catch (err) {
     console.error("Backend failed to start:", err?.message || err);
-    process.exitCode = 1;
-  });
+    process.exit(1);
+  }
 }
 
 module.exports = {

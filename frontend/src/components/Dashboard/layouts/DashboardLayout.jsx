@@ -81,7 +81,7 @@ const DashboardLayout = ({ children }) => {
 
         <div className="dash-user-extreme">
           <div className="user-avatar-crazy">
-            {avatar ? <img src={avatar} alt="" /> : <span>{initials}</span>}
+            {avatar ? <img loading="lazy" decoding="async" src={avatar} alt="" /> : <span>{initials}</span>}
             <div className="user-status-ping" />
           </div>
           {!collapsed && (
