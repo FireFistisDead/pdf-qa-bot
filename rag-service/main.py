@@ -2261,16 +2261,17 @@ def representative_documents_by_source(documents, per_document_limit=2, max_docu
     return representatives[:max_documents]
 
 
-def search_retrieval_candidates(vectorstore, question, candidate_count):
+def search_retrieval_candidates(vectorstore, question, candidate_count, user_id=None):
+    filter_dict = {"user_id": user_id} if user_id else None
     try:
-        scored_documents = vectorstore.similarity_search_with_score(question, k=candidate_count)
+        scored_documents = vectorstore.similarity_search_with_score(question, k=candidate_count, filter=filter_dict)
         return [
             (document, float(score), rank)
             for rank, (document, score) in enumerate(scored_documents)
         ]
     except Exception:
         logger.debug("Falling back to similarity_search without scores", exc_info=True)
-        documents = vectorstore.similarity_search(question, k=candidate_count)
+        documents = vectorstore.similarity_search(question, k=candidate_count, filter=filter_dict)
         return [
             (document, float(rank), rank)
             for rank, document in enumerate(documents)
@@ -2911,6 +2912,9 @@ def lookup_sessions(data: SessionsLookupRequest):
             sid = str(item.session_id)
             session = _touch_session_unlocked(sid)
             if not session:
+                raise HTTPException(status_code=404, detail="Session not found")
+            if session.get("user_id") and session.get("user_id") != user_id:
+                raise HTTPException(status_code=403, detail="Forbidden")
                 continue
 
             _require_session_secret(session, item.session_secret)
@@ -2953,7 +2957,8 @@ class SessionWriteRequest(BaseModel):
 
 
 @app.post("/process-pdf")
-async def process_pdf(
+def process_pdf(
+    request: Request,
     file: UploadFile = File(...),
     session_id: str | None = Form(None),
     original_filename: str | None = Form(None),
@@ -2961,6 +2966,10 @@ async def process_pdf(
     _ready: None = Depends(require_models_ready)
 ):
     # If original_filename is provided, use it for display, otherwise fallback to the file's name (which might be a UUID)
+    user_id = request.headers.get("X-User-Id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
     filename = original_filename or file.filename or "uploaded.pdf"
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF documents are supported.")
@@ -3068,6 +3077,9 @@ async def process_pdf(
             with sessions_lock:
                 session = _peek_session_unlocked(requested_session_id)
                 if not session:
+                raise HTTPException(status_code=404, detail="Session not found")
+            if session.get("user_id") and session.get("user_id") != user_id:
+                raise HTTPException(status_code=403, detail="Forbidden")
                     raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
                 stored_hash = (session.get("hashed_session_secret") or "").strip()
                 if stored_hash:
@@ -3110,6 +3122,7 @@ async def process_pdf(
                 "last_accessed": created_at,
                 "retrieval_cache": OrderedDict(),
                 "chat": [],
+                "user_id": user_id,
             }
             persist_session_registry_entry(processing_session_id, sessions[processing_session_id])
 
@@ -3137,6 +3150,7 @@ async def process_pdf(
     # already set by semantic_chunk() at construction time.
     for chunk in chunks:
         chunk.metadata["uploaded_at"] = now
+        chunk.metadata["user_id"] = user_id
 
     try:
         embeddings = get_embedding_model()
@@ -3173,6 +3187,9 @@ async def process_pdf(
             with sessions_lock:
                 session = _touch_session_unlocked(requested_session_id)
                 if not session:
+                raise HTTPException(status_code=404, detail="Session not found")
+            if session.get("user_id") and session.get("user_id") != user_id:
+                raise HTTPException(status_code=403, detail="Forbidden")
                     raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
                 # Re-validate quotas inside the merge lock to prevent TOCTOU
                 if len(session.get("documents", [])) >= MAX_DOCUMENTS_PER_SESSION:
@@ -3201,6 +3218,9 @@ async def process_pdf(
             with sessions_lock:
                 session = _touch_session_unlocked(requested_session_id)
                 if not session:
+                raise HTTPException(status_code=404, detail="Session not found")
+            if session.get("user_id") and session.get("user_id") != user_id:
+                raise HTTPException(status_code=403, detail="Forbidden")
                     raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
                 session.setdefault("documents", []).append(uploaded_document)
                 session["last_accessed"] = now
@@ -3290,6 +3310,15 @@ def validate_session_write(data: SessionWriteRequest):
         with sessions_lock:
             session = _peek_session_unlocked(session_id)
             if not session:
+                raise HTTPException(status_code=404, detail="Session not found")
+            if session.get("user_id") and session.get("user_id") != user_id:
+                raise HTTPException(status_code=403, detail="Forbidden")
+                raise HTTPException(status_code=404, detail="Session not found")
+            if session.get("user_id") and session.get("user_id") != user_id:
+                raise HTTPException(status_code=403, detail="Forbidden")
+                raise HTTPException(status_code=404, detail="Session not found")
+            if session.get("user_id") and session.get("user_id") != user_id:
+                raise HTTPException(status_code=403, detail="Forbidden")
                 raise HTTPException(status_code=404, detail="Session expired or invalid. Please re-upload your PDFs.")
 
             _require_session_secret(session, provided_secret)
