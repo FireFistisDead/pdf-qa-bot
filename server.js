@@ -975,6 +975,8 @@ const attachSessionSecrets = async (req, sessions) => {
       session_secret: sessionSecret,
     };
   }));
+};
+
 const SUPABASE_ALLOWED_HOST_SUFFIXES = new Set(["supabase.co", "supabase.in"]);
 
 const normalizeHostnameForAllowlist = (hostname) => {
