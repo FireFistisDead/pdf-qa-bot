@@ -4,6 +4,8 @@ import ReactMarkdown from "react-markdown";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import BookmarkBorderIcon from "@mui/icons-material/BookmarkBorder";
 import BookmarkIcon from "@mui/icons-material/Bookmark";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import CheckIcon from "@mui/icons-material/Check";
 
 // Strict allowlist for AI-generated markdown content.
 //
@@ -56,10 +58,60 @@ const MessageBubble = ({
   onToggleBookmark,
   highlighted = false,
   registerMessageRef,
+  onOptionClick,
 }) => {
+  const [copied, setCopied] = React.useState(false);
+  const copyTimeoutRef = React.useRef(null);
+
+  React.useEffect(() => {
+    return () => {
+      if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
+    };
+  }, []);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(msg.text);
+      setCopied(true);
+      if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
+      copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error("Failed to copy text: ", err);
+      setCopied(false);
+    }
+  };
 
   const getSourceLabel = (source) => source.document || "Source Document";
   const hasOpenablePage = (source) => Boolean(source.page && source.document);
+
+  let mainText = msg.text;
+  let followup = null;
+  
+  if (msg.role === "bot" && typeof msg.text === "string") {
+    const followupMatch = msg.text.match(/<FOLLOWUP>([\s\S]*?)<\/FOLLOWUP>/i);
+    if (followupMatch) {
+      mainText = msg.text.replace(followupMatch[0], "").trim();
+      const followupContent = followupMatch[1].trim();
+      
+      const lines = followupContent.split('\n').map(l => l.trim()).filter(l => l);
+      let question = "";
+      const options = [];
+      
+      for (const line of lines) {
+        if (line.toLowerCase().startsWith("question:")) {
+          question = line.substring(9).trim();
+        } else if (line.startsWith("- ")) {
+          options.push(line.substring(2).trim());
+        } else if (line.startsWith("-")) {
+          options.push(line.substring(1).trim());
+        }
+      }
+      
+      if (question || options.length > 0) {
+        followup = { question, options };
+      }
+    }
+  }
 
   return (
     <div
@@ -109,7 +161,7 @@ const MessageBubble = ({
       >
         {msg.role === "bot" ? (
           <span>
-            <ReactMarkdown rehypePlugins={[[rehypeSanitize, MARKDOWN_SANITIZE_SCHEMA]]}>{msg.text}</ReactMarkdown>
+            <ReactMarkdown rehypePlugins={[[rehypeSanitize, MARKDOWN_SANITIZE_SCHEMA]]}>{mainText}</ReactMarkdown>
             {msg.streaming && (
               <span style={{
                 display: "inline-block", width: "2px", height: "1em",
@@ -121,6 +173,58 @@ const MessageBubble = ({
           </span>
         ) : (
           <span>{msg.text}</span>
+        )}
+
+        {followup && !msg.streaming && (
+          <div style={{
+            marginTop: "16px",
+            padding: "12px",
+            borderRadius: "12px",
+            background: darkMode ? "rgba(139, 92, 246, 0.1)" : "rgba(139, 92, 246, 0.05)",
+            border: darkMode ? "1px solid rgba(139, 92, 246, 0.2)" : "1px solid rgba(139, 92, 246, 0.15)",
+          }}>
+            {followup.question && (
+              <div style={{
+                fontWeight: 600,
+                color: darkMode ? "#E5E7EB" : "#1F2937",
+                marginBottom: "10px",
+                fontSize: "14px"
+              }}>
+                {followup.question}
+              </div>
+            )}
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+              {followup.options.map((opt, idx) => (
+                <button
+                  key={idx}
+                  onClick={() => onOptionClick?.(opt)}
+                  style={{
+                    textAlign: "left",
+                    padding: "8px 12px",
+                    borderRadius: "8px",
+                    background: darkMode ? "rgba(255,255,255,0.05)" : "#FFFFFF",
+                    border: darkMode ? "1px solid rgba(255,255,255,0.1)" : "1px solid rgba(0,0,0,0.08)",
+                    color: darkMode ? "#D1D5DB" : "#4B5563",
+                    fontSize: "13px",
+                    cursor: "pointer",
+                    transition: "all 0.2s ease"
+                  }}
+                  onMouseOver={(e) => {
+                    e.currentTarget.style.background = darkMode ? "rgba(139, 92, 246, 0.2)" : "rgba(139, 92, 246, 0.1)";
+                    e.currentTarget.style.borderColor = "#8B5CF6";
+                    e.currentTarget.style.color = darkMode ? "#FFF" : "#111";
+                  }}
+                  onMouseOut={(e) => {
+                    e.currentTarget.style.background = darkMode ? "rgba(255,255,255,0.05)" : "#FFFFFF";
+                    e.currentTarget.style.borderColor = darkMode ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.08)";
+                    e.currentTarget.style.color = darkMode ? "#D1D5DB" : "#4B5563";
+                  }}
+                >
+                  {opt}
+                </button>
+              ))}
+            </div>
+          </div>
         )}
 
         {msg.role === "bot" && msg.mode && msg.mode !== "default" && (() => {
@@ -148,6 +252,7 @@ const MessageBubble = ({
               marginTop: "12px",
               display: "flex",
               justifyContent: "flex-start",
+              gap: "8px",
             }}
           >
             <button
@@ -185,6 +290,40 @@ const MessageBubble = ({
                 <BookmarkBorderIcon sx={{ fontSize: 16 }} />
               )}
               {isBookmarked ? "Saved" : "Save Answer"}
+            </button>
+            <button
+              type="button"
+              onClick={handleCopy}
+              aria-label="Copy to clipboard"
+              title="Copy answer"
+              className="copy-answer-button"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                padding: "6px 10px",
+                borderRadius: "12px",
+                border: darkMode
+                  ? "1px solid rgba(255,255,255,0.12)"
+                  : "1px solid rgba(0,0,0,0.1)",
+                background: copied
+                  ? "rgba(34,197,94,0.12)"
+                  : darkMode
+                  ? "rgba(255,255,255,0.05)"
+                  : "rgba(255,255,255,0.7)",
+                color: copied ? "#22C55E" : darkMode ? "#D1D5DB" : "#4B5563",
+                fontSize: "12px",
+                fontWeight: 700,
+                cursor: "pointer",
+                transition: "all 0.2s",
+              }}
+            >
+              {copied ? (
+                <CheckIcon sx={{ fontSize: 16 }} />
+              ) : (
+                <ContentCopyIcon sx={{ fontSize: 16 }} />
+              )}
+              {copied ? "Copied!" : "Copy"}
             </button>
           </div>
         )}
