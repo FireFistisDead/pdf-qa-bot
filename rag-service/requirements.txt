@@ -1,4 +1,4 @@
-fastapi>=0.104.0
+fastapi>=0.136.3
 starlette>=0.27.0
 httpx
 uvicorn
