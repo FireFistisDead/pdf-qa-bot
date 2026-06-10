@@ -513,11 +513,12 @@ describe("route error responses", () => {
     });
 
     try {
+      const token = jwt.sign({ role: "authenticated" }, process.env.SUPABASE_JWT_SECRET);
       const res = await fetch(`${baseUrl}/process-from-url`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: "Bearer test-token",
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
           url: "https://xyz.supabase.co//evil.com/file.pdf?download=1",
@@ -556,11 +557,12 @@ describe("route error responses", () => {
     });
 
     try {
+      const token = jwt.sign({ role: "authenticated" }, process.env.SUPABASE_JWT_SECRET);
       const res = await fetch(`${baseUrl}/process-from-url`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: "Bearer test-token",
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
           url: "  https://xyz.supabase.co/storage/v1/object/public/docs/trimmed.pdf  ",

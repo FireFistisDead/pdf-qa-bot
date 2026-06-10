@@ -32,7 +32,6 @@ from main import (
     require_internal_rag_token_configured,
     normalize_session_id,
     get_session_dir,
-    _extract_pdf_text_worker,
     cleanup_expired_sessions,
     _background_cleanup_loop,
     SESSION_CLEANUP_INTERVAL_MINUTES,
@@ -188,23 +187,22 @@ def test_normalize_session_id_returns_canonical_uuid():
     assert normalized == "550e8400-e29b-41d4-a716-446655440000"
 
 
-def test_extract_pdf_text_worker_enforces_page_limit(tmp_path):
+def test_load_with_pymupdf_enforces_page_limit(tmp_path):
     import fitz
+    from main import _load_with_pymupdf
 
     pdf_path = tmp_path / "hello.pdf"
     doc = fitz.open()
-    doc.new_page(width=300, height=144)
+    page1 = doc.new_page(width=300, height=144)
+    page1.insert_text((50, 50), "Page 1")
+    page2 = doc.new_page(width=300, height=144)
+    page2.insert_text((50, 50), "Page 2")
     doc.save(str(pdf_path))
     doc.close()
 
-    # Use a local queue and call the worker directly (no subprocess) to validate limit logic.
-    q = multiprocessing.Queue(maxsize=1)
-    _extract_pdf_text_worker(str(pdf_path), max_pages=0, max_chars=1000, out_queue=q)
-    result = q.get(timeout=2)
-    assert result["ok"] is False
-    assert "too many pages" in result["error"].lower()
-
-
+    docs = _load_with_pymupdf(str(pdf_path), "hello.pdf", max_pages=1)
+    assert len(docs) == 1
+    assert docs[0].page_content == "Page 1"
 
 def test_concise_excerpt():
     text = "This is a very long sentence that we want to abbreviate cleanly."
