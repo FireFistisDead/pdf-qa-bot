@@ -175,3 +175,8 @@ export const updateFlashcardProgressApi = async (sessionId, sessionSecret, cardI
   );
   return res.data;
 };
+
+export const checkJobStatusApi = async (jobId) => {
+  const res = await axios.get(${API_BASE}/upload//status);
+  return res.data;
+};

@@ -7,7 +7,20 @@ services:
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no"]
-    profiles: ["redis"]
+
+  celery-worker:
+    build:
+      context: ./rag-service
+    command: celery -A celery_app worker --loglevel=info
+    volumes:
+      - shared_uploads:/app/uploads
+      - hf_cache:/root/.cache/huggingface
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
 
   rag-service:
     build:

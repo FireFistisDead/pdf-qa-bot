@@ -16,7 +16,7 @@ import { AuthProvider } from "./contexts/AuthContext";
 import Dashboard from "./components/Dashboard/Dashboard";
 import StudyHub from "./components/StudyHub/StudyHub";
 
-import { extractApiErrorMessage, uploadPdfApi, getSessionsApi } from "./services/api";
+import { extractApiErrorMessage, uploadPdfApi, getSessionsApi, checkJobStatusApi } from "./services/api";
 import {
   createStableMessageId,
   hashString,
@@ -33,6 +33,8 @@ function MainApp() {
   const [selectedPdf, setSelectedPdf] = useState(null);
   const [pdfJumpTarget, setPdfJumpTarget] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadStatusText, setUploadStatusText] = useState("");
   const [darkMode, setDarkMode] = useState(false);
   const [rightPanelTab, setRightPanelTab] = useState("chat");
   const [savedNotes, setSavedNotes] = useState(() => loadSavedNotes());
@@ -226,45 +228,66 @@ function MainApp() {
     const loadingToast = toast.loading("Uploading PDF...");
 
     try {
+      setUploadProgress(0);
+      setUploadStatusText("Uploading...");
       const currentPdfForUpload = pdfs.find(p => p.id === selectedPdf);
-      const data = await uploadPdfApi(
+      const initialData = await uploadPdfApi(
         file,
         currentPdfForUpload?.session_id,
         currentPdfForUpload?.session_secret,
       );
-      // Use a local blob URL for the in-browser viewer. The server deletes the
-      // uploaded file immediately after the RAG service indexes it, so no
-      // server-side URL exists. The blob URL is valid for the lifetime of this
-      // browser tab and requires no authentication.
+
       const url = URL.createObjectURL(file);
+      const jobId = initialData.jobId;
+      
+      let data = initialData;
+      
+      if (jobId) {
+        // Poll for status
+        let isDone = false;
+        while (!isDone) {
+          await new Promise(r => setTimeout(r, 1000));
+          const statusRes = await checkJobStatusApi(jobId);
+          setUploadProgress(statusRes.progress || 0);
+          
+          if (statusRes.status === "completed") {
+            isDone = true;
+            data = statusRes; // Contains session_id and session_secret
+          } else if (statusRes.status === "failed") {
+            throw new Error(statusRes.error_message || "Processing failed");
+          } else {
+             setUploadStatusText(`Processing: ${statusRes.progress || 0}%`);
+          }
+        }
+      }
+
       const pdfId = data.document?.document_id || data.session_id;
 
       if (data.session_id && data.session_secret) {
         upsertKnownSession(data.session_id, data.session_secret);
       }
 
-    setPdfs((prev) => {
-  const updated = [
-    ...prev,
-    {
-      id: pdfId,
-      name: file.name,
-      document_id: data.document?.document_id || null,
-      url,
-      chat: [],
-      session_id: data.session_id,
-      session_secret: data.session_secret || null,
-    },
-  ];
- 
-  if (prev.length === 0) {
-    setSelectedPdf(pdfId);
-  } else {
-    // Switch to the newly uploaded pdf immediately
-    setSelectedPdf(pdfId);
-  }
-  return updated;
-});
+      setPdfs((prev) => {
+        const updated = [
+          ...prev,
+          {
+            id: pdfId,
+            name: file.name,
+            document_id: data.document?.document_id || null,
+            url,
+            chat: [],
+            session_id: data.session_id,
+            session_secret: data.session_secret || null,
+          },
+        ];
+       
+        if (prev.length === 0) {
+          setSelectedPdf(pdfId);
+        } else {
+          setSelectedPdf(pdfId);
+        }
+        return updated;
+      });
       toast.success("PDF uploaded successfully!", {
         id: loadingToast,
       });
@@ -566,11 +589,7 @@ const handleOpenSource = (source) => {
       >
         <Navbar darkMode={darkMode} setDarkMode={setDarkMode} />
         <Container>
-          <UploadCard
-            uploading={uploading}
-            darkMode={darkMode}
-            onUpload={handleUpload}
-          />
+          <UploadCard uploading={uploading} uploadProgress={uploadProgress} uploadStatusText={uploadStatusText} darkMode={darkMode} onUpload={handleUpload} />
           {/* PDF LIST */}
           {pdfs.length > 0 && (
             <div style={{ marginBottom: "16px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
