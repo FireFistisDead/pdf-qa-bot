@@ -46,8 +46,7 @@ let app,
   normalizeHostnameForAllowlist,
   isAllowedSupabaseHostname;
 
-let _credCache,
-  _credKey,
+let _credKey,
   _credCacheHit,
   _credCacheStore,
   _credCacheDrop;
@@ -63,17 +62,16 @@ before(() => {
   askSchema = mod.askSchema;
   summarizeSchema = mod.summarizeSchema;
   extractServiceDetails = mod.extractServiceDetails;
-  _credCache = mod._credCache;
-  _credKey = mod._credKey;
-  _credCacheHit = mod._credCacheHit;
-  _credCacheStore = mod._credCacheStore;
-  _credCacheDrop = mod._credCacheDrop;
   validateAskBody = mod.validateAskBody;
   validateSummarizeBody = mod.validateSummarizeBody;
   MAX_QUESTION_LENGTH = mod.MAX_QUESTION_LENGTH;
   ragAuthHeaders = mod.ragAuthHeaders;
   normalizeHostnameForAllowlist = mod.normalizeHostnameForAllowlist;
   isAllowedSupabaseHostname = mod.isAllowedSupabaseHostname;
+  _credKey = mod._credKey;
+  _credCacheHit = mod._credCacheHit;
+  _credCacheStore = mod._credCacheStore;
+  _credCacheDrop = mod._credCacheDrop;
 
   ({ clientIpFromRequest, normalizeIp } = require("./security/ip"));
 });
@@ -599,7 +597,7 @@ describe("route error responses", () => {
   test("POST /summarize with missing session_id returns 400", async () => {
     const res = await fetch(`${baseUrl}/summarize`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Connection": "close" },
       body: JSON.stringify({ session_id: "" }),
     });
     assert.equal(res.status, 400);
@@ -763,7 +761,7 @@ describe("route error responses", () => {
   test("POST /upload without file returns 400", async () => {
     const res = await fetch(`${baseUrl}/upload`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Connection": "close" },
       body: JSON.stringify({}),
     });
     assert.equal(res.status, 400);
@@ -856,6 +854,52 @@ describe("route error responses", () => {
       method: "GET",
     });
     assert.equal(res.status, 404);
+  });
+
+  test("GET /processing-status/:session_id proxies to RAG service and forwards headers", async () => {
+    const originalGet = axios.get;
+    let forwardedUrl = null;
+    let forwardedHeaders = null;
+
+    axios.get = async (url, options) => {
+      forwardedUrl = url;
+      forwardedHeaders = options?.headers;
+      return {
+        data: {
+          stage: "Extracting text from PDF",
+          progress: 15,
+          updated_at: 1700000000,
+        },
+      };
+    };
+
+    try {
+      const res = await fetch(`${baseUrl}/processing-status/550e8400-e29b-41d4-a716-446655440000`, {
+        method: "GET",
+        headers: {
+          "X-Session-Secret": "test-session-secret",
+        },
+      });
+
+      assert.equal(res.status, 200);
+      const data = await res.json();
+      assert.equal(data.stage, "Extracting text from PDF");
+      assert.equal(data.progress, 15);
+      assert.equal(forwardedUrl.endsWith("/processing-status/550e8400-e29b-41d4-a716-446655440000"), true);
+      assert.equal(forwardedHeaders["X-Internal-Token"], process.env.INTERNAL_RAG_TOKEN);
+      assert.equal(forwardedHeaders["X-Session-Secret"], "test-session-secret");
+    } finally {
+      axios.get = originalGet;
+    }
+  });
+
+  test("GET /processing-status/:session_id with invalid session_id returns 400", async () => {
+    const res = await fetch(`${baseUrl}/processing-status/not-a-uuid`, {
+      method: "GET",
+    });
+    assert.equal(res.status, 400);
+    const data = await res.json();
+    assert.equal(data.error, "Invalid session ID format.");
   });
 
   test("GET /health returns 200 and status ok", async () => {

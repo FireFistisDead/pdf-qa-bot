@@ -38,6 +38,8 @@ from main import (
     _hash_secret,
 )
 
+from pdf_parse_worker import _extract_pdf_text_worker
+
 import secrets as _secrets
 
 

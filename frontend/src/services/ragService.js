@@ -47,8 +47,12 @@ export const processDocument = async (url, filename, opts = {}) => {
  * @param {string} sessionId
  * @returns {Promise<{ stage: string, progress: number }>}
  */
-export const getProcessingStatus = async (sessionId) => {
-  const res = await fetch(`${RAG_BASE_URL}/processing-status/${sessionId}`);
+export const getProcessingStatus = async (sessionId, sessionSecret) => {
+  const headers = {};
+  if (sessionSecret) {
+    headers['X-Session-Secret'] = sessionSecret;
+  }
+  const res = await fetch(`${RAG_BASE_URL}/processing-status/${sessionId}`, { headers });
   if (!res.ok) return null;
   return res.json();
 };

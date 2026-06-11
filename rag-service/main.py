@@ -1317,7 +1317,7 @@ def cleanup_expired_sessions():
             try:
                 target_path = Path(session_dir).resolve()
                 if target_path.is_dir() and PERSIST_PATH in target_path.parents:
-                    shutil.rmtree(target_path)
+                    shutil.rmtree(target_path, ignore_errors=True)
             except Exception:
                 logger.exception(
                     "Background cleanup failed to remove session dir path=%s", session_dir
