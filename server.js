@@ -1116,7 +1116,7 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
     });
   }
 
-  const { question, session_id, mode } = validation.data;
+  const { question, session_id, mode, chat_history } = validation.data;
   const session_secret = validation.data.session_secret;
 
   try {
@@ -1127,6 +1127,7 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
         session_id,
         session_secret,
         mode,
+        chat_history: chat_history ?? [],
       },
       { headers: ragAuthHeaders(), timeout: 30000 },
     );
@@ -1135,6 +1136,7 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
       answer: response.data.answer,
       sources: response.data.sources ?? [],
       mode: response.data.mode ?? "default",
+      condensed_question: response.data.condensed_question ?? null,
     });
   } catch (err) {
     console.error("Question answering failed:", extractServiceDetails(err, "Error answering question"));
@@ -1151,7 +1153,7 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
     });
   }
 
-  const { question, session_id, mode } = validation.data;
+  const { question, session_id, mode, chat_history } = validation.data;
   const session_secret = validation.data.session_secret;
   const upstreamAbort = new AbortController();
   let upstreamStream = null;
@@ -1169,6 +1171,12 @@ app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) =>
   try {
     const ragResponse = await axios.post(
       `${RAG_SERVICE_URL}/ask/stream`,
+      { question, session_id, session_secret, mode, chat_history: chat_history ?? [] },
+      {
+        headers: ragAuthHeaders(),
+        responseType: "stream",
+        timeout: 120000,
+      }
       { question, session_id, session_secret, mode },
 {
   headers: ragAuthHeaders(),
@@ -1458,3 +1466,5 @@ module.exports = {
   normalizeHostnameForAllowlist,
   isAllowedSupabaseHostname,
 };
+
+   

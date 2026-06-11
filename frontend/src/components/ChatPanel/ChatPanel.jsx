@@ -66,6 +66,11 @@ const askQuestion = async (overrideQuestion = null) => {
     return;
   }
 
+  const trimmedQuestion = question;
+  // Snapshot history BEFORE appending the new user message so it reflects
+  // only previous turns (what the condensation prompt should see).
+  const historySnapshot = [...(currentChat || [])];
+
   const trimmedQuestion = queryToAsk.trim();
   setAsking(true);
   if (typeof overrideQuestion !== 'string') {
@@ -75,14 +80,27 @@ const askQuestion = async (overrideQuestion = null) => {
   onAppendMessage({ role: "bot", text: "", question: trimmedQuestion, streaming: true, sources: [], mode });
 
   try {
-    await askQuestionStreamApi(trimmedQuestion, currentPdfSessionId, currentPdfSessionSecret, mode, (partialText) => {
-      onUpdateLastBotMessage(partialText, true);
-    });
+    // Pass history so the RAG service can condense follow-up questions.
+    await askQuestionStreamApi(
+      trimmedQuestion,
+      currentPdfSessionId,
+      currentPdfSessionSecret,
+      mode,
+      (partialText) => { onUpdateLastBotMessage(partialText, true); },
+      undefined,      // signal
+      historySnapshot // chatHistory — now 7th arg
+    );
     onUpdateLastBotMessage(null, false);
   } catch (streamErr) {
     console.warn("Streaming failed, falling back to /ask:", streamErr.message);
     try {
-      const data = await askQuestionApi(trimmedQuestion, currentPdfSessionId, currentPdfSessionSecret, mode);
+      const data = await askQuestionApi(
+        trimmedQuestion,
+        currentPdfSessionId,
+        currentPdfSessionSecret,
+        mode,
+        historySnapshot // chatHistory
+      );
       onUpdateLastBotMessage(data.answer, false, data.sources || [], data.mode);
     } catch (e) {
       let errorMessage = "Error getting answer. Please try again.";
