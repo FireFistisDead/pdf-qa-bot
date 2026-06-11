@@ -43,6 +43,7 @@ const Navbar = ({ darkMode, setDarkMode }) => {
             <Avatar
               src={logo}
               alt="Logo"
+              imgProps={{ loading: "lazy" }}
               sx={{
                 width: 48,
                 height: 48,
