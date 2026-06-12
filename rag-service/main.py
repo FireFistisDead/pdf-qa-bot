@@ -1988,6 +1988,40 @@ def synthesize_with_ollama(prompt: str) -> Optional[str]:
         return None
 
 
+def perform_web_search(query: str, max_results: int = 3):
+    try:
+        from duckduckgo_search import DDGS
+    except ImportError:
+        logger.error("duckduckgo_search not installed.")
+        return []
+        
+    try:
+        from langchain_core.documents import Document as _Doc
+    except Exception:
+        from langchain.schema import Document as _Doc
+        
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+            
+        docs = []
+        for idx, r in enumerate(results):
+            meta = {
+                "filename": "Web: " + r.get("title", "Search Result"),
+                "source": r.get("href"),
+                "page": 0,
+                "document_id": f"web-{idx}",
+                "type": "web",
+                "url": r.get("href"),
+                "chunk_index": idx,
+            }
+            docs.append(_Doc(page_content=r.get("body", ""), metadata=meta))
+        return docs
+    except Exception as e:
+        logger.error("Web search fallback failed: %s", e)
+        return []
+
+
 def build_answer_from_documents(question, documents, intent, source_id_by_key=None):
     if not has_grounded_keyword_overlap(question, documents) and intent != "overview":
         return INSUFFICIENT_CONTEXT_MESSAGE
@@ -2393,6 +2427,8 @@ def citation_source_for_document(document, index):
         "text": text,
         "preview": concise_excerpt(document.page_content, 180),
         "chunk_index": document.metadata.get("chunk_index", index),
+        "type": document.metadata.get("type"),
+        "url": document.metadata.get("url"),
     }
 
 
@@ -3440,33 +3476,40 @@ def ask_question(data: Question):
 
     best_score = scored_candidates[0][1] if scored_candidates else None
     if not passes_evidence_gate(question, docs, best_score, intent):
-        logger.info(
-            "Evidence gate refused answer session_id=%s intent=%s best_score=%s retrieved_chunks=%s",
-            session_id,
-            intent,
-            best_score,
-            len(docs),
-        )
-        response_payload = {
-            "answer": INSUFFICIENT_CONTEXT_MESSAGE,
-            "sources": [],
-            "retrieval_type": "refusal",
-            "answer_mode": "refusal",
-            "mode": mode,
-            "cache_hit": cache_hit,
-        }
-        with sessions_lock:
-            session = sessions.get(session_id)
-            if session:
-                append_chat_exchange(
-                    session,
-                    question,
-                    INSUFFICIENT_CONTEXT_MESSAGE,
-                    [],
-                    mode,
-                )
-            _mark_session_dirty(session_id)
-        return response_payload
+        logger.info("Evidence gate refused answer session_id=%s. Attempting web search fallback...", session_id)
+        web_docs = perform_web_search(question)
+        if web_docs:
+            docs = web_docs
+            intent = "overview" # Force overview intent to synthesize across web results
+            logger.info("Web search fallback successful, retrieved %s documents", len(docs))
+        else:
+            logger.info(
+                "Evidence gate refused answer session_id=%s intent=%s best_score=%s retrieved_chunks=%s",
+                session_id,
+                intent,
+                best_score,
+                len(docs),
+            )
+            response_payload = {
+                "answer": INSUFFICIENT_CONTEXT_MESSAGE,
+                "sources": [],
+                "retrieval_type": "refusal",
+                "answer_mode": "refusal",
+                "mode": mode,
+                "cache_hit": cache_hit,
+            }
+            with sessions_lock:
+                session = sessions.get(session_id)
+                if session:
+                    append_chat_exchange(
+                        session,
+                        question,
+                        INSUFFICIENT_CONTEXT_MESSAGE,
+                        [],
+                        mode,
+                    )
+                _mark_session_dirty(session_id)
+            return response_payload
 
     pages = sorted(set(
         doc.metadata["page"] + 1
@@ -3883,29 +3926,36 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
 
     best_score = scored_candidates[0][1] if scored_candidates else None
     if not passes_evidence_gate(question, docs, best_score, intent):
-        logger.info(
-            "Stream evidence gate refused session_id=%s intent=%s best_score=%s",
-            session_id,
-            intent,
-            best_score,
-        )
-        with sessions_lock:
-            current_session = sessions.get(session_id)
-            if current_session:
-                append_chat_exchange(
-                    current_session,
-                    question,
-                    INSUFFICIENT_CONTEXT_MESSAGE,
-                    [],
-                    mode,
-                )
-            _mark_session_dirty(session_id)
+        logger.info("Stream evidence gate refused session_id=%s. Attempting web search fallback...", session_id)
+        web_docs = perform_web_search(question)
+        if web_docs:
+            docs = web_docs
+            intent = "overview" # Force overview intent to synthesize across web results
+            logger.info("Web search fallback successful, retrieved %s documents", len(docs))
+        else:
+            logger.info(
+                "Stream evidence gate refused session_id=%s intent=%s best_score=%s",
+                session_id,
+                intent,
+                best_score,
+            )
+            with sessions_lock:
+                current_session = sessions.get(session_id)
+                if current_session:
+                    append_chat_exchange(
+                        current_session,
+                        question,
+                        INSUFFICIENT_CONTEXT_MESSAGE,
+                        [],
+                        mode,
+                    )
+                _mark_session_dirty(session_id)
 
-        def _refuse_stream():
-            yield _sse_frame(INSUFFICIENT_CONTEXT_MESSAGE)
-            yield _sse_done()
+            def _refuse_stream():
+                yield _sse_frame(INSUFFICIENT_CONTEXT_MESSAGE)
+                yield _sse_done()
 
-        return StreamingResponse(_refuse_stream(), media_type="text/event-stream; charset=utf-8")
+            return StreamingResponse(_refuse_stream(), media_type="text/event-stream; charset=utf-8")
 
     context = format_context(docs)
 
