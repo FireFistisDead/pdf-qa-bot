@@ -464,6 +464,7 @@ letterSpacing: "-0.5px",
 
   <Button
     variant="primary"
+    aria-label="Send message"
     onClick={askQuestion}
     disabled={
       asking ||

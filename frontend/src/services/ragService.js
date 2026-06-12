@@ -47,8 +47,12 @@ export const processDocument = async (url, filename, opts = {}) => {
  * @param {string} sessionId
  * @returns {Promise<{ stage: string, progress: number }>}
  */
-export const getProcessingStatus = async (sessionId) => {
-  const res = await fetch(`${RAG_BASE_URL}/processing-status/${sessionId}`);
+export const getProcessingStatus = async (sessionId, sessionSecret) => {
+  const headers = {};
+  if (sessionSecret) {
+    headers['X-Session-Secret'] = sessionSecret;
+  }
+  const res = await fetch(`${RAG_BASE_URL}/processing-status/${sessionId}`, { headers });
   if (!res.ok) return null;
   return res.json();
 };
@@ -86,28 +90,94 @@ export const askStream = (sessionId, sessionSecret, question, onChunk, onDone, o
         throw new Error(data.error || `Ask failed (HTTP ${res.status})`);
       }
 
+      if (!res.body) {
+        throw new Error('Streaming response is unavailable.');
+      }
+
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
+      let buffer = '';
+      let completed = false;
+
+      const handleEvent = (eventText) => {
+        if (!eventText) return;
+
+        let eventName = 'message';
+        const dataLines = [];
+
+        for (const rawLine of eventText.split('\n')) {
+          const line = rawLine.replace(/\r$/, '');
+          if (!line || line.startsWith(':')) {
+            continue;
+          }
+          if (line.startsWith('event:')) {
+            eventName = line.slice(6).trim();
+            continue;
+          }
+          if (line.startsWith('data:')) {
+            dataLines.push(line.slice(5).replace(/^ /, ''));
+          }
+        }
+
+        const data = dataLines.join('\n');
+
+        if (!data) {
+          return;
+        }
+
+        if (eventName === 'error') {
+          completed = true;
+          onError(data || 'Stream error');
+          return;
+        }
+
+        if (data === '[DONE]') {
+          completed = true;
+          onDone();
+          return;
+        }
+
+        onChunk(data);
+      };
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
 
-        const chunk = decoder.decode(value, { stream: true });
-        // SSE format: "data: <text>\n\n"
-        const lines = chunk.split('\n');
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const text = line.slice(6);
-            if (text === '[DONE]') {
-              onDone();
-              return;
+        // Normalize CRLF line endings to LF so frames using CRLF are
+        // detected correctly (\r\n -> \n). This also tolerates mixed
+        // line endings from various servers.
+        buffer = buffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+        let separatorIndex = buffer.indexOf('\n\n');
+        while (separatorIndex !== -1) {
+          const eventText = buffer.slice(0, separatorIndex);
+          buffer = buffer.slice(separatorIndex + 2);
+          handleEvent(eventText);
+          if (completed) {
+            // Cancel the reader to release the connection promptly.
+            try {
+              await reader.cancel();
+            } catch (cancelErr) {
+              // ignore
             }
-            onChunk(text);
+            return;
           }
+          separatorIndex = buffer.indexOf('\n\n');
         }
       }
-      onDone();
+
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        handleEvent(buffer);
+      }
+
+      if (!completed) {
+        onDone();
+      }
     } catch (err) {
       if (err.name !== 'AbortError') {
         onError(err.message || 'Stream error');

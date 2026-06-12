@@ -49,16 +49,22 @@ const ChatView = () => {
     if (!activeDoc) { setMessages([]); return; }
     const load = async () => {
       try {
-        const { data, error } = await supabase
-          .from('chat_messages')
-          .select('*')
-          .eq('document_id', activeDoc.id)
-          .order('created_at', { ascending: true });
-        if (error) throw error;
-        setMessages(data || []);
-        setMsgCount((data || []).length);
+        const { getSessionsApi } = require('../../../services/api');
+        const sessions = await getSessionsApi([{ session_id: activeDoc.session_id, session_secret: activeDoc.session_secret }]);
+        if (sessions && sessions.length > 0) {
+          const chat = sessions[0].chat || [];
+          const formatted = chat.map(m => ({
+            role: m.role === 'bot' ? 'assistant' : m.role,
+            content: m.text,
+            created_at: new Date().toISOString()
+          }));
+          setMessages(formatted);
+          setMsgCount(formatted.length);
+        } else {
+          setMessages([]);
+        }
       } catch (err) {
-        toast.error('Failed to load chat history');
+        console.error("Failed to load messages:", err);
       }
     };
     load();
@@ -66,7 +72,7 @@ const ChatView = () => {
 
   useEffect(() => {
     // Use 'auto' instead of 'smooth' during streaming to prevent animation jitter/glitches
-    messagesEndRef.current?.scrollIntoView({ behavior: isTyping ? 'auto' : 'smooth' });
+    messagesEndRef.current?.scrollIntoView({ behavior: isTyping ? 'auto' : 'smooth', block: 'end' });
   }, [messages, currentStream, isTyping]);
 
   // Auto-grow textarea
@@ -88,14 +94,6 @@ const ChatView = () => {
     setCurrentStream('');
 
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      await supabase.from('chat_messages').insert({
-        user_id: session.user.id,
-        document_id: activeDoc.id,
-        role: 'user',
-        content: userMsg.content,
-      });
-
       let full = '';
       askStream(
         activeDoc.session_id,
@@ -107,14 +105,8 @@ const ChatView = () => {
           setCurrentStream('');
           setMessages(prev => [...prev, { role: 'assistant', content: full }]);
           setMsgCount(c => c + 2);
-          await supabase.from('chat_messages').insert({
-            user_id: session.user.id,
-            document_id: activeDoc.id,
-            role: 'assistant',
-            content: full,
-          });
         },
-        (err) => { setIsTyping(false); setCurrentStream(''); toast.error(err); }
+        (err) => { setIsTyping(false); setCurrentStream(''); toast.error(err.message || String(err)); }
       );
     } catch (err) {
       setIsTyping(false);
@@ -150,7 +142,7 @@ const ChatView = () => {
             </div>
             {sidebarOpen && <span className="csb-title">NEURAL_DOCS</span>}
           </div>
-          <button className="csb-toggle" onClick={() => setSidebarOpen(p => !p)}>
+          <button aria-label={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"} className="csb-toggle" onClick={() => setSidebarOpen(p => !p)}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
               {sidebarOpen
                 ? <polyline points="15 18 9 12 15 6" />
@@ -266,9 +258,9 @@ const ChatView = () => {
               <p className="cis-sub">Neural link active — <strong style={{ color: '#fff' }}>{activeDoc.name}</strong></p>
               <p className="cis-sub" style={{ marginTop: 4, opacity: 0.5 }}>Start your interrogation below</p>
               <div className="cis-hints">
-                <div className="cis-hint" onClick={() => setInputText('Summarize this document in 3 bullet points')}>→ Summarize in 3 points</div>
-                <div className="cis-hint" onClick={() => setInputText('What are the key findings?')}>→ Key findings</div>
-                <div className="cis-hint" onClick={() => setInputText('What are the main conclusions?')}>→ Main conclusions</div>
+                <div role="button" tabIndex={0} onKeyDown={(e) => { if(e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setInputText('Summarize this document in 3 bullet points'); } }} className="cis-hint" onClick={() => setInputText('Summarize this document in 3 bullet points')}>→ Summarize in 3 points</div>
+                <div role="button" tabIndex={0} onKeyDown={(e) => { if(e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setInputText('What are the key findings?'); } }} className="cis-hint" onClick={() => setInputText('What are the key findings?')}>→ Key findings</div>
+                <div role="button" tabIndex={0} onKeyDown={(e) => { if(e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setInputText('What are the main conclusions?'); } }} className="cis-hint" onClick={() => setInputText('What are the main conclusions?')}>→ Main conclusions</div>
               </div>
             </div>
           ) : (
