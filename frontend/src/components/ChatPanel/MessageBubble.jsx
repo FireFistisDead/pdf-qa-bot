@@ -365,7 +365,18 @@ const MessageBubble = ({
                     key={`${source.document_id || sourceLabel}-${source.page || "unknown"}-${index}`}
                     onClick={() => {
                       if (isWebSource && source.url) {
-                        window.open(source.url, '_blank');
+                        try {
+                          const url = new URL(source.url);
+                          if (!["http:", "https:"].includes(url.protocol)) return;
+                          const opened = window.open(
+                            url.toString(),
+                            "_blank",
+                            "noopener,noreferrer",
+                          );
+                          if (opened) opened.opener = null;
+                        } catch {
+                          return;
+                        }
                       } else if (canOpenPage) {
                         onOpenSource?.(source);
                       }
