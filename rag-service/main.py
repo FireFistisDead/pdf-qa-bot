@@ -2835,9 +2835,11 @@ VALID_MODES = {"default", "tutor", "socratic", "eli5", "concise"}
 
 class Question(BaseModel):
     question: str = Field(..., min_length=1, description="Question cannot be empty")
-    session_id: UUID
+    session_id: Optional[UUID] = None
+    session_ids: Optional[list[UUID]] = None
     mode: str = Field(default="default")
     session_secret: str | None = None
+    session_secrets: list[str] | None = None
 
     @field_validator("question")
     @classmethod
@@ -3794,86 +3796,106 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
         raise HTTPException(status_code=400, detail="Question is required.")
 
     intent = detect_question_intent(question)
-    session_id = str(data.session_id)
     mode = data.mode
     normalized_query = normalize_query(question)
+    
+    session_id_list = [str(sid) for sid in data.session_ids] if data.session_ids else ([str(data.session_id)] if data.session_id else [])
+    secret_list = data.session_secrets if data.session_secrets else ([data.session_secret] if data.session_secret else [])
+    
+    if not session_id_list:
+        raise HTTPException(status_code=400, detail="At least one session ID must be provided.")
 
-    with sessions_lock:
-        session = _touch_session_unlocked(session_id)
-        if not session:
-            raise HTTPException(
-                status_code=404,
-                detail="Session expired or invalid. Please re-upload your PDFs.",
-            )
+    all_scored_candidates = []
+    all_indexed_documents = []
+    
+    cache_key = f"{mode}:{normalized_query}"
 
-        _require_session_secret(session, data.session_secret)
-
-        if "lock" not in session:
-            session["lock"] = threading.Lock()
-
-        session_lock = session["lock"]
-        if not session.get("vectorstore"):
-            try:
-                session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
-            except Exception as exc:
-                logger.error("Failed to lazy load vectorstore session_id=%s error=%s", session_id, exc)
-                raise HTTPException(status_code=500, detail="Failed to load session index.")
-        vectorstore = session["vectorstore"]
-
-        # Session-level retrieval cache for streaming path
-        retrieval_cache = ensure_retrieval_cache(session)
-        with session_lock:
-            cleanup_retrieval_cache(retrieval_cache)
-            cache_key = f"{mode}:{normalized_query}"
-            cached_value = retrieval_cache.get(cache_key)
-            cache_hit = False
-            if isinstance(cached_value, dict) and "scored_candidates" in cached_value:
-                logger.info(
-                    "Stream retrieval cache hit session_id=%s cache_key=%s",
-                    session_id,
-                    cache_key,
+    for idx, session_id in enumerate(session_id_list):
+        secret = secret_list[idx] if idx < len(secret_list) else None
+        
+        with sessions_lock:
+            session = _touch_session_unlocked(session_id)
+            if not session:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Session {session_id} expired or invalid. Please re-upload your PDFs.",
                 )
-                scored_candidates = cached_value["scored_candidates"]
-                cache_hit = True
-            elif cached_value is not None:
-                logger.info(
-                    "Stream retrieval cache invalidated session_id=%s cache_key=%s",
-                    session_id,
-                    cache_key,
-                )
-                retrieval_cache.pop(cache_key, None)
+
+            _require_session_secret(session, secret)
+
+            if "lock" not in session:
+                session["lock"] = threading.Lock()
+
+            session_lock = session["lock"]
+            if not session.get("vectorstore"):
+                try:
+                    session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
+                except Exception as exc:
+                    logger.error("Failed to lazy load vectorstore session_id=%s error=%s", session_id, exc)
+                    raise HTTPException(status_code=500, detail="Failed to load session index.")
+            vectorstore = session["vectorstore"]
+
+            # Session-level retrieval cache for streaming path
+            retrieval_cache = ensure_retrieval_cache(session)
+            with session_lock:
+                cleanup_retrieval_cache(retrieval_cache)
+                cached_value = retrieval_cache.get(cache_key)
                 cache_hit = False
+                if isinstance(cached_value, dict) and "scored_candidates" in cached_value:
+                    logger.info(
+                        "Stream retrieval cache hit session_id=%s cache_key=%s",
+                        session_id,
+                        cache_key,
+                    )
+                    scored_candidates = cached_value["scored_candidates"]
+                    cache_hit = True
+                elif cached_value is not None:
+                    logger.info(
+                        "Stream retrieval cache invalidated session_id=%s cache_key=%s",
+                        session_id,
+                        cache_key,
+                    )
+                    retrieval_cache.pop(cache_key, None)
+                    cache_hit = False
 
-    try:
-        with session_lock:
-            indexed_documents = collect_index_documents(vectorstore)
+        try:
+            with session_lock:
+                indexed_documents = collect_index_documents(vectorstore)
+                if not cache_hit:
+                    logger.info(
+                        "Stream retrieval cache miss session_id=%s cache_key=%s",
+                        session_id,
+                        cache_key,
+                    )
+                    scored_candidates = search_retrieval_candidates(
+                        vectorstore,
+                        question,
+                        ASK_RETRIEVAL_CANDIDATES,
+                    )
+
             if not cache_hit:
-                logger.info(
-                    "Stream retrieval cache miss session_id=%s cache_key=%s",
-                    session_id,
-                    cache_key,
-                )
-                scored_candidates = search_retrieval_candidates(
-                    vectorstore,
-                    question,
-                    ASK_RETRIEVAL_CANDIDATES,
-                )
+                with sessions_lock:
+                    current_session = sessions.get(session_id)
+                    if current_session:
+                        rc = ensure_retrieval_cache(current_session)
+                        if len(rc) >= RETRIEVAL_CACHE_LIMIT:
+                            oldest = next(iter(rc))
+                            del rc[oldest]
+                        rc[cache_key] = {
+                            "cached_at": now_ts(),
+                            "scored_candidates": scored_candidates,
+                        }
+        except Exception:
+            logger.exception("Stream similarity search failed session_id=%s", session_id)
+            raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
+            
+        all_scored_candidates.extend(scored_candidates)
+        all_indexed_documents.extend(indexed_documents)
 
-        if not cache_hit:
-            with sessions_lock:
-                current_session = sessions.get(session_id)
-                if current_session:
-                    rc = ensure_retrieval_cache(current_session)
-                    if len(rc) >= RETRIEVAL_CACHE_LIMIT:
-                        oldest = next(iter(rc))
-                        del rc[oldest]
-                    rc[cache_key] = {
-                        "cached_at": now_ts(),
-                        "scored_candidates": scored_candidates,
-                    }
-    except Exception:
-        logger.exception("Stream similarity search failed session_id=%s", session_id)
-        raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
+    # Sort all candidates from multiple documents by score ascending (lower is better in FAISS L2)
+    all_scored_candidates.sort(key=lambda x: x[1])
+    scored_candidates = all_scored_candidates[:ASK_RETRIEVAL_CANDIDATES]
+    indexed_documents = all_indexed_documents
 
     docs = (
         representative_documents_by_source(indexed_documents)
