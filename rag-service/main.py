@@ -19,6 +19,7 @@ import uuid
 import uvicorn
 import torch
 import os
+from ocr_extractor import get_ocr_config, should_use_ocr
 import secrets
 import hashlib
 import shutil
@@ -59,6 +60,7 @@ logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
+
 
 app = FastAPI()
 
