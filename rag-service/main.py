@@ -428,6 +428,30 @@ def _load_with_pypdf(pdf_path: str, filename: str, max_pages: int) -> list:
     return docs
 
 
+def _load_with_ocr(pdf_path: str, filename: str, max_pages: int) -> list:
+    """Fallback loader using OCR for scanned or image-based PDFs."""
+    from pdf2image import convert_from_path
+    import pytesseract
+
+    images = convert_from_path(pdf_path, last_page=max_pages)
+    docs = []
+    for idx, image in enumerate(images):
+        text = (pytesseract.image_to_string(image) or "").strip()
+        if not text:
+            continue
+        docs.append(
+            Document(
+                page_content=text,
+                metadata={
+                    "page": idx,
+                    "filename": filename,
+                    "source": filename,
+                },
+            )
+        )
+    return docs
+
+
 async def load_pdf_documents_async(pdf_path: str, filename: str) -> list:
     """Parse a PDF and return a list of LangChain Documents.
 
@@ -530,10 +554,35 @@ async def load_pdf_documents_async(pdf_path: str, filename: str) -> list:
                 detail=f"Unable to read this PDF: {fallback_exc}",
             )
 
+    # Trigger OCR if the document is empty or has very little text (e.g. scanned images)
+    total_chars = sum(len(d.page_content) for d in docs) if docs else 0
+    if not docs or (len(docs) > 0 and (total_chars / len(docs)) < 50):
+        try:
+            logger.info("Text density is low (%s chars total). Attempting OCR fallback for filename=%s", total_chars, filename)
+            ocr_docs = await asyncio.wait_for(
+                loop.run_in_executor(
+                    _PDF_PARSE_EXECUTOR,
+                    _load_with_ocr,
+                    pdf_path,
+                    filename,
+                    MAX_PDF_PAGES,
+                ),
+                timeout=PDF_PARSE_TIMEOUT_SECONDS * 2, # Give OCR more time
+            )
+            if ocr_docs:
+                docs = ocr_docs
+                logger.info(
+                    "PDF parsed via OCR fallback filename=%s extracted_pages=%s",
+                    filename,
+                    len(docs),
+                )
+        except Exception as ocr_exc:
+            logger.warning("OCR fallback failed for filename=%s error=%s", filename, ocr_exc)
+
     if not docs:
         raise HTTPException(
             status_code=400,
-            detail="No readable text was found in the PDF. It may be a scanned image-only PDF.",
+            detail="No readable text was found in the PDF. It may be a scanned image-only PDF and OCR extraction failed.",
         )
     return docs
 
