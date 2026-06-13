@@ -3410,9 +3410,6 @@ def processing_status(
 @app.post("/ask")
 def ask_question(data: Question, _ready: None = Depends(require_models_ready)):
     cleanup_expired_sessions()
-
-
-def ask_question(data: Question):
     question = (data.question or "").strip()
 
     if not question:
@@ -4211,7 +4208,6 @@ def _run_generation_locked(model, generate_kwargs):
 @app.post("/summarize")
 def summarize_pdf(data: SummarizeRequest, _ready: None = Depends(require_models_ready)):
     cleanup_expired_sessions()
-def summarize_pdf(data: SummarizeRequest):
     session_id = str(data.session_id)
     with sessions_lock:
         session = _touch_session_unlocked(session_id)
