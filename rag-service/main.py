@@ -3476,7 +3476,8 @@ def ask_question(data: Question):
 
     best_score = scored_candidates[0][1] if scored_candidates else None
     if not passes_evidence_gate(question, docs, best_score, intent):
-        logger.info("Evidence gate refused answer session_id=%s. Attempting web search fallback...", session_id)
+        sid_hash = hashlib.sha256(str(session_id).encode("utf-8")).hexdigest()[:8]
+        logger.info("Evidence gate refused answer sid=%s. Attempting web search fallback...", sid_hash)
         web_docs = perform_web_search(question)
         if web_docs:
             docs = web_docs
@@ -3484,8 +3485,8 @@ def ask_question(data: Question):
             logger.info("Web search fallback successful, retrieved %s documents", len(docs))
         else:
             logger.info(
-                "Evidence gate refused answer session_id=%s intent=%s best_score=%s retrieved_chunks=%s",
-                session_id,
+                "Evidence gate refused answer sid=%s intent=%s best_score=%s retrieved_chunks=%s",
+                sid_hash,
                 intent,
                 best_score,
                 len(docs),
@@ -3926,7 +3927,8 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
 
     best_score = scored_candidates[0][1] if scored_candidates else None
     if not passes_evidence_gate(question, docs, best_score, intent):
-        logger.info("Stream evidence gate refused session_id=%s. Attempting web search fallback...", session_id)
+        sid_hash = hashlib.sha256(str(session_id).encode("utf-8")).hexdigest()[:8]
+        logger.info("Stream evidence gate refused sid=%s. Attempting web search fallback...", sid_hash)
         web_docs = perform_web_search(question)
         if web_docs:
             docs = web_docs
@@ -3934,8 +3936,8 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
             logger.info("Web search fallback successful, retrieved %s documents", len(docs))
         else:
             logger.info(
-                "Stream evidence gate refused session_id=%s intent=%s best_score=%s",
-                session_id,
+                "Stream evidence gate refused sid=%s intent=%s best_score=%s",
+                sid_hash,
                 intent,
                 best_score,
             )
