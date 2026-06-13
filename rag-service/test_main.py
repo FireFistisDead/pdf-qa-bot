@@ -189,6 +189,22 @@ def test_normalize_session_id_returns_canonical_uuid():
     assert normalized == "550e8400-e29b-41d4-a716-446655440000"
 
 
+def test_load_with_pymupdf_enforces_page_limit(tmp_path):
+    import fitz
+    from main import _load_with_pymupdf
+
+    pdf_path = tmp_path / "hello.pdf"
+    doc = fitz.open()
+    page1 = doc.new_page(width=300, height=144)
+    page1.insert_text((50, 50), "Page 1")
+    page2 = doc.new_page(width=300, height=144)
+    page2.insert_text((50, 50), "Page 2")
+    doc.save(str(pdf_path))
+    doc.close()
+
+    docs = _load_with_pymupdf(str(pdf_path), "hello.pdf", max_pages=1)
+    assert len(docs) == 1
+    assert docs[0].page_content == "Page 1"
 def test_concise_excerpt():
     text = "This is a very long sentence that we want to abbreviate cleanly."
     assert concise_excerpt(text, max_chars=20) == "This is a very long..."
