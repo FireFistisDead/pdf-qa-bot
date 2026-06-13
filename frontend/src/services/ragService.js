@@ -69,7 +69,7 @@ export const getProcessingStatus = async (sessionId, sessionSecret) => {
  * @param {Function} onError   - Called on error
  * @returns {AbortController} - Call .abort() to cancel the stream
  */
-export const askStream = (sessionId, sessionSecret, question, onChunk, onDone, onError) => {
+export const askStream = (sessionIds, sessionSecrets, question, onChunk, onDone, onError) => {
   const controller = new AbortController();
 
   const run = async () => {
@@ -78,8 +78,8 @@ export const askStream = (sessionId, sessionSecret, question, onChunk, onDone, o
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          session_id: sessionId,
-          session_secret: sessionSecret,
+          session_ids: sessionIds,
+          session_secrets: sessionSecrets,
           question,
         }),
         signal: controller.signal,
