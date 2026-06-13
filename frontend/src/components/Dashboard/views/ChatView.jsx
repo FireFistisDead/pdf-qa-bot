@@ -8,7 +8,7 @@ import './ChatView.css';
 const ChatView = () => {
   const location = useLocation();
   const [documents, setDocuments] = useState([]);
-  const [activeDoc, setActiveDoc] = useState(null);
+  const [activeDocs, setActiveDocs] = useState([]);
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState('');
   const [isTyping, setIsTyping] = useState(false);
@@ -33,9 +33,9 @@ const ChatView = () => {
       setDocuments(data || []);
       if (location.state?.documentId) {
         const doc = (data || []).find(d => d.id === location.state.documentId);
-        if (doc) setActiveDoc(doc);
+        if (doc) setActiveDocs([doc]);
       } else if (data && data.length > 0) {
-        setActiveDoc(prev => prev || data[0]);
+        setActiveDocs([data[0]]);
       }
     } catch (err) {
       console.error(err);
@@ -46,11 +46,14 @@ const ChatView = () => {
   useEffect(() => { fetchDocuments(); }, [fetchDocuments]);
 
   useEffect(() => {
-    if (!activeDoc) { setMessages([]); return; }
+    if (activeDocs.length === 0) { setMessages([]); setMsgCount(0); return; }
+    
     const load = async () => {
       try {
         const { getSessionsApi } = require('../../../services/api');
-        const sessions = await getSessionsApi([{ session_id: activeDoc.session_id, session_secret: activeDoc.session_secret }]);
+        const reqPayload = activeDocs.map(d => ({ session_id: d.session_id, session_secret: d.session_secret }));
+        const sessions = await getSessionsApi(reqPayload);
+        
         if (sessions && sessions.length > 0) {
           const chat = sessions[0].chat || [];
           const formatted = chat.map(m => ({
@@ -68,7 +71,7 @@ const ChatView = () => {
       }
     };
     load();
-  }, [activeDoc]);
+  }, [activeDocs]);
 
   useEffect(() => {
     // Use 'auto' instead of 'smooth' during streaming to prevent animation jitter/glitches
@@ -86,7 +89,7 @@ const ChatView = () => {
 
   const handleSend = async (e) => {
     e.preventDefault();
-    if (!inputText.trim() || !activeDoc || isTyping) return;
+    if (!inputText.trim() || activeDocs.length === 0 || isTyping) return;
     const userMsg = { role: 'user', content: inputText };
     setMessages(prev => [...prev, userMsg]);
     setInputText('');
@@ -96,8 +99,8 @@ const ChatView = () => {
     try {
       let full = '';
       askStream(
-        activeDoc.session_id,
-        activeDoc.session_secret,
+        activeDocs.map(d => d.session_id),
+        activeDocs.map(d => d.session_secret),
         userMsg.content,
         (text) => { full += text; setCurrentStream(full); },
         async () => {
@@ -168,12 +171,17 @@ const ChatView = () => {
             )
           ) : (
             documents.map((doc) => {
-              const isActive = activeDoc?.id === doc.id;
+              const isActive = activeDocs.some(d => d.id === doc.id);
               return (
                 <button
                   key={doc.id}
                   className={`csb-doc-item ${isActive ? 'csb-doc-active' : ''}`}
-                  onClick={() => setActiveDoc(doc)}
+                  onClick={() => {
+                    setActiveDocs(prev => {
+                      if (prev.some(d => d.id === doc.id)) return prev.filter(d => d.id !== doc.id);
+                      return [...prev, doc];
+                    });
+                  }}
                   title={doc.name}
                 >
                   <div className="csb-doc-avatar" style={{ background: isActive ? 'var(--accent)' : 'rgba(255,255,255,0.05)' }}>
@@ -202,11 +210,11 @@ const ChatView = () => {
         {/* TOP BAR */}
         <div className="chat-topbar">
           <div className="chat-topbar-left">
-            {activeDoc ? (
+            {activeDocs.length > 0 ? (
               <>
                 <div className="chat-doc-badge">
                   <div className="cdb-dot" />
-                  <span className="cdb-name">{activeDoc.name}</span>
+                  <span className="cdb-name">{activeDocs.length === 1 ? activeDocs[0].name : `${activeDocs.length} Documents Selected`}</span>
                 </div>
                 <div className="chat-sep">·</div>
                 <div className="chat-meta-chip">
@@ -227,7 +235,7 @@ const ChatView = () => {
 
         {/* MESSAGE FEED */}
         <div className="chat-feed">
-          {!activeDoc ? (
+          {activeDocs.length === 0 ? (
             <div className="chat-idle-state">
               <div className="cis-glyph">
                 <svg viewBox="0 0 80 80" fill="none">
@@ -255,7 +263,7 @@ const ChatView = () => {
                 </svg>
               </div>
               <div className="cis-label" style={{ color: 'var(--accent)' }}>LINK_ESTABLISHED</div>
-              <p className="cis-sub">Neural link active — <strong style={{ color: '#fff' }}>{activeDoc.name}</strong></p>
+              <p className="cis-sub">Neural link active — <strong style={{ color: '#fff' }}>{activeDocs.length === 1 ? activeDocs[0].name : `${activeDocs.length} Documents`}</strong></p>
               <p className="cis-sub" style={{ marginTop: 4, opacity: 0.5 }}>Start your interrogation below</p>
               <div className="cis-hints">
                 <div role="button" tabIndex={0} onKeyDown={(e) => { if(e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setInputText('Summarize this document in 3 bullet points'); } }} className="cis-hint" onClick={() => setInputText('Summarize this document in 3 bullet points')}>→ Summarize in 3 points</div>
@@ -336,7 +344,7 @@ const ChatView = () => {
             <textarea
               ref={textareaRef}
               className="chat-input-field"
-              placeholder={activeDoc ? `Interrogate ${activeDoc.name}...` : 'Select a document first...'}
+              placeholder={activeDocs.length > 0 ? (activeDocs.length === 1 ? `Interrogate ${activeDocs[0].name}...` : `Interrogate ${activeDocs.length} documents...`) : 'Select a document first...'}
               value={inputText}
               rows={1}
               onChange={(e) => setInputText(e.target.value)}
@@ -346,14 +354,14 @@ const ChatView = () => {
                   handleSend(e);
                 }
               }}
-              disabled={!activeDoc}
+              disabled={activeDocs.length === 0}
             />
             <div className="chat-input-actions">
               <span className="cia-hint">SHIFT+ENTER for newline</span>
               <button
                 type="submit"
                 className={`cia-send ${isTyping ? 'cia-send-busy' : ''}`}
-                disabled={!activeDoc || isTyping || !inputText.trim()}
+                disabled={activeDocs.length === 0 || isTyping || !inputText.trim()}
               >
                 {isTyping ? (
                   <span className="cia-loader"><span/><span/><span/></span>
