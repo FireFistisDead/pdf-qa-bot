@@ -161,12 +161,21 @@ const handleDrop = (e) => {
                 : "1px solid rgba(124,77,255,0.12)",
             }}
           >
-            <CloudUploadIcon
-              sx={{
-                fontSize: 38,
-                color: "#8B5CF6",
-              }}
-            />
+            {uploading ? (
+              <CircularProgress
+                size={40}
+                sx={{
+                  color: darkMode ? "#A1A1AA" : "#666",
+                }}
+              />
+            ) : (
+              <CloudUploadIcon
+                sx={{
+                  fontSize: 40,
+                  color: "#8B5CF6",
+                }}
+              />
+            )}
           </Box>
 
           <Box
