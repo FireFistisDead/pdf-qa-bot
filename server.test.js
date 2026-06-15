@@ -943,6 +943,111 @@ describe("route error responses", () => {
     );
   });
 
+  test("POST /api/auth/signup - single user registration succeeds", async () => {
+    const testEmail = `test-single-${Date.now()}@example.com`;
+    const res = await fetch(`${baseUrl}/api/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: testEmail,
+        password: "Test@1234",
+      }),
+    });
+    assert.equal(res.status, 201);
+    const data = await res.json();
+    assert.ok(data.token);
+    assert.equal(data.message, "Signup successful");
+  });
+
+  test("POST /api/auth/signup - duplicate email is rejected", async () => {
+    const testEmail = `test-dup-${Date.now()}@example.com`;
+    
+    const firstRes = await fetch(`${baseUrl}/api/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: testEmail,
+        password: "Test@1234",
+      }),
+    });
+    assert.equal(firstRes.status, 201);
+
+    const secondRes = await fetch(`${baseUrl}/api/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: testEmail,
+        password: "Different@1234",
+      }),
+    });
+    assert.equal(secondRes.status, 400);
+    const data = await secondRes.json();
+    assert.equal(data.message, "User already exists");
+  });
+
+  test("POST /api/auth/signup - concurrent registrations prevent lost updates", async () => {
+    const timestamp = Date.now();
+    const emails = [
+      `concurrent-1-${timestamp}@example.com`,
+      `concurrent-2-${timestamp}@example.com`,
+      `concurrent-3-${timestamp}@example.com`,
+    ];
+
+    const promises = emails.map((email) =>
+      fetch(`${baseUrl}/api/auth/signup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email,
+          password: "Test@1234",
+        }),
+      })
+    );
+
+    const results = await Promise.all(promises);
+
+    const successCount = results.filter((r) => r.status === 201).length;
+    assert.equal(successCount, 3, "All concurrent registrations should succeed");
+
+    const data = await results[0].json();
+    assert.ok(data.token);
+  });
+
+  test("POST /api/auth/signup - validates password strength", async () => {
+    const testEmail = `test-weak-${Date.now()}@example.com`;
+    const res = await fetch(`${baseUrl}/api/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: testEmail,
+        password: "weak",
+      }),
+    });
+    assert.equal(res.status, 400);
+    const data = await res.json();
+    assert.match(data.message, /Password must contain/);
+  });
+
+  test("POST /api/auth/signup - rejects missing email or password", async () => {
+    const res1 = await fetch(`${baseUrl}/api/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        password: "Test@1234",
+      }),
+    });
+    assert.equal(res1.status, 400);
+
+    const res2 = await fetch(`${baseUrl}/api/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: "test@example.com",
+      }),
+    });
+    assert.equal(res2.status, 400);
+  });
+
   test("successful upload response does not include a url field", async () => {
     const originalPostForm = axios.postForm;
     const originalPost = axios.post;
