@@ -4094,15 +4094,16 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
                             pass
         except Exception as e:
             err = f"Groq API Error: {str(e)}"
-            yield err
-            full_answer_parts.append(err)
+            yield _sse_frame(err, event="error")
+            yield _sse_done()
+            return
 
         full_answer = "".join(full_answer_parts).strip()
 
         try:
             # Streamed tokens were already yielded above as they arrived.
-            # Now produce the final framed answer, persist the chat exchange,
-            # and send the final framed answer + done event.
+            # Now produce the final framed answer for persistence (logging, citations, analytics).
+            # Do NOT re-emit the full answer to the client to avoid duplicate content.
             framed = apply_mode_framing(full_answer, question, mode, docs, context)
 
             if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
@@ -4112,9 +4113,6 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
                 citation_source_for_document(doc, idx)
                 for idx, doc in enumerate(docs)
             ]
-
-            # stream the final framed answer once at the end
-            yield _sse_frame(framed)
 
             with sessions_lock:
                 current_session = sessions.get(session_id)
