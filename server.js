@@ -380,6 +380,25 @@ const RATE_LIMIT_MAX = parsePositiveIntegerEnv(
   "RATE_LIMIT_MAX",
 );
 
+// ─── Authentication Rate Limiting Configuration ─────────────────────────────────
+// Dedicated rate limiting for authentication endpoints to prevent brute-force attacks.
+// These limits are stricter than the global limiter to protect login/signup specifically.
+const AUTH_RATE_LIMIT_WINDOW_MS = parsePositiveIntegerEnv(
+  process.env.AUTH_RATE_LIMIT_WINDOW_MS,
+  15 * 60 * 1000, // 15 minutes default
+  "AUTH_RATE_LIMIT_WINDOW_MS",
+);
+const AUTH_RATE_LIMIT_MAX = parsePositiveIntegerEnv(
+  process.env.AUTH_RATE_LIMIT_MAX,
+  5, // 5 attempts per window default
+  "AUTH_RATE_LIMIT_MAX",
+);
+const AUTH_SIGNUP_RATE_LIMIT_MAX = parsePositiveIntegerEnv(
+  process.env.AUTH_SIGNUP_RATE_LIMIT_MAX,
+  3, // 3 signup attempts per window default (stricter to prevent account creation spam)
+  "AUTH_SIGNUP_RATE_LIMIT_MAX",
+);
+
 // Global baseline — broad bot/scraper protection across every route.
 // 200 req / 15 min per IP. Tripping this triggers the escalating ban.
 const globalLimiter = rateLimit({
@@ -442,6 +461,39 @@ const inferenceLimiter = rateLimit({
   },
 });
 
+// ─── Authentication Rate Limiters ───────────────────────────────────────────────
+// Dedicated rate limiters for authentication endpoints to prevent brute-force attacks.
+// These are stricter than the global limiter and trigger the IP ban system on violation.
+
+// Login rate limiter — protects against credential stuffing and brute-force login attempts.
+const authLoginLimiter = rateLimit({
+  windowMs: AUTH_RATE_LIMIT_WINDOW_MS,
+  max: AUTH_RATE_LIMIT_MAX,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  keyGenerator: (req) => `${keyGenerator(req)}:login`,
+  store: createLimiterStore("rl:auth:login:"),
+  handler: (req, res) => {
+    res.locals.rateLimitMessage = "Too many login attempts. Please wait before trying again.";
+    rateLimitHandler(req, res);
+  },
+});
+
+// Signup rate limiter — protects against automated account creation spam.
+// Stricter than login since account creation has higher potential for abuse.
+const authSignupLimiter = rateLimit({
+  windowMs: AUTH_RATE_LIMIT_WINDOW_MS,
+  max: AUTH_SIGNUP_RATE_LIMIT_MAX,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  keyGenerator: (req) => `${keyGenerator(req)}:signup`,
+  store: createLimiterStore("rl:auth:signup:"),
+  handler: (req, res) => {
+    res.locals.rateLimitMessage = "Too many signup attempts. Please wait before trying again.";
+    rateLimitHandler(req, res);
+  },
+});
+
 const UPLOAD_MAX_CONCURRENT_PER_IP = parsePositiveIntegerEnv(
   process.env.UPLOAD_MAX_CONCURRENT_PER_IP,
   2,
@@ -493,7 +545,19 @@ const uploadConcurrencyGuard = (req, res, next) => {
 // Apply global limiter before ban guard so DB-backed ban checks are rate-limited.
 app.use(globalLimiter);
 app.use(banGuard);
-app.use("/api/auth", authRoutes);
+
+// Apply authentication-specific rate limiters to individual routes
+// These are stricter than the global limiter to prevent brute-force attacks
+app.post("/api/auth/login", authLoginLimiter, (req, res, next) => {
+  // Manually route to the login handler
+  const { login } = require("./src/controllers/authController");
+  login(req, res, next);
+});
+app.post("/api/auth/signup", authSignupLimiter, (req, res, next) => {
+  // Manually route to the signup handler
+  const { signup } = require("./src/controllers/authController");
+  signup(req, res, next);
+});
 
 // ─── File Size Limits ──────────────────────────────────────────────────────────
 // UPLOAD_MAX_FILE_SIZE_BYTES controls the maximum PDF file size allowed per upload.
@@ -1697,6 +1761,13 @@ app.use((err, req, res, next) => {
     error: message,
   });
 });
+
+// Export rate limiters for use in route files
+module.exports = {
+  app,
+  authLoginLimiter,
+  authSignupLimiter,
+};
 
 if (require.main === module) {
   try {
