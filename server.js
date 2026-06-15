@@ -528,6 +528,11 @@ const FILE_RETENTION_MS = parseInt(process.env.FILE_RETENTION_MS || "3600000", 1
 const CLEANUP_INTERVAL_MS = parseInt(process.env.CLEANUP_INTERVAL_MS || "3600000", 10);
 
 const startUploadsCleanup = () => {
+  // Skip cleanup interval during tests to prevent ENOENT errors after test completion
+  if (process.env.NODE_TEST === "1") {
+    return;
+  }
+
   const intervalId = setInterval(async () => {
     try {
       const files = await fsPromises.readdir(UPLOADS_DIR);
@@ -1195,8 +1200,9 @@ app.post(
     }
 
     // All validation passed — safe to open the file stream for forwarding.
+    const fileStream = fs.createReadStream(absoluteFilePath);
     const formData = {
-      file: fs.createReadStream(absoluteFilePath),
+      file: fileStream,
       original_filename: req.file.originalname,
     };
     if (sessionId && sessionSecret) {
@@ -1207,6 +1213,7 @@ app.post(
     const controller = new AbortController();
     const onClientDisconnect = () => {
       controller.abort();
+      fileStream.destroy();
       void cleanupFile(uploadedFilePath);
     };
     req.on("close", onClientDisconnect);
