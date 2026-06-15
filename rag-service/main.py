@@ -3840,284 +3840,166 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
     def _sse_done() -> str:
         return "data: [DONE]\n\n"
 
-    question = (data.question or "").strip()
-    if not question:
-        raise HTTPException(status_code=400, detail="Question is required.")
+    def _error_stream(error_msg: str):
+        yield _sse_frame(error_msg, event="error")
+        yield _sse_done()
 
-    intent = detect_question_intent(question)
-    mode = data.mode
-    normalized_query = normalize_query(question)
-    
-    session_id_list = [str(sid) for sid in data.session_ids] if data.session_ids else ([str(data.session_id)] if data.session_id else [])
-    secret_list = data.session_secrets if data.session_secrets else ([data.session_secret] if data.session_secret else [])
-    
-    if not session_id_list:
-        raise HTTPException(status_code=400, detail="At least one session ID must be provided.")
+    try:
+        question = (data.question or "").strip()
+        if not question:
+            raise HTTPException(status_code=400, detail="Question is required.")
 
-    all_scored_candidates = []
-    all_indexed_documents = []
-    
-    cache_key = f"{mode}:{normalized_query}"
-
-    for idx, session_id in enumerate(session_id_list):
-        secret = secret_list[idx] if idx < len(secret_list) else None
+        intent = detect_question_intent(question)
+        mode = data.mode
+        normalized_query = normalize_query(question)
         
-        with sessions_lock:
-            session = _touch_session_unlocked(session_id)
-            if not session:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Session {session_id} expired or invalid. Please re-upload your PDFs.",
-                )
+        session_id_list = [str(sid) for sid in data.session_ids] if data.session_ids else ([str(data.session_id)] if data.session_id else [])
+        secret_list = data.session_secrets if data.session_secrets else ([data.session_secret] if data.session_secret else [])
+        
+        if not session_id_list:
+            raise HTTPException(status_code=400, detail="At least one session ID must be provided.")
 
-            _require_session_secret(session, secret)
+        all_scored_candidates = []
+        all_indexed_documents = []
+        
+        cache_key = f"{mode}:{normalized_query}"
 
-            if "lock" not in session:
-                session["lock"] = threading.Lock()
-
-            session_lock = session["lock"]
-            if not session.get("vectorstore"):
-                try:
-                    session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
-                except Exception as exc:
-                    logger.error("Failed to lazy load vectorstore session_id=%s error=%s", session_id, exc)
-                    raise HTTPException(status_code=500, detail="Failed to load session index.")
-            vectorstore = session["vectorstore"]
-
-            # Session-level retrieval cache for streaming path
-            retrieval_cache = ensure_retrieval_cache(session)
-            with session_lock:
-                cleanup_retrieval_cache(retrieval_cache)
-                cached_value = retrieval_cache.get(cache_key)
-                cache_hit = False
-                if isinstance(cached_value, dict) and "scored_candidates" in cached_value:
-                    logger.info(
-                        "Stream retrieval cache hit session_id=%s cache_key=%s",
-                        session_id,
-                        cache_key,
+        for idx, session_id in enumerate(session_id_list):
+            secret = secret_list[idx] if idx < len(secret_list) else None
+            
+            with sessions_lock:
+                session = _touch_session_unlocked(session_id)
+                if not session:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Session {session_id} expired or invalid. Please re-upload your PDFs.",
                     )
-                    scored_candidates = cached_value["scored_candidates"]
-                    cache_hit = True
-                elif cached_value is not None:
-                    logger.info(
-                        "Stream retrieval cache invalidated session_id=%s cache_key=%s",
-                        session_id,
-                        cache_key,
-                    )
-                    retrieval_cache.pop(cache_key, None)
+
+                _require_session_secret(session, secret)
+
+                if "lock" not in session:
+                    session["lock"] = threading.Lock()
+
+                session_lock = session["lock"]
+                if not session.get("vectorstore"):
+                    try:
+                        session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
+                    except Exception as exc:
+                        logger.error("Failed to lazy load vectorstore session_id=%s error=%s", session_id, exc)
+                        raise HTTPException(status_code=500, detail="Failed to load session index.")
+                vectorstore = session["vectorstore"]
+
+                # Session-level retrieval cache for streaming path
+                retrieval_cache = ensure_retrieval_cache(session)
+                with session_lock:
+                    cleanup_retrieval_cache(retrieval_cache)
+                    cached_value = retrieval_cache.get(cache_key)
                     cache_hit = False
+                    if isinstance(cached_value, dict) and "scored_candidates" in cached_value:
+                        logger.info(
+                            "Stream retrieval cache hit session_id=%s cache_key=%s",
+                            session_id,
+                            cache_key,
+                        )
+                        scored_candidates = cached_value["scored_candidates"]
+                        cache_hit = True
+                    elif cached_value is not None:
+                        logger.info(
+                            "Stream retrieval cache invalidated session_id=%s cache_key=%s",
+                            session_id,
+                            cache_key,
+                        )
+                        retrieval_cache.pop(cache_key, None)
+                        cache_hit = False
 
-        try:
-            with session_lock:
-                indexed_documents = collect_index_documents(vectorstore)
+            try:
+                with session_lock:
+                    indexed_documents = collect_index_documents(vectorstore)
+                    if not cache_hit:
+                        logger.info(
+                            "Stream retrieval cache miss session_id=%s cache_key=%s",
+                            session_id,
+                            cache_key,
+                        )
+                        scored_candidates = search_retrieval_candidates(
+                            vectorstore,
+                            question,
+                            ASK_RETRIEVAL_CANDIDATES,
+                        )
+
                 if not cache_hit:
-                    logger.info(
-                        "Stream retrieval cache miss session_id=%s cache_key=%s",
-                        session_id,
-                        cache_key,
-                    )
-                    scored_candidates = search_retrieval_candidates(
-                        vectorstore,
+                    with sessions_lock:
+                        current_session = sessions.get(session_id)
+                        if current_session:
+                            rc = ensure_retrieval_cache(current_session)
+                            if len(rc) >= RETRIEVAL_CACHE_LIMIT:
+                                oldest = next(iter(rc))
+                                del rc[oldest]
+                            rc[cache_key] = {
+                                "cached_at": now_ts(),
+                                "scored_candidates": scored_candidates,
+                            }
+            except Exception:
+                logger.exception("Stream similarity search failed session_id=%s", session_id)
+                raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
+                
+            all_scored_candidates.extend(scored_candidates)
+            all_indexed_documents.extend(indexed_documents)
+
+        # Sort all candidates from multiple documents by score ascending (lower is better in FAISS L2)
+        all_scored_candidates.sort(key=lambda x: x[1])
+        scored_candidates = all_scored_candidates[:ASK_RETRIEVAL_CANDIDATES]
+        indexed_documents = all_indexed_documents
+
+        docs = (
+            representative_documents_by_source(indexed_documents)
+            if intent == "overview"
+            else diversify_retrieved_documents(scored_candidates, question)
+        )
+
+        best_score = scored_candidates[0][1] if scored_candidates else None
+        if not passes_evidence_gate(question, docs, best_score, intent):
+            logger.info(
+                "Stream evidence gate refused session_id=%s intent=%s best_score=%s",
+                session_id,
+                intent,
+                best_score,
+            )
+            with sessions_lock:
+                current_session = sessions.get(session_id)
+                if current_session:
+                    append_chat_exchange(
+                        current_session,
                         question,
-                        ASK_RETRIEVAL_CANDIDATES,
+                        INSUFFICIENT_CONTEXT_MESSAGE,
+                        [],
+                        mode,
                     )
+                _mark_session_dirty(session_id)
 
-            if not cache_hit:
-                with sessions_lock:
-                    current_session = sessions.get(session_id)
-                    if current_session:
-                        rc = ensure_retrieval_cache(current_session)
-                        if len(rc) >= RETRIEVAL_CACHE_LIMIT:
-                            oldest = next(iter(rc))
-                            del rc[oldest]
-                        rc[cache_key] = {
-                            "cached_at": now_ts(),
-                            "scored_candidates": scored_candidates,
-                        }
-        except Exception:
-            logger.exception("Stream similarity search failed session_id=%s", session_id)
-            raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
-            
-        all_scored_candidates.extend(scored_candidates)
-        all_indexed_documents.extend(indexed_documents)
+            def _refuse_stream():
+                yield _sse_frame(INSUFFICIENT_CONTEXT_MESSAGE)
+                yield _sse_done()
 
-    # Sort all candidates from multiple documents by score ascending (lower is better in FAISS L2)
-    all_scored_candidates.sort(key=lambda x: x[1])
-    scored_candidates = all_scored_candidates[:ASK_RETRIEVAL_CANDIDATES]
-    indexed_documents = all_indexed_documents
+            return StreamingResponse(_refuse_stream(), media_type="text/event-stream; charset=utf-8")
 
-    docs = (
-        representative_documents_by_source(indexed_documents)
-        if intent == "overview"
-        else diversify_retrieved_documents(scored_candidates, question)
-    )
+        context = format_context(docs)
 
-    best_score = scored_candidates[0][1] if scored_candidates else None
-    if not passes_evidence_gate(question, docs, best_score, intent):
-        logger.info(
-            "Stream evidence gate refused session_id=%s intent=%s best_score=%s",
-            session_id,
-            intent,
-            best_score,
-        )
-        with sessions_lock:
-            current_session = sessions.get(session_id)
-            if current_session:
-                append_chat_exchange(
-                    current_session,
-                    question,
-                    INSUFFICIENT_CONTEXT_MESSAGE,
-                    [],
-                    mode,
-                )
-            _mark_session_dirty(session_id)
+        grounded_answer = None  # Disabled to force LLM usage
 
-        def _refuse_stream():
-            yield _sse_frame(INSUFFICIENT_CONTEXT_MESSAGE)
-            yield _sse_done()
-
-        return StreamingResponse(_refuse_stream(), media_type="text/event-stream; charset=utf-8")
-
-    context = format_context(docs)
-
-    grounded_answer = None  # Disabled to force LLM usage
-
-    # For grounded (non-LLM) answers, stream the result directly without
-    # spinning up a generation thread — there are no tokens to generate.
-    if grounded_answer != INSUFFICIENT_CONTEXT_MESSAGE and grounded_answer:
-        citation_sources = [citation_source_for_document(doc, idx) for idx, doc in enumerate(docs)]
-        framed = apply_mode_framing(grounded_answer, question, mode, docs, context)
-        if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
-            framed = grounded_answer
-
-        with sessions_lock:
-            current_session = sessions.get(session_id)
-            if current_session:
-                ensure_retrieval_cache(current_session)
-
-                append_chat_exchange(
-                    current_session,
-                    question,
-                    framed,
-                    citation_sources,
-                    mode,
-                )
-
-            _mark_session_dirty(session_id)
-
-        def _grounded_stream():
-            yield _sse_frame(framed)
-            yield _sse_done()
-
-        return StreamingResponse(_grounded_stream(), media_type="text/event-stream; charset=utf-8")
-
-    # LLM generation path — run in a background thread so we can stream tokens
-    # back to the caller as they are produced rather than waiting for the full
-    # completion before sending anything.
-    followup_instructions = ""
-    if mode in ["tutor", "socratic"]:
-        followup_instructions = (
-            "You MUST append an interactive <FOLLOWUP> multiple-choice question to test their understanding. "
-            "Format it exactly like this at the very end of your response:\n"
-            "<FOLLOWUP>\nQuestion: [Question text]\nOptions:\n- [Option A]\n- [Option B]\n</FOLLOWUP>\n\n"
-        )
-    elif mode in ["default", "eli5"]:
-        followup_instructions = (
-            "If there is a deterministic follow-up question that would be helpful, you MAY append an interactive <FOLLOWUP> block. "
-            "Format it exactly like this at the very end of your response:\n"
-            "<FOLLOWUP>\nQuestion: [Question text]\nOptions:\n- [Option A]\n- [Option B]\n</FOLLOWUP>\n\n"
-        )
-
-    prompt = (
-        "You are a careful assistant answering questions over one or more uploaded PDF documents. "
-        "Use only the provided context. The context may include excerpts from multiple PDFs. "
-        "When the question asks for a relationship, comparison, or synthesis, connect the relevant facts across documents. "
-        "If the context does not contain enough information, say that briefly and do not invent details.\n\n"
-        "Reference the provided source numbers naturally whenever the answer is directly supported by the context.\n"
-        "Cite sources using formats like 'According to Source 1' or 'Source 2 explains that...'\n"
-        "You are a helpful AI assistant.\n"
-        "Give clear, conversational, human-friendly answers.\n"
-        "Do not return raw PDF text or chunks.\n"
-        "Summarize properly in readable sentences.\n\n"
-        f"{followup_instructions}"
-        f"Context:\n{context}\n\n"
-        f"Question: {question}\n"
-        "Answer:"
-    )
-
-    logger.info(
-        "Stream executing query session_id=%s retrieved_chunks=%s",
-        session_id,
-        len(docs),
-    )
-
-    def _generate_and_stream():
-        groq_api_key = os.environ.get("GROQ_API_KEY")
-        if not groq_api_key:
-            err = "Groq API Key is missing! Please provide your GROQ_API_KEY in the environment."
-            yield err
-            return
-
-        full_answer_parts = []
-        try:
-            import urllib.request
-            import json
-            
-            url = "https://api.groq.com/openai/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {groq_api_key}",
-                "Content-Type": "application/json",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-            }
-            payload = json.dumps({
-                "model": "llama-3.1-8b-instant",
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": True,
-                "temperature": 0
-            }).encode("utf-8")
-            
-            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                for line in resp:
-                    decoded = line.decode('utf-8').strip()
-                    if decoded.startswith('data: '):
-                        data_str = decoded[6:]
-                        if data_str == '[DONE]':
-                            break
-                        try:
-                            data = json.loads(data_str)
-                            token = data['choices'][0]['delta'].get('content', '')
-                            if token:
-                                full_answer_parts.append(token)
-                                yield _sse_frame(token)
-                        except Exception:
-                            pass
-        except Exception as e:
-            err = f"Groq API Error: {str(e)}"
-            yield _sse_frame(err, event="error")
-            yield _sse_done()
-            return
-
-        full_answer = "".join(full_answer_parts).strip()
-
-        try:
-            # Streamed tokens were already yielded above as they arrived.
-            # Now produce the final framed answer for persistence (logging, citations, analytics).
-            # Do NOT re-emit the full answer to the client to avoid duplicate content.
-            framed = apply_mode_framing(full_answer, question, mode, docs, context)
-
+        # For grounded (non-LLM) answers, stream the result directly without
+        # spinning up a generation thread — there are no tokens to generate.
+        if grounded_answer != INSUFFICIENT_CONTEXT_MESSAGE and grounded_answer:
+            citation_sources = [citation_source_for_document(doc, idx) for idx, doc in enumerate(docs)]
+            framed = apply_mode_framing(grounded_answer, question, mode, docs, context)
             if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
-                framed = full_answer
-
-            citation_sources = [
-                citation_source_for_document(doc, idx)
-                for idx, doc in enumerate(docs)
-            ]
+                framed = grounded_answer
 
             with sessions_lock:
                 current_session = sessions.get(session_id)
                 if current_session:
                     ensure_retrieval_cache(current_session)
+
                     append_chat_exchange(
                         current_session,
                         question,
@@ -4125,21 +4007,150 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
                         citation_sources,
                         mode,
                     )
+
                 _mark_session_dirty(session_id)
 
-            yield _sse_done()
-        except Exception:
-            logger.exception("Stream generation failed session_id=%s", session_id)
-            yield _sse_frame("Generation error. Please try again.", event="error")
-            # Emit an explicit done marker after the error so SSE clients
-            # that rely on an in-band completion token can handle the
-            # terminal state deterministically.
+            def _grounded_stream():
+                yield _sse_frame(framed)
+                yield _sse_done()
+
+            return StreamingResponse(_grounded_stream(), media_type="text/event-stream; charset=utf-8")
+
+        # LLM generation path — run in a background thread so we can stream tokens
+        # back to the caller as they are produced rather than waiting for the full
+        # completion before sending anything.
+        followup_instructions = ""
+        if mode in ["tutor", "socratic"]:
+            followup_instructions = (
+                "You MUST append an interactive <FOLLOWUP> multiple-choice question to test their understanding. "
+                "Format it exactly like this at the very end of your response:\n"
+                "<FOLLOWUP>\nQuestion: [Question text]\nOptions:\n- [Option A]\n- [Option B]\n</FOLLOWUP>\n\n"
+            )
+        elif mode in ["default", "eli5"]:
+            followup_instructions = (
+                "If there is a deterministic follow-up question that would be helpful, you MAY append an interactive <FOLLOWUP> block. "
+                "Format it exactly like this at the very end of your response:\n"
+                "<FOLLOWUP>\nQuestion: [Question text]\nOptions:\n- [Option A]\n- [Option B]\n</FOLLOWUP>\n\n"
+            )
+
+        prompt = (
+            "You are a careful assistant answering questions over one or more uploaded PDF documents. "
+            "Use only the provided context. The context may include excerpts from multiple PDFs. "
+            "When the question asks for a relationship, comparison, or synthesis, connect the relevant facts across documents. "
+            "If the context does not contain enough information, say that briefly and do not invent details.\n\n"
+            "Reference the provided source numbers naturally whenever the answer is directly supported by the context.\n"
+            "Cite sources using formats like 'According to Source 1' or 'Source 2 explains that...'\n"
+            "You are a helpful AI assistant.\n"
+            "Give clear, conversational, human-friendly answers.\n"
+            "Do not return raw PDF text or chunks.\n"
+            "Summarize properly in readable sentences.\n\n"
+            f"{followup_instructions}"
+            f"Context:\n{context}\n\n"
+            f"Question: {question}\n"
+            "Answer:"
+        )
+
+        logger.info(
+            "Stream executing query session_id=%s retrieved_chunks=%s",
+            session_id,
+            len(docs),
+        )
+
+        def _generate_and_stream():
+            groq_api_key = os.environ.get("GROQ_API_KEY")
+            if not groq_api_key:
+                err = "Groq API Key is missing! Please provide your GROQ_API_KEY in the environment."
+                yield _sse_frame(err, event="error")
+                yield _sse_done()
+                return
+
+            full_answer_parts = []
             try:
+                import urllib.request
+                import json
+                
+                url = "https://api.groq.com/openai/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {groq_api_key}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                }
+                payload = json.dumps({
+                    "model": "llama-3.1-8b-instant",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": True,
+                    "temperature": 0
+                }).encode("utf-8")
+                
+                req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    for line in resp:
+                        decoded = line.decode('utf-8').strip()
+                        if decoded.startswith('data: '):
+                            data_str = decoded[6:]
+                            if data_str == '[DONE]':
+                                break
+                            try:
+                                data = json.loads(data_str)
+                                token = data['choices'][0]['delta'].get('content', '')
+                                if token:
+                                    full_answer_parts.append(token)
+                                    yield _sse_frame(token)
+                            except Exception:
+                                pass
+            except Exception as e:
+                err = f"Groq API Error: {str(e)}"
+                yield _sse_frame(err, event="error")
+                yield _sse_done()
+                return
+
+            full_answer = "".join(full_answer_parts).strip()
+
+            try:
+                # Streamed tokens were already yielded above as they arrived.
+                # Now produce the final framed answer for persistence (logging, citations, analytics).
+                # Do NOT re-emit the full answer to the client to avoid duplicate content.
+                framed = apply_mode_framing(full_answer, question, mode, docs, context)
+
+                if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
+                    framed = full_answer
+
+                citation_sources = [
+                    citation_source_for_document(doc, idx)
+                    for idx, doc in enumerate(docs)
+                ]
+
+                with sessions_lock:
+                    current_session = sessions.get(session_id)
+                    if current_session:
+                        ensure_retrieval_cache(current_session)
+                        append_chat_exchange(
+                            current_session,
+                            question,
+                            framed,
+                            citation_sources,
+                            mode,
+                        )
+                    _mark_session_dirty(session_id)
+
                 yield _sse_done()
             except Exception:
-                pass
+                logger.exception("Stream generation failed session_id=%s", session_id)
+                yield _sse_frame("Generation error. Please try again.", event="error")
+                # Emit an explicit done marker after the error so SSE clients
+                # that rely on an in-band completion token can handle the
+                # terminal state deterministically.
+                try:
+                    yield _sse_done()
+                except Exception:
+                    pass
 
-    return StreamingResponse(_generate_and_stream(), media_type="text/event-stream; charset=utf-8")
+        return StreamingResponse(_generate_and_stream(), media_type="text/event-stream; charset=utf-8")
+
+    except HTTPException as e:
+        # Convert HTTPExceptions to SSE-formatted errors for streaming endpoint
+        error_msg = e.detail if isinstance(e.detail, str) else str(e.detail)
+        return StreamingResponse(_error_stream(error_msg), media_type="text/event-stream; charset=utf-8")
 
 
 def _run_generation_locked(model, generate_kwargs):
