@@ -25,6 +25,7 @@ const {
 const { clientIpFromRequest } = require("./security/ip");
 const { createRedisClient } = require("./security/redis");
 const authRoutes = require("./src/routes/authRoutes");
+const { validateURLForSSRF, validateRedirectForSSRF, createSSRFSafeAxiosConfig } = require("./src/utils/ssrfValidation");
 
 const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL || "http://localhost:5000";
 const getInternalRagToken = () => (process.env.INTERNAL_RAG_TOKEN || "").trim();
@@ -1295,23 +1296,6 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
   if (!url || typeof url !== "string") {
     return res.status(400).json({ error: "Missing or invalid 'url' field." });
   }
-  
-  // SSRF Protection: Validate URL format, protocol, and hostname.
-  let parsedUrl;
-  try {
-    parsedUrl = new URL(url.trim());
-  } catch (err) {
-    return res.status(400).json({ error: "Invalid URL format." });
-  }
-
-  if (parsedUrl.protocol !== "https:") {
-    return res.status(400).json({ error: "Only HTTPS URLs are allowed." });
-  }
-
-  const trustedSupabaseOrigin = getTrustedSupabaseOrigin(parsedUrl.hostname);
-  if (!trustedSupabaseOrigin) {
-    return res.status(403).json({ error: "URL host is not allowed." });
-  }
 
   if (!filename || typeof filename !== "string") {
     return res.status(400).json({ error: "Missing or invalid 'filename' field." });
@@ -1324,19 +1308,52 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
     .slice(0, 200);
 
   try {
+    // SSRF Protection: Validate URL format, protocol, hostname, and resolved IPs
+    let validatedURL;
+    try {
+      validatedURL = await validateURLForSSRF(url);
+    } catch (ssrfErr) {
+      console.error("SSRF validation failed:", ssrfErr.message);
+      return res.status(403).json({ error: ssrfErr.message });
+    }
+
     // Download the PDF from the remote URL into a Buffer
     let pdfBuffer;
     try {
-      const downloadUrl = new URL(trustedSupabaseOrigin);
-      downloadUrl.pathname = parsedUrl.pathname;
-      downloadUrl.search = parsedUrl.search;
+      const downloadUrl = new URL(validatedURL.url.toString());
 
       const dlResponse = await axios.get(downloadUrl.toString(), {
         responseType: "arraybuffer",
         timeout: 30000,
         maxContentLength: 50 * 1024 * 1024, // 50 MB cap
+        maxRedirects: 0, // Disable automatic redirects - SSRF protection
       });
-      pdfBuffer = Buffer.from(dlResponse.data);
+      
+      // Check for redirect status codes
+      if (dlResponse.status >= 300 && dlResponse.status < 400) {
+        const redirectUrl = dlResponse.headers.location;
+        if (redirectUrl) {
+          // Validate redirect target before following
+          try {
+            await validateRedirectForSSRF(redirectUrl);
+            // Follow the validated redirect
+            const redirectResponse = await axios.get(redirectUrl, {
+              responseType: "arraybuffer",
+              timeout: 30000,
+              maxContentLength: 50 * 1024 * 1024,
+              maxRedirects: 0,
+            });
+            pdfBuffer = Buffer.from(redirectResponse.data);
+          } catch (redirectErr) {
+            console.error("Redirect validation failed:", redirectErr.message);
+            return res.status(403).json({ error: "Redirect target is not allowed" });
+          }
+        } else {
+          return res.status(502).json({ error: "Server returned redirect without location header" });
+        }
+      } else {
+        pdfBuffer = Buffer.from(dlResponse.data);
+      }
     } catch (dlErr) {
       console.error("Failed to download PDF from URL:", dlErr.message);
       return res.status(502).json({ error: "Could not download PDF from the provided URL." });

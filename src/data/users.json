@@ -62,5 +62,29 @@
   {
     "email": "testuser2-1780859135237@example.com",
     "password": "$2b$10$URdT8Tm/Xg7Kwi/UnSiinOWzjsqFc8QCUgpY/TeURTj2T3R1wYW8S"
+  },
+  {
+    "email": "testuser-1781540716124@example.com",
+    "password": "$2b$10$9iNV0yiIpNM.gJT.lsOa5OpuMxL7hKB.84wloniEj2O.bBpZ7MUjW"
+  },
+  {
+    "email": "testuser2-1781540716507@example.com",
+    "password": "$2b$10$UcaYkbpnvmLOxUnYIMPBhOx9WM/m0eefhPXDFwcmE0V22fswv5XNa"
+  },
+  {
+    "email": "testuser-1781541360847@example.com",
+    "password": "$2b$10$1UiWTuwl3W5HispqyqPxDuLYP.f.zZjzINI4wnjoZaUuR3UbY5pcS"
+  },
+  {
+    "email": "testuser2-1781541360962@example.com",
+    "password": "$2b$10$zMTjccFLerjb5izOiRcIw.KIWr3EiNI98iUTtUDeCthvJc5k3127W"
+  },
+  {
+    "email": "testuser-1781541583462@example.com",
+    "password": "$2b$10$NZzoL2q8S2sDFN8bM/KUhuUfHcmgekG/uwuoext4Sev80smUIxPoe"
+  },
+  {
+    "email": "testuser2-1781541583647@example.com",
+    "password": "$2b$10$2DIeGgeCjgcJ37QnmfR5M.kkwFh7MC5XJcddEir68UtqJFDyQV61."
   }
 ]
