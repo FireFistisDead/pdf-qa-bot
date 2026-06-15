@@ -1,5 +1,4 @@
 const fs = require("fs");
-const fsPromises = require("fs/promises");
 const path = require("path");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -17,10 +16,6 @@ if (!SECRET) {
 
 const getUsers = () => {
   return JSON.parse(fs.readFileSync(usersFile));
-};
-
-const saveUsers = (users) => {
-  fs.writeFileSync(usersFile, JSON.stringify(users, null, 2));
 };
 
 const getUsersLocked = async () => {
@@ -42,7 +37,9 @@ const saveUsersLocked = async (users) => {
   } catch (error) {
     try {
       fs.unlinkSync(tempFile);
-    } catch {}
+    } catch {
+      // Ignore cleanup errors - temp file might not exist
+    }
     throw error;
   }
 };

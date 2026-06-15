@@ -19,7 +19,6 @@ const {
   summarizeSchema,
   summarizeCredentialSchema,
   sessionsLookupSchema,
-  knowledgeGapsSchema,
   MAX_QUESTION_LENGTH,
 } = require("./validators/schemas");
 const { clientIpFromRequest } = require("./security/ip");
