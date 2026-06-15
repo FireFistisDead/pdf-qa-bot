@@ -494,14 +494,17 @@ describe("route error responses", () => {
 
   test("POST /process-from-url keeps protocol-relative paths on the trusted host", async () => {
     const originalGet = axios.get;
-    const originalPost = axios.post;
+    const originalPostForm = axios.postForm;
     let requestedDownloadUrl = null;
 
     axios.get = async (url) => {
       requestedDownloadUrl = url;
-      return { data: Buffer.from("%PDF-1.4\n%%EOF") };
+      const { PassThrough } = require("node:stream");
+      const stream = new PassThrough();
+      stream.end(Buffer.from("%PDF-1.4\n%%EOF"));
+      return { data: stream };
     };
-    axios.post = async () => ({
+    axios.postForm = async () => ({
       data: {
         session_id: "550e8400-e29b-41d4-a716-446655440000",
         session_secret: "session-secret-123",
@@ -534,20 +537,23 @@ describe("route error responses", () => {
       assert.equal(downloadUrl.search, "?download=1");
     } finally {
       axios.get = originalGet;
-      axios.post = originalPost;
+      axios.postForm = originalPostForm;
     }
   });
 
   test("POST /process-from-url accepts whitespace-trimmed Supabase URLs", async () => {
     const originalGet = axios.get;
-    const originalPost = axios.post;
+    const originalPostForm = axios.postForm;
     let requestedDownloadUrl = null;
 
     axios.get = async (url) => {
       requestedDownloadUrl = url;
-      return { data: Buffer.from("%PDF-1.4\n%%EOF") };
+      const { PassThrough } = require("node:stream");
+      const stream = new PassThrough();
+      stream.end(Buffer.from("%PDF-1.4\n%%EOF"));
+      return { data: stream };
     };
-    axios.post = async () => ({
+    axios.postForm = async () => ({
       data: {
         session_id: "550e8400-e29b-41d4-a716-446655440000",
         session_secret: "session-secret-123",
@@ -578,9 +584,193 @@ describe("route error responses", () => {
       assert.equal(downloadUrl.pathname, "/storage/v1/object/public/docs/trimmed.pdf");
     } finally {
       axios.get = originalGet;
-      axios.post = originalPost;
+      axios.postForm = originalPostForm;
     }
   });
+
+  test("POST /process-from-url rejects non-PDF files via magic byte validation", async () => {
+    const originalGet = axios.get;
+    const originalPostForm = axios.postForm;
+
+    axios.get = async (url) => {
+      const { PassThrough } = require("node:stream");
+      const stream = new PassThrough();
+      stream.end(Buffer.from("NOT-A-PDF-FILE-CONTENT"));
+      return { data: stream };
+    };
+    axios.postForm = async () => ({
+      data: {
+        session_id: "550e8400-e29b-41d4-a716-446655440000",
+        session_secret: "session-secret-123",
+        document: { filename: "test.pdf" },
+        documents: [],
+      },
+    });
+
+    const jwt = require("jsonwebtoken");
+    const validToken = jwt.sign({ role: "authenticated" }, process.env.SUPABASE_JWT_SECRET);
+
+    try {
+      const res = await fetch(`${baseUrl}/process-from-url`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${validToken}`,
+        },
+        body: JSON.stringify({
+          url: "https://xyz.supabase.co/storage/v1/object/public/docs/test.pdf",
+          filename: "test.pdf",
+        }),
+      });
+
+      assert.equal(res.status, 415);
+      const data = await res.json();
+      assert.match(data.error, /not a valid PDF/i);
+    } finally {
+      axios.get = originalGet;
+      axios.postForm = originalPostForm;
+    }
+  });
+
+  test("POST /process-from-url rejects oversized files during streaming", async () => {
+    const originalGet = axios.get;
+    const originalPostForm = axios.postForm;
+
+    axios.get = async (url) => {
+      const { PassThrough } = require("node:stream");
+      const stream = new PassThrough();
+      // Create a PDF that exceeds the default 20MB limit
+      const largePdf = Buffer.concat([
+        Buffer.from("%PDF-1.4\n"),
+        Buffer.alloc(25 * 1024 * 1024, "X"), // 25MB of data
+        Buffer.from("%%EOF"),
+      ]);
+      stream.end(largePdf);
+      return { data: stream };
+    };
+    axios.postForm = async () => ({
+      data: {
+        session_id: "550e8400-e29b-41d4-a716-446655440000",
+        session_secret: "session-secret-123",
+        document: { filename: "large.pdf" },
+        documents: [],
+      },
+    });
+
+    const jwt = require("jsonwebtoken");
+    const validToken = jwt.sign({ role: "authenticated" }, process.env.SUPABASE_JWT_SECRET);
+
+    try {
+      const res = await fetch(`${baseUrl}/process-from-url`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${validToken}`,
+        },
+        body: JSON.stringify({
+          url: "https://xyz.supabase.co/storage/v1/object/public/docs/large.pdf",
+          filename: "large.pdf",
+        }),
+      });
+
+      assert.equal(res.status, 413);
+      const data = await res.json();
+      assert.match(data.error, /File size exceeds/i);
+    } finally {
+      axios.get = originalGet;
+      axios.postForm = originalPostForm;
+    }
+  });
+
+  test("POST /process-from-url handles download timeout", async () => {
+    const originalGet = axios.get;
+    const originalPostForm = axios.postForm;
+
+    axios.get = async (url) => {
+      const { PassThrough } = require("node:stream");
+      const stream = new PassThrough();
+      // Simulate a timeout by aborting the request
+      const error = new Error("ECONNABORTED");
+      error.code = "ECONNABORTED";
+      throw error;
+    };
+    axios.postForm = async () => ({
+      data: {
+        session_id: "550e8400-e29b-41d4-a716-446655440000",
+        session_secret: "session-secret-123",
+        document: { filename: "test.pdf" },
+        documents: [],
+      },
+    });
+
+    const jwt = require("jsonwebtoken");
+    const validToken = jwt.sign({ role: "authenticated" }, process.env.SUPABASE_JWT_SECRET);
+
+    try {
+      const res = await fetch(`${baseUrl}/process-from-url`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${validToken}`,
+        },
+        body: JSON.stringify({
+          url: "https://xyz.supabase.co/storage/v1/object/public/docs/test.pdf",
+          filename: "test.pdf",
+        }),
+      });
+
+      assert.equal(res.status, 504);
+      const data = await res.json();
+      assert.match(data.error, /timeout/i);
+    } finally {
+      axios.get = originalGet;
+      axios.postForm = originalPostForm;
+    }
+  });
+
+  test("POST /process-from-url handles connection errors", async () => {
+    const originalGet = axios.get;
+    const originalPostForm = axios.postForm;
+
+    axios.get = async (url) => {
+      const error = new Error("connect ECONNREFUSED");
+      error.code = "ECONNREFUSED";
+      throw error;
+    };
+    axios.postForm = async () => ({
+      data: {
+        session_id: "550e8400-e29b-41d4-a716-446655440000",
+        session_secret: "session-secret-123",
+        document: { filename: "test.pdf" },
+        documents: [],
+      },
+    });
+
+    const jwt = require("jsonwebtoken");
+    const validToken = jwt.sign({ role: "authenticated" }, process.env.SUPABASE_JWT_SECRET);
+
+    try {
+      const res = await fetch(`${baseUrl}/process-from-url`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${validToken}`,
+        },
+        body: JSON.stringify({
+          url: "https://xyz.supabase.co/storage/v1/object/public/docs/test.pdf",
+          filename: "test.pdf",
+        }),
+      });
+
+      assert.equal(res.status, 502);
+      const data = await res.json();
+      assert.match(data.error, /Could not download PDF/i);
+    } finally {
+      axios.get = originalGet;
+      axios.postForm = originalPostForm;
+    }
+  });
+
 
   test("POST /summarize with empty body returns 400", async () => {
     const res = await fetch(`${baseUrl}/summarize`, {
