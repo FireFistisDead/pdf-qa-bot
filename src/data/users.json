@@ -86,5 +86,13 @@
   {
     "email": "testuser2-1781558853174@example.com",
     "password": "$2b$10$IC./adkiaR9gn/Sxwkfeq.IxX.4EPQgRoPjaJUce044dSFZvlyOdS"
+  },
+  {
+    "email": "testuser-1781560500052@example.com",
+    "password": "$2b$10$AVJDmTmKShyy8qYd4iyEQ.FeT4kB/TDya.oe80s9hPOm0CX9tcHNq"
+  },
+  {
+    "email": "testuser2-1781560500119@example.com",
+    "password": "$2b$10$piV18JLcapUP0suPAQ/rO.TKB0POk/N2fRCoO0aIsJqrbXli.uSTC"
   }
 ]

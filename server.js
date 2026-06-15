@@ -1207,7 +1207,7 @@ app.post(
     const controller = new AbortController();
     const onClientDisconnect = () => {
       controller.abort();
-      cleanupFile(uploadedFilePath);
+      void cleanupFile(uploadedFilePath);
     };
     req.on("close", onClientDisconnect);
 
