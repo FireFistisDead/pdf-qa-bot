@@ -262,7 +262,7 @@ You can run the entire multi-service application easily using Docker Compose. Th
 ### Quick Start
 
 1. Clone the repository and navigate to the project root.
-2. Set up your environment variables by copying the example file and adding a secure `INTERNAL_RAG_TOKEN`:
+2. Initialize your environment variables by copying the example file:
 
 ```bash
 cp .env.example .env
