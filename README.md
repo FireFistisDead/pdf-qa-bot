@@ -267,7 +267,7 @@ You can run the entire multi-service application easily using Docker Compose. Th
 ```bash
 cp .env.example .env
 ```
-
+Edit `.env` and set `INTERNAL_RAG_TOKEN` to a secure random value.
 3. The services will be available at:
    - **Frontend UI**: http://localhost:3000
    - **Express API Gateway**: http://localhost:4000
