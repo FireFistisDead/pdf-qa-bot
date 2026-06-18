@@ -20,6 +20,8 @@ const {
   summarizeCredentialSchema,
   sessionsLookupSchema,
   knowledgeGapsSchema,
+  generateFlashcardsSchema,
+  updateFlashcardProgressSchema,
   MAX_QUESTION_LENGTH,
 } = require("./validators/schemas");
 const { clientIpFromRequest } = require("./security/ip");
@@ -1598,6 +1600,120 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
       extractServiceDetails(err, "Error summarizing PDF")
     );
     return propagateRagError(err, res, "Error summarizing PDF");
+  }
+});
+
+app.post("/knowledge-gaps", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+  const resolvedSessionSecret = await resolveSessionSecret(
+    req,
+    req.body?.session_id,
+    req.body?.session_secret
+  );
+
+  const validation = knowledgeGapsSchema.safeParse({
+    ...req.body,
+    session_secret: resolvedSessionSecret,
+  });
+
+  if (!validation.success) {
+    return res.status(400).json({
+      error: "Validation failed",
+      details: validation.error.flatten(),
+    });
+  }
+
+  try {
+    const response = await axios.post(
+      `${RAG_SERVICE_URL}/knowledge-gaps`,
+      validation.data,
+      {
+        headers: ragAuthHeaders(),
+      }
+    );
+
+    return res.json(response.data);
+  } catch (err) {
+    console.error(
+      "Knowledge gaps mapping failed:",
+      extractServiceDetails(err, "Error mapping knowledge gaps")
+    );
+    return propagateRagError(err, res, "Error mapping knowledge gaps");
+  }
+});
+
+app.post("/sessions/flashcards", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+  const resolvedSessionSecret = await resolveSessionSecret(
+    req,
+    req.body?.session_id,
+    req.body?.session_secret
+  );
+
+  const validation = generateFlashcardsSchema.safeParse({
+    ...req.body,
+    session_secret: resolvedSessionSecret,
+  });
+
+  if (!validation.success) {
+    return res.status(400).json({
+      error: "Validation failed",
+      details: validation.error.flatten(),
+    });
+  }
+
+  try {
+    const response = await axios.post(
+      `${RAG_SERVICE_URL}/sessions/flashcards/generate`,
+      validation.data,
+      {
+        headers: ragAuthHeaders(),
+      }
+    );
+
+    return res.json(response.data);
+  } catch (err) {
+    console.error(
+      "Flashcard generation failed:",
+      extractServiceDetails(err, "Error generating flashcards")
+    );
+    return propagateRagError(err, res, "Error generating flashcards");
+  }
+});
+
+app.post("/sessions/flashcards/progress", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+  const resolvedSessionSecret = await resolveSessionSecret(
+    req,
+    req.body?.session_id,
+    req.body?.session_secret
+  );
+
+  const validation = updateFlashcardProgressSchema.safeParse({
+    ...req.body,
+    session_secret: resolvedSessionSecret,
+  });
+
+  if (!validation.success) {
+    return res.status(400).json({
+      error: "Validation failed",
+      details: validation.error.flatten(),
+    });
+  }
+
+  try {
+    const response = await axios.post(
+      `${RAG_SERVICE_URL}/sessions/flashcards/update-progress`,
+      validation.data,
+      {
+        headers: ragAuthHeaders(),
+      }
+    );
+
+    return res.json(response.data);
+  } catch (err) {
+    console.error(
+      "Flashcard progress update failed:",
+      extractServiceDetails(err, "Error updating flashcard progress")
+    );
+    return propagateRagError(err, res, "Error updating flashcard progress");
   }
 });
 
