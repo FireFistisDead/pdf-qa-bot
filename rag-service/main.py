@@ -1571,10 +1571,13 @@ def _flush_dirty_sessions() -> None:
     so that new dirty marks made during the flush are picked up next cycle.
     """
     with sessions_lock:
-        if not _dirty_sessions:
+        if not _dirty_sessions and not _dirty_registry_sessions:
             return
         dirty = set(_dirty_sessions)
         _dirty_sessions.clear()
+        dirty_registry = set(_dirty_registry_sessions)
+        _dirty_registry_sessions.clear()
+
     for session_id in dirty:
         with sessions_lock:
             meta = sessions.get(session_id)
@@ -1582,45 +1585,37 @@ def _flush_dirty_sessions() -> None:
                 continue
             data = _snapshot_session_for_persistence(meta)
         _write_session_meta_file(session_id, data)
+
     if dirty:
         logger.debug("Flushed metadata for %d dirty session(s)", len(dirty))
-        registry_updates = {}
 
-        with sessions_lock:
-            dirty_registry = set(_dirty_registry_sessions)
-            _dirty_registry_sessions.clear()
+    registry_updates = {}
+    with sessions_lock:
+        for session_id in dirty_registry:
+            meta = sessions.get(session_id)
+            if not meta:
+                continue
+            registry_updates[session_id] = {
+                "created_at": meta.get("created_at"),
+                "last_accessed": meta.get("last_accessed"),
+                "expires_at": session_expires_at(
+                    meta.get("last_accessed", now_ts())
+                ),
+                "documents": list(meta.get("documents", [])),
+                "session_dir": meta.get("session_dir"),
+                "hashed_session_secret": meta.get("hashed_session_secret") or _hash_secret(meta.get("session_secret", "")),
+            }
 
-            for session_id in dirty_registry:
-                meta = sessions.get(session_id)
+    if registry_updates:
+        with session_registry_lock():
+            registry = read_session_registry_unlocked()
+            registry.update(registry_updates)
+            write_session_registry_unlocked(registry)
 
-                if not meta:
-                    continue
-
-                registry_updates[session_id] = {
-                    "created_at": meta.get("created_at"),
-                    "last_accessed": meta.get("last_accessed"),
-                    "expires_at": session_expires_at(
-                        meta.get("last_accessed", now_ts())
-                    ),
-                    "documents": list(meta.get("documents", [])),
-                    "session_dir": meta.get("session_dir"),
-                    "hashed_session_secret": meta.get("hashed_session_secret") or _hash_secret(meta.get("session_secret", "")),
-                }
-
-        if registry_updates:
-
-            with session_registry_lock():
-
-                registry = read_session_registry_unlocked()
-
-                registry.update(registry_updates)
-
-                write_session_registry_unlocked(registry)
-
-            logger.debug(
-                "Flushed registry metadata for %d session(s)",
-                len(registry_updates),
-            )
+        logger.debug(
+            "Flushed registry metadata for %d session(s)",
+            len(registry_updates),
+        )
 
 
 def _background_flush_loop() -> None:
