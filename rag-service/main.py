@@ -3325,7 +3325,9 @@ async def process_pdf(
 
 
     with sessions_lock:
-        documents = list(sessions[session_id].get("documents", []))
+        session = sessions.get(session_id)
+        session_secret = session.get("session_secret") if session else None
+        documents = list(session.get("documents", [])) if session else []
     update_processing_progress(
         session_id,
         "Completed",
@@ -3334,7 +3336,7 @@ async def process_pdf(
     return {
         "message": "PDF processed successfully",
         "session_id": session_id,
-        "session_secret": sessions[session_id].get("session_secret"),
+        "session_secret": session_secret,
         "document": uploaded_document,
         "documents": documents,
     }
