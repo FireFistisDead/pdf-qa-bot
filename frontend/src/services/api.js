@@ -2,6 +2,8 @@ import axios from "axios";
 
 const API_BASE = process.env.REACT_APP_API_URL || "";
 
+axios.defaults.withCredentials = true;
+
 export const extractApiErrorMessage = (error, fallbackMessage) => {
   return (
     error?.response?.data?.detail ||
@@ -110,6 +112,7 @@ export const askQuestionStreamApi = async (question, sessionId, sessionSecret, m
   const response = await fetch(`${API_BASE}/ask/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    credentials: "include",
     body: JSON.stringify({ question, session_id: sessionId, session_secret: sessionSecret, mode }),
     signal,
   });
