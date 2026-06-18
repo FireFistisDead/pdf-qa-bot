@@ -1,5 +1,4 @@
-import React, { useState } from "react";
-import toast from "react-hot-toast";
+import React, { useRef, useState } from "react";
 
 import {
   Box,
@@ -7,51 +6,70 @@ import {
   Button,
   Paper,
   CircularProgress,
+  Chip,
+  Stack,
 } from "@mui/material";
 
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
+import PictureAsPdfIcon from "@mui/icons-material/PictureAsPdf";
+import CloseIcon from "@mui/icons-material/Close";
+
+const formatFileSize = (bytes) => {
+  if (!bytes) return "0 KB";
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(0)} KB`;
+  return `${(kb / 1024).toFixed(1)} MB`;
+};
 
 const UploadCard = ({ darkMode, onUpload, uploading }) => {
   const [files, setFiles] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
+  const dragCounter = useRef(0);
 
-const handleDragOver = (e) => {
-  e.preventDefault();
-  setIsDragging(true);
-};
+  const handleDragEnter = (e) => {
+    e.preventDefault();
+    dragCounter.current += 1;
+    setIsDragging(true);
+  };
 
-const handleDragLeave = () => {
-  setIsDragging(false);
-};
+  const handleDragOver = (e) => {
+    e.preventDefault();
+  };
 
-const isPdfFile = (file) =>
-  file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    dragCounter.current -= 1;
+    if (dragCounter.current <= 0) {
+      dragCounter.current = 0;
+      setIsDragging(false);
+    }
+  };
 
-const handleDrop = (e) => {
-  e.preventDefault();
-  setIsDragging(false);
-  const allDropped = Array.from(e.dataTransfer.files);
-  if (allDropped.length === 0) return;
-
-  const validFiles = allDropped.filter(isPdfFile);
-
-  if (validFiles.length === 0) {
-    toast.error("Only PDF files are allowed. Please drop a valid PDF document.");
-    return;
-  }
-
-  if (validFiles.length < allDropped.length) {
-    toast.error("Some files were skipped. Only PDF files are accepted.");
-  }
-
-  setFiles(validFiles);
-};
+  const handleDrop = (e) => {
+    e.preventDefault();
+    dragCounter.current = 0;
+    setIsDragging(false);
+    const droppedFiles = Array.from(e.dataTransfer.files).filter(
+      (file) => file.type === "application/pdf"
+    );
+    if (droppedFiles.length > 0) {
+      setFiles((prev) => [...prev, ...droppedFiles]);
+    }
+  };
 
   const hasSelectedFiles = files.length > 0;
 
   const handleFileChange = (e) => {
     const selectedFiles = Array.from(e.target.files || []);
-    setFiles(selectedFiles);
+    if (selectedFiles.length > 0) {
+      setFiles((prev) => [...prev, ...selectedFiles]);
+    }
+    // allow re-selecting the same file again later
+    e.target.value = "";
+  };
+
+  const removeFile = (index) => {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
   };
 
   const handleUpload = async () => {
@@ -70,9 +88,9 @@ const handleDrop = (e) => {
     <Paper
       elevation={0}
       sx={{
-        p: 4,
-        mb: 4,
-        borderRadius: "24px",
+        p: { xs: 2, sm: 3, md: 4 },
+        mb: { xs: 2.5, md: 3 },
+        borderRadius: { xs: "18px", md: "24px" },
 
         background: darkMode
           ? "linear-gradient(145deg, #111827, #0B1120)"
@@ -84,18 +102,25 @@ const handleDrop = (e) => {
       }}
     >
       <Box
+        onDragEnter={handleDragEnter}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         sx={{
           border: isDragging
-          ? "2px dashed rgba(139,92,246,0.75)"
-          : darkMode
-          ? "2px dashed rgba(255,255,255,0.12)"
-          : "2px dashed rgba(0,0,0,0.12)",
+            ? "2px dashed rgba(139,92,246,0.85)"
+            : darkMode
+            ? "2px dashed rgba(255,255,255,0.12)"
+            : "2px dashed rgba(0,0,0,0.12)",
 
           position: "relative",
           overflow: "hidden",
+
+          background: isDragging
+            ? darkMode
+              ? "rgba(139,92,246,0.07)"
+              : "rgba(139,92,246,0.04)"
+            : "transparent",
 
           "&:hover": {
             border: darkMode
@@ -105,24 +130,15 @@ const handleDrop = (e) => {
             boxShadow: darkMode
               ? "0 0 40px rgba(139,92,246,0.16)"
               : "0 0 30px rgba(139,92,246,0.10)",
-
-            background: darkMode
-              ? "rgba(139,92,246,0.03)"
-              : "rgba(139,92,246,0.02)",
-
-            transform: "translateY(-2px)",
           },
 
-          borderRadius: "20px",
+          borderRadius: "18px",
 
-          p: {
-            xs: 3,
-            md: 5,
-          },
+          p: { xs: 2.5, sm: 3, md: 4 },
 
           textAlign: "center",
 
-          transition: "all 0.35s cubic-bezier(0.4, 0, 0.2, 1)",
+          transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
         }}
       >
         <Box
@@ -131,39 +147,40 @@ const handleDrop = (e) => {
             alignItems: "center",
             justifyContent: "flex-start",
 
-            gap: 4,
+            gap: { xs: 2, sm: 3 },
 
-            flexWrap: {
-              xs: "wrap",
-              md: "nowrap",
-            },
+            flexDirection: { xs: "column", sm: "row" },
+            flexWrap: "nowrap",
 
-            px: 4,
-            py: 2,
+            textAlign: { xs: "center", sm: "left" },
           }}
         >
           <Box
             sx={{
-              width: "72px",
-              height: "72px",
-              borderRadius: "22px",
+              width: { xs: "56px", sm: "64px", md: "72px" },
+              height: { xs: "56px", sm: "64px", md: "72px" },
+              borderRadius: "20px",
+              flexShrink: 0,
 
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
 
               background: darkMode
-                ? "rgba(255,255,255,0.04)"
+                ? "rgba(139,92,246,0.10)"
                 : "rgba(124,77,255,0.08)",
 
               border: darkMode
                 ? "1px solid rgba(255,255,255,0.08)"
                 : "1px solid rgba(124,77,255,0.12)",
+
+              transition: "transform 0.3s ease",
+              transform: isDragging ? "scale(1.08)" : "scale(1)",
             }}
           >
             <CloudUploadIcon
               sx={{
-                fontSize: 38,
+                fontSize: { xs: 28, sm: 32, md: 36 },
                 color: "#8B5CF6",
               }}
             />
@@ -173,69 +190,57 @@ const handleDrop = (e) => {
             sx={{
               display: "flex",
               flexDirection: "column",
-
-              alignItems: {
-                xs: "center",
-                md: "flex-start",
-              },
-
-              textAlign: {
-                xs: "center",
-                md: "left",
-              },
+              alignItems: { xs: "center", sm: "flex-start" },
+              width: "100%",
+              minWidth: 0,
             }}
           >
             <Typography
-              variant="h5"
               sx={{
                 fontWeight: 700,
                 color: darkMode ? "#fff" : "#111",
-                mb: 0.5,
+                fontSize: { xs: "1.05rem", sm: "1.2rem", md: "1.35rem" },
+                mb: 0.4,
               }}
             >
-              Click to upload or drag and drop
+              Drop your PDF here, or browse
             </Typography>
 
             <Typography
-              variant="body1"
               sx={{
                 color: darkMode ? "#A1A1AA" : "#666",
-                mb: 3,
+                fontSize: { xs: "0.82rem", sm: "0.9rem" },
+                mb: 2.5,
               }}
             >
-              PDF documents up to 20MB
+              Supports a single file or multiple PDFs, up to 20MB each
             </Typography>
 
-            <Box
-              sx={{
-                display: "flex",
-                gap: 2,
-                flexWrap: "wrap",
-                alignItems: "center",
-              }}
+            <Stack
+              direction={{ xs: "column", sm: "row" }}
+              spacing={1.5}
+              sx={{ width: { xs: "100%", sm: "auto" } }}
             >
               <Button
-                variant="contained"
+                variant="outlined"
                 component="label"
                 sx={{
-                  background: "#8B5CF6",
-
-                  borderRadius: "14px",
-
-                  px: 4,
-                  py: 1.3,
-
+                  borderRadius: "12px",
+                  borderColor: darkMode
+                    ? "rgba(255,255,255,0.16)"
+                    : "rgba(0,0,0,0.14)",
+                  color: darkMode ? "#fff" : "#111",
+                  px: 3,
+                  py: 1.1,
                   textTransform: "none",
-                  fontWeight: 700,
-
-                  boxShadow: "0 10px 30px rgba(139,92,246,0.22)",
-
+                  fontWeight: 600,
+                  whiteSpace: "nowrap",
                   "&:hover": {
-                    background: "#7C4DFF",
-                    transform: "translateY(-1px)",
+                    borderColor: "#8B5CF6",
+                    background: darkMode
+                      ? "rgba(139,92,246,0.08)"
+                      : "rgba(139,92,246,0.05)",
                   },
-
-                  transition: "all 0.25s ease",
                 }}
               >
                 Choose PDFs
@@ -255,67 +260,82 @@ const handleDrop = (e) => {
                 sx={{
                   background: "#8B5CF6",
                   color: "#fff",
-
-                  borderRadius: "14px",
-
-                  px: 5,
-                  py: 1.3,
-
+                  borderRadius: "12px",
+                  px: 4,
+                  py: 1.1,
                   textTransform: "none",
                   fontWeight: 700,
-
-                  minWidth: "190px",
-
-                  boxShadow: "0 14px 34px rgba(139,92,246,0.32)",
-
+                  minWidth: "170px",
+                  whiteSpace: "nowrap",
+                  boxShadow: "0 12px 28px rgba(139,92,246,0.28)",
                   "&:hover": {
                     background: "#7C4DFF",
-                    transform: "translateY(-1px)",
                   },
-
                   "&.Mui-disabled": {
                     background: darkMode
                       ? "rgba(255,255,255,0.08)"
                       : "rgba(0,0,0,0.08)",
-
                     color: darkMode
                       ? "rgba(255,255,255,0.3)"
                       : "rgba(0,0,0,0.3)",
+                    boxShadow: "none",
                   },
-
-                  transition: "all 0.25s ease",
                 }}
               >
                 {uploading ? (
                   <>
-                    <CircularProgress
-                      size={20}
-                      sx={{
-                        color: "#fff",
-                        mr: 1,
-                      }}
-                    />
-                    Processing PDF...
+                    <CircularProgress size={18} sx={{ color: "#fff", mr: 1.2 }} />
+                    Uploading…
                   </>
                 ) : hasSelectedFiles && files.length > 1 ? (
-                  "Upload PDFs"
+                  `Upload ${files.length} PDFs`
                 ) : (
                   "Upload PDF"
                 )}
               </Button>
-            </Box>
+            </Stack>
 
             {hasSelectedFiles && (
-              <Typography
-                sx={{
-                  mt: 2,
-                  color: darkMode ? "#E5E7EB" : "#333",
-                  fontSize: "14px",
-                }}
+              <Stack
+                direction="row"
+                spacing={1}
+                useFlexGap
+                flexWrap="wrap"
+                sx={{ mt: 2.5, width: "100%", justifyContent: { xs: "center", sm: "flex-start" } }}
               >
-                Selected:{" "}
-                {files.map((selectedFile) => selectedFile.name).join(", ")}
-              </Typography>
+                {files.map((file, index) => (
+                  <Chip
+                    key={`${file.name}-${index}`}
+                    icon={
+                      <PictureAsPdfIcon
+                        sx={{ fontSize: 16, color: "#8B5CF6 !important" }}
+                      />
+                    }
+                    label={
+                      <Box component="span" sx={{ fontSize: "0.78rem" }}>
+                        {file.name}{" "}
+                        <Box
+                          component="span"
+                          sx={{ opacity: 0.6, fontSize: "0.7rem" }}
+                        >
+                          · {formatFileSize(file.size)}
+                        </Box>
+                      </Box>
+                    }
+                    onDelete={uploading ? undefined : () => removeFile(index)}
+                    deleteIcon={<CloseIcon sx={{ fontSize: 15 }} />}
+                    sx={{
+                      borderRadius: "10px",
+                      background: darkMode
+                        ? "rgba(255,255,255,0.06)"
+                        : "rgba(0,0,0,0.05)",
+                      color: darkMode ? "#E5E7EB" : "#333",
+                      maxWidth: { xs: "100%", sm: 280 },
+                      animation: "fadeSlideUp 0.25s ease",
+                    }}
+                  />
+                ))}
+              </Stack>
             )}
           </Box>
         </Box>

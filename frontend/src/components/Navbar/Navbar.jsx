@@ -6,56 +6,60 @@ import {
   IconButton,
   Box,
   Avatar,
+  Tooltip,
 } from "@mui/material";
 
 import LightModeIcon from "@mui/icons-material/LightMode";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
-import { useNavigate } from "react-router-dom";
-import { useAuth } from "../../contexts/AuthContext";
-import { supabase } from "../../services/supabaseClient";
-import logo from "./Nav_logo.png";
+import PictureAsPdfIcon from "@mui/icons-material/PictureAsPdf";
 
 const Navbar = ({ darkMode, setDarkMode }) => {
-  const navigate = useNavigate();
-  const { user } = useAuth();
   return (
     <AppBar
-      position="static"
+      position="sticky"
       elevation={0}
       sx={{
-        background: darkMode ? "#0B0B0F" : "#ffffff",
+        background: darkMode
+          ? "rgba(11,11,15,0.85)"
+          : "rgba(255,255,255,0.85)",
+        backdropFilter: "blur(14px)",
         borderBottom: darkMode
           ? "1px solid rgba(255,255,255,0.08)"
           : "1px solid rgba(0,0,0,0.08)",
-        px: 2,
-        py: 1,
+        top: 0,
+        zIndex: 1100,
       }}
     >
-      <Toolbar sx={{ display: "flex", justifyContent: "space-between" }}>
-        
-        <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
-          
-          <IconButton 
-            onClick={() => navigate('/')}
-            sx={{ p: 0 }}
-            aria-label="Go to home"
+      <Toolbar
+        sx={{
+          display: "flex",
+          justifyContent: "space-between",
+          minHeight: { xs: "64px", md: "72px" },
+          px: { xs: 1.5, sm: 2, md: 3 },
+        }}
+      >
+        <Box sx={{ display: "flex", alignItems: "center", gap: { xs: 1.25, sm: 2 }, minWidth: 0 }}>
+          <Avatar
+            sx={{
+              bgcolor: "#7C4DFF",
+              width: { xs: 38, sm: 44, md: 48 },
+              height: { xs: 38, sm: 44, md: 48 },
+              boxShadow: "0 8px 20px rgba(124,77,255,0.35)",
+              flexShrink: 0,
+            }}
           >
-            <Avatar
-              src={logo}
-              alt="Logo"
-              sx={{
-                width: 48,
-                height: 48,
-                bgcolor: "transparent",
-              }}
-            />
-          </IconButton>
+            <PictureAsPdfIcon sx={{ fontSize: { xs: 18, sm: 22, md: 24 } }} />
+          </Avatar>
 
-          <Box>
+          <Box sx={{ minWidth: 0 }}>
             <Typography
-              variant="h5"
+              variant="h6"
+              noWrap
               sx={{
-                fontWeight: 700,
+                fontWeight: 800,
+                fontSize: { xs: "1.05rem", sm: "1.25rem", md: "1.4rem" },
+                letterSpacing: "-0.3px",
+                lineHeight: 1.2,
                 color: darkMode ? "#fff" : "#111",
               }}
             >
@@ -64,104 +68,40 @@ const Navbar = ({ darkMode, setDarkMode }) => {
 
             <Typography
               variant="body2"
+              noWrap
               sx={{
+                display: { xs: "none", sm: "block" },
+                fontSize: "0.8rem",
                 color: darkMode ? "#A1A1AA" : "#666",
               }}
             >
-              AI-Powered Document Assistant
+              AI-powered document assistant
             </Typography>
           </Box>
         </Box>
 
-        <Box sx={{ display: "flex", gap: 2, alignItems: "center" }}>
-
-          {user ? (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <button
-                onClick={() => navigate('/dashboard')}
-                style={{
-                  padding: "8px 16px",
-                  borderRadius: "10px",
-                  border: "none",
-                  background: "#eee",
-                  color: "#333",
-                  cursor: "pointer",
-                  fontWeight: 600,
-                }}
-              >
-                Dashboard
-              </button>
-              <button 
-                onClick={() => supabase.auth.signOut()}
-                style={{
-                  background: '#7C4DFF',
-                  color: '#fff',
-                  border: 'none',
-                  borderRadius: '50%',
-                  width: '36px',
-                  height: '36px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontWeight: 'bold',
-                  fontFamily: 'monospace',
-                  cursor: 'pointer',
-                }}
-                title="Sign Out"
-                aria-label="Sign Out"
-              >
-                {user.email ? user.email.charAt(0).toUpperCase() : 'U'}
-              </button>
-            </div>
-          ) : (
-            <>
-              <button
-                onClick={() => navigate('/signin')}
-                style={{
-                  padding: "8px 16px",
-                  borderRadius: "10px",
-                  border: "none",
-                  cursor: "pointer",
-                  fontWeight: 600,
-                  background: 'transparent',
-                  color: darkMode ? "#fff" : "#111",
-                }}
-              >
-                Login
-              </button>
-
-              <button
-                onClick={() => navigate('/signup')}
-                style={{
-                  padding: "8px 16px",
-                  borderRadius: "10px",
-                  border: "none",
-                  background: "#7C4DFF",
-                  color: "#fff",
-                  cursor: "pointer",
-                  fontWeight: 600,
-                }}
-              >
-                Signup
-              </button>
-            </>
-          )}
-
+        <Tooltip title={darkMode ? "Switch to light mode" : "Switch to dark mode"}>
           <IconButton
             onClick={() => setDarkMode(!darkMode)}
-            aria-label="Toggle dark mode"
+            aria-label="Toggle color theme"
             sx={{
               color: darkMode ? "#fff" : "#111",
               border: darkMode
                 ? "1px solid rgba(255,255,255,0.1)"
                 : "1px solid rgba(0,0,0,0.1)",
               borderRadius: "12px",
+              width: { xs: 38, sm: 44 },
+              height: { xs: 38, sm: 44 },
+              flexShrink: 0,
             }}
           >
-            {darkMode ? <LightModeIcon /> : <DarkModeIcon />}
+            {darkMode ? (
+              <LightModeIcon sx={{ fontSize: { xs: 18, sm: 22 } }} />
+            ) : (
+              <DarkModeIcon sx={{ fontSize: { xs: 18, sm: 22 } }} />
+            )}
           </IconButton>
-
-        </Box>
+        </Tooltip>
       </Toolbar>
     </AppBar>
   );

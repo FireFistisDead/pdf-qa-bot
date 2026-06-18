@@ -1,12 +1,15 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Card, Button, Form, Spinner } from "react-bootstrap";
+import { Form, Spinner } from "react-bootstrap";
 import SmartToyIcon from "@mui/icons-material/SmartToy";
+import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+import SendIcon from "@mui/icons-material/Send";
+import { Tooltip } from "@mui/material";
 import toast from "react-hot-toast";
 
 import MessageBubble from "./MessageBubble";
 import ExportMenu from "./ExportMenu";
-import KnowledgeGapMap from "./KnowledgeGapMap";
-import { askQuestionApi, askQuestionStreamApi, extractApiErrorMessage, summarizePdfApi, mapKnowledgeGapsApi } from "../../services/api";
+import { askQuestionApi, askQuestionStreamApi, extractApiErrorMessage, summarizePdfApi } from "../../services/api";
 
 const MODE_OPTIONS = [
   { value: "default",  label: "Standard",  tooltip: "Balanced answers grounded in your document. Best for general-purpose reading." },
@@ -16,6 +19,50 @@ const MODE_OPTIONS = [
   { value: "concise",  label: "Concise",   tooltip: "1–2 sentence answer, 60-word maximum. Best for quick fact-checking." },
 ];
 
+const ToolbarButton = ({ darkMode, onClick, disabled, children, tone = "neutral", title }) => {
+  const tones = {
+    neutral: {
+      border: darkMode ? "1px solid rgba(255,255,255,0.14)" : "1px solid rgba(0,0,0,0.12)",
+      background: darkMode ? "rgba(255,255,255,0.04)" : "#fff",
+      color: darkMode ? "#E5E7EB" : "#374151",
+    },
+    brand: {
+      border: "1px solid rgba(139,92,246,0.35)",
+      background: darkMode ? "rgba(139,92,246,0.14)" : "rgba(139,92,246,0.08)",
+      color: "#8B5CF6",
+    },
+    danger: {
+      border: darkMode ? "1px solid rgba(239,68,68,0.3)" : "1px solid rgba(239,68,68,0.25)",
+      background: darkMode ? "rgba(239,68,68,0.08)" : "rgba(239,68,68,0.06)",
+      color: "#EF4444",
+    },
+  };
+  const t = tones[tone];
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "6px",
+        padding: "7px 12px",
+        borderRadius: "10px",
+        fontSize: "13px",
+        fontWeight: 600,
+        cursor: disabled ? "default" : "pointer",
+        opacity: disabled ? 0.45 : 1,
+        whiteSpace: "nowrap",
+        ...t,
+      }}
+    >
+      {children}
+    </button>
+  );
+};
+
 const ChatPanel = ({
   darkMode,
   currentChat,
@@ -23,27 +70,20 @@ const ChatPanel = ({
   currentPdfName,
   currentPdfSessionId,
   currentPdfSessionSecret,
-  currentDocumentId,
-  knowledgeGapResult,
-  onKnowledgeGapResult,
   onUpdateLastBotMessage,
   onAppendMessage,
   onOpenSource,
   handleClearChat,
-  savedMessageIds,
-  onToggleBookmark,
-  highlightedMessageId,
-  onRegisterMessageRef,
 }) => {
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
   const [summarizing, setSummarizing] = useState(false);
-  const [mappingGaps, setMappingGaps] = useState(false);
   const [mode, setMode] = useState(() => {
     const saved = localStorage.getItem("pdfqa_preferred_mode");
     return MODE_OPTIONS.some(opt => opt.value === saved) ? saved : "default";
   });
   const messagesEndRef = useRef(null);
+  const inputRef = useRef(null);
 
   const handleModeChange = (newMode) => {
     setMode(newMode);
@@ -55,54 +95,53 @@ const ChatPanel = ({
       behavior: "smooth",
     });
   }, [currentChat, asking]);
-const askQuestion = async (overrideQuestion = null) => {
-  const queryToAsk = typeof overrideQuestion === 'string' ? overrideQuestion : question;
-  if (!queryToAsk.trim()) {
-    toast.error("Please enter a question before submitting.");
-    return;
-  }
-  if (!selectedPdf || !currentPdfSessionId || !currentPdfSessionSecret) {
-    toast.error("Please upload and select a PDF document first.");
-    return;
-  }
 
-  const trimmedQuestion = queryToAsk.trim();
-  setAsking(true);
-  if (typeof overrideQuestion !== 'string') {
-    setQuestion("");
-  }
-  onAppendMessage({ role: "user", text: trimmedQuestion });
-  onAppendMessage({ role: "bot", text: "", question: trimmedQuestion, streaming: true, sources: [], mode });
-
-  try {
-    await askQuestionStreamApi(trimmedQuestion, currentPdfSessionId, currentPdfSessionSecret, mode, (partialText) => {
-      onUpdateLastBotMessage(partialText, true);
-    });
-    onUpdateLastBotMessage(null, false);
-  } catch (streamErr) {
-    console.warn("Streaming failed, falling back to /ask:", streamErr.message);
-    try {
-      const data = await askQuestionApi(trimmedQuestion, currentPdfSessionId, currentPdfSessionSecret, mode);
-      onUpdateLastBotMessage(data.answer, false, data.sources || [], data.mode);
-    } catch (e) {
-      let errorMessage = "Error getting answer. Please try again.";
-      if (e.code === "ECONNABORTED") {
-        errorMessage = "Request timed out. Please try a simpler question.";
-      } else if (!e.response) {
-        errorMessage = "Network error. Please check if the backend server is running.";
-      } else if (e.response?.status === 404) {
-        errorMessage = "Session not found. Please upload the PDF again.";
-      } else if (e.response?.status === 500) {
-        errorMessage = "Server error. Please try again later.";
-      } else {
-        errorMessage = extractApiErrorMessage(e, errorMessage);
-      }
-      toast.error(errorMessage);
-      onUpdateLastBotMessage(errorMessage, false);
+  const askQuestion = async () => {
+    if (!question.trim()) {
+      toast.error("Please enter a question before submitting.");
+      return;
     }
-  }
-  setAsking(false);
-};
+    if (!selectedPdf || !currentPdfSessionId || !currentPdfSessionSecret) {
+      toast.error("Please upload and select a PDF document first.");
+      return;
+    }
+
+    const trimmedQuestion = question;
+    setAsking(true);
+    setQuestion("");
+    onAppendMessage({ role: "user", text: trimmedQuestion });
+    onAppendMessage({ role: "bot", text: "", streaming: true, sources: [], mode });
+
+    try {
+      await askQuestionStreamApi(trimmedQuestion, currentPdfSessionId, currentPdfSessionSecret, mode, (partialText) => {
+        onUpdateLastBotMessage(partialText, true);
+      });
+      onUpdateLastBotMessage(null, false);
+    } catch (streamErr) {
+      console.warn("Streaming failed, falling back to /ask:", streamErr.message);
+      try {
+        const data = await askQuestionApi(trimmedQuestion, currentPdfSessionId, currentPdfSessionSecret, mode);
+        onUpdateLastBotMessage(data.answer, false, data.sources || [], data.mode);
+      } catch (e) {
+        let errorMessage = "Error getting answer. Please try again.";
+        if (e.code === "ECONNABORTED") {
+          errorMessage = "Request timed out. Please try a simpler question.";
+        } else if (!e.response) {
+          errorMessage = "Network error. Please check if the backend server is running.";
+        } else if (e.response?.status === 404) {
+          errorMessage = "Session not found. Please upload the PDF again.";
+        } else if (e.response?.status === 500) {
+          errorMessage = "Server error. Please try again later.";
+        } else {
+          errorMessage = extractApiErrorMessage(e, errorMessage);
+        }
+        toast.error(errorMessage);
+        onUpdateLastBotMessage(errorMessage, false);
+      }
+    }
+    setAsking(false);
+    inputRef.current?.focus();
+  };
 
   const summarizePDF = async () => {
     if (!selectedPdf || !currentPdfSessionId || !currentPdfSessionSecret) {
@@ -115,7 +154,7 @@ const askQuestion = async (overrideQuestion = null) => {
 
     try {
       const data = await summarizePdfApi(currentPdfName, currentPdfSessionId, currentPdfSessionSecret);
-      onAppendMessage({ role: "bot", text: data.summary, question: `Summarize ${currentPdfName || "document"}` });
+      onAppendMessage({ role: "bot", text: data.summary });
       toast.success("PDF summarized successfully!", {
         id: loadingToast,
       });
@@ -139,173 +178,177 @@ const askQuestion = async (overrideQuestion = null) => {
       toast.error(errorMessage, {
         id: loadingToast,
       });
-      onAppendMessage({ role: "bot", text: errorMessage, question: `Summarize ${currentPdfName || "document"}` });
+      onAppendMessage({ role: "bot", text: errorMessage });
     }
     setSummarizing(false);
   };
 
-  const mapKnowledgeGaps = async () => {
-    if (!selectedPdf || !currentPdfSessionId || !currentPdfSessionSecret) {
-      toast.error("Please upload and select a PDF document first.");
-      return;
-    }
-    setMappingGaps(true);
-    const loadingToast = toast.loading("Analysing knowledge prerequisites…");
-    try {
-      const data = await mapKnowledgeGapsApi(
-        currentPdfSessionId,
-        currentPdfSessionSecret,
-        currentDocumentId || null,
-      );
-      onKnowledgeGapResult?.(data);
-      toast.success("Knowledge gap map ready!", { id: loadingToast });
-    } catch (e) {
-      let errorMessage = "Error mapping knowledge gaps. Please try again.";
-      if (e.code === "ECONNABORTED") {
-        errorMessage = "Request timed out. Please try again.";
-      } else if (!e.response) {
-        errorMessage = "Network error. Please check if the backend is running.";
-      } else if (e.response?.status === 422) {
-        errorMessage = extractApiErrorMessage(e, errorMessage);
-      } else if (e.response?.status === 404) {
-        errorMessage = "Session not found. Please re-upload the PDF.";
-      } else {
-        errorMessage = extractApiErrorMessage(e, errorMessage);
-      }
-      toast.error(errorMessage, { id: loadingToast });
-    }
-    setMappingGaps(false);
-  };
+  const hasPdf = Boolean(selectedPdf);
 
   return (
-    <Card
-      className={`glass-card ${
-        darkMode ? "bg-dark text-light border-secondary" : ""
-      }`}
+    <div
+      className={`glass-card d-flex flex-column ${darkMode ? "bg-dark text-light border-secondary" : ""}`}
       style={{
         borderRadius: "24px",
-        minHeight: "650px",
+        minHeight: "560px",
+        height: "100%",
         border: darkMode
           ? "1px solid rgba(255,255,255,0.08)"
           : "1px solid rgba(0,0,0,0.08)",
+        padding: "20px",
       }}
     >
-      <Card.Body className="d-flex flex-column">
-        {/* HEADER */}
-        <div
-          className="d-flex justify-content-between align-items-center mb-4 pb-3"
-          style={{
-            borderBottom: darkMode
-              ? "1px solid rgba(255,255,255,0.06)"
-              : "1px solid rgba(0,0,0,0.06)",
-          }}
-        >
-          <div>
-            <div className="d-flex align-items-center gap-2">
-              <h5 className="mb-0">AI Assistant</h5>
+      {/* HEADER */}
+      <div
+        className="d-flex justify-content-between align-items-start mb-3 pb-3 gap-2"
+        style={{
+          borderBottom: darkMode
+            ? "1px solid rgba(255,255,255,0.06)"
+            : "1px solid rgba(0,0,0,0.06)",
+          flexWrap: "wrap",
+        }}
+      >
+        <div>
+          <div className="d-flex align-items-center gap-2">
+            <h6 className="mb-0" style={{ fontWeight: 700, fontSize: "15px" }}>AI Assistant</h6>
 
-              <div
-                style={{
-                  width: "8px",
-                  height: "8px",
-                  borderRadius: "50%",
-                  background: "#22C55E",
-                }}
-              />
-            </div>
-
-            <small
+            <span
               style={{
-                color: darkMode ? "#A1A1AA" : "#666",
+                width: "8px",
+                height: "8px",
+                borderRadius: "50%",
+                background: hasPdf ? "#22C55E" : "#9CA3AF",
+                boxShadow: hasPdf ? "0 0 0 3px rgba(34,197,94,0.18)" : "none",
               }}
-            >
-              Ready to assist with your document
-            </small>
+            />
           </div>
-          <div className="d-flex gap-2">
-            <Button
-              id="btn-summarize"
-              variant="warning"
-              size="sm"
-              onClick={summarizePDF}
-              disabled={summarizing || !selectedPdf}
-            >
-              {summarizing ? (
-                <Spinner animation="border" size="sm" />
-              ) : (
-                "Summarize"
-              )}
-            </Button>
 
-            <Button
-              id="btn-knowledge-gaps"
-              variant="outline-info"
-              size="sm"
-              onClick={mapKnowledgeGaps}
-              disabled={mappingGaps || !selectedPdf}
-              title={`Map prerequisite concepts${currentPdfName ? ` in ${currentPdfName}` : ""}`}
-              style={{ whiteSpace: "nowrap" }}
-            >
-              {mappingGaps ? (
-                <><Spinner animation="border" size="sm" /> Analysing…</>
-              ) : knowledgeGapResult ? (
-                "🔄 Re-run Gap Map"
-              ) : (
-                "📚 Map Knowledge Gaps"
-              )}
-            </Button>
-
-            <ExportMenu currentChat={currentChat} selectedPdfName={currentPdfName} />
-            <Button
-            variant="danger"
-            size="sm"
-            onClick={handleClearChat}>
-            Clear Chat
-            </Button>
-          </div>
+          <small
+            className="d-none d-sm-inline"
+            style={{
+              color: darkMode ? "#A1A1AA" : "#666",
+              fontSize: "12px",
+            }}
+          >
+            {hasPdf ? "Ready to assist with your document" : "Waiting for a document"}
+          </small>
         </div>
 
-        {/* KNOWLEDGE GAP MAP — rendered above chat, not as a chat message */}
-        {knowledgeGapResult && (
-          <KnowledgeGapMap
-            result={knowledgeGapResult}
+        <div className="d-flex gap-2 flex-wrap">
+          <ToolbarButton
             darkMode={darkMode}
-            onOpenSource={onOpenSource}
-            onDismiss={() => onKnowledgeGapResult?.(null)}
-          />
-        )}
+            tone="brand"
+            title="Generate a summary of this document"
+            onClick={summarizePDF}
+            disabled={summarizing || !selectedPdf}
+          >
+            {summarizing ? (
+              <Spinner animation="border" size="sm" style={{ width: 13, height: 13 }} />
+            ) : (
+              <AutoAwesomeIcon sx={{ fontSize: 15 }} />
+            )}
+            Summarize
+          </ToolbarButton>
 
-        {/* CHAT AREA */}
-        <div
-          style={{
-            flex: 1,
-            overflowY: "auto",
-            marginBottom: 20,
-            paddingRight: "6px",
-          }}
-        >
-          {currentChat.length > 0 ? (
-            <>
-              <div className="d-flex justify-content-start mb-4">
+          <ExportMenu currentChat={currentChat} selectedPdfName={currentPdfName} />
+
+          <ToolbarButton
+            darkMode={darkMode}
+            tone="danger"
+            title="Clear this conversation"
+            onClick={handleClearChat}
+            disabled={!currentChat || currentChat.length === 0}
+          >
+            <DeleteOutlineIcon sx={{ fontSize: 15 }} />
+            <span className="d-none d-sm-inline">Clear</span>
+          </ToolbarButton>
+        </div>
+      </div>
+
+      {/* CHAT AREA */}
+      <div
+        className="styled-scroll"
+        style={{
+          flex: 1,
+          overflowY: "auto",
+          marginBottom: 16,
+          paddingRight: "4px",
+        }}
+      >
+        {currentChat.length > 0 ? (
+          <>
+            <div className="d-flex justify-content-start mb-4 chat-message">
+              <div
+                className={`p-3 ${darkMode ? "text-light" : "text-dark"}`}
+                style={{
+                  maxWidth: "85%",
+                  borderRadius: "20px 20px 20px 6px",
+
+                  background: darkMode
+                    ? "rgba(255,255,255,0.05)"
+                    : "#F8FAFC",
+
+                  border: darkMode
+                    ? "1px solid rgba(255,255,255,0.06)"
+                    : "1px solid rgba(0,0,0,0.06)",
+
+                  lineHeight: 1.7,
+                  fontSize: "14.5px",
+                }}
+              >
+                <div className="d-flex align-items-center gap-2 mb-2">
+                  <SmartToyIcon
+                    sx={{
+                      fontSize: 19,
+                      color: "#8B5CF6",
+                    }}
+                  />
+
+                  <strong>PDF Intelligence</strong>
+                </div>
+
+                <div>
+                  Hi! I am your document assistant.
+                  <br />
+                  <br />
+                  Upload a PDF and ask me anything about it. I can:
+                  <ul style={{ marginTop: "10px", marginBottom: 0, paddingLeft: "20px" }}>
+                    <li>Summarize complex sections</li>
+                    <li>Find important information</li>
+                    <li>Explain technical concepts</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+            {currentChat.map((msg, i) => (
+              <MessageBubble
+                key={i}
+                msg={msg}
+                darkMode={darkMode}
+                onOpenSource={onOpenSource}
+              />
+            ))}
+
+            {asking && (
+              <div className="d-flex justify-content-start mb-3 chat-message">
                 <div
                   className={`p-3 ${darkMode ? "text-light" : "text-dark"}`}
                   style={{
-                    maxWidth: "85%",
+                    maxWidth: "220px",
                     borderRadius: "20px 20px 20px 6px",
 
                     background: darkMode
-                      ? "rgba(255,255,255,0.05)"
-                      : "#F8FAFC",
+                      ? "rgba(255,255,255,0.06)"
+                      : "#F3F4F6",
 
                     border: darkMode
                       ? "1px solid rgba(255,255,255,0.06)"
                       : "1px solid rgba(0,0,0,0.06)",
 
-                    lineHeight: 1.8,
-                    fontSize: "15px",
+                    backdropFilter: "blur(12px)",
                   }}
                 >
-                  <div className="d-flex align-items-center gap-2 mb-2">
+                  <div className="d-flex align-items-center gap-2">
                     <SmartToyIcon
                       sx={{
                         fontSize: 20,
@@ -313,149 +356,90 @@ const askQuestion = async (overrideQuestion = null) => {
                       }}
                     />
 
-                    <strong>PDF Intelligence</strong>
-                  </div>
+                    <div className="d-flex align-items-center gap-1">
+                      <span className="typing-dot"></span>
+                      <span className="typing-dot"></span>
+                      <span className="typing-dot"></span>
+                    </div>
 
-                  <div>
-                    Hi! I am your document assistant.
-                    <br />
-                    <br />
-                    Upload a PDF and ask me anything about it. I can:
-                    <ul style={{ marginTop: "10px" }}>
-                      <li>Summarize complex sections</li>
-                      <li>Find important information</li>
-                      <li>Explain technical concepts</li>
-                    </ul>
+                    <span
+                      style={{
+                        fontSize: "13px",
+                        opacity: 0.85,
+                      }}
+                    >
+                      Thinking…
+                    </span>
                   </div>
                 </div>
               </div>
-              {currentChat.map((msg, i) => {
-                const messageId = msg.id || `legacy-message-${i}`;
-                const messageWithId = { ...msg, id: messageId };
-
-                return (
-                  <MessageBubble
-                    key={messageId}
-                    msg={messageWithId}
-                    darkMode={darkMode}
-                    onOpenSource={onOpenSource}
-                    isBookmarked={savedMessageIds?.has(messageId)}
-                    onToggleBookmark={onToggleBookmark}
-                    highlighted={highlightedMessageId === messageId}
-                    registerMessageRef={(node) => onRegisterMessageRef?.(messageId, node)}
-                    onOptionClick={(opt) => askQuestion(opt)}
-                  />
-                );
-              })}
-
-              {asking && (
-                <div className="d-flex justify-content-start mb-3 chat-message">
-                  <div
-                    className={`p-3 ${darkMode ? "text-light" : "text-dark"}`}
-                    style={{
-                      maxWidth: "220px",
-                      borderRadius: "20px 20px 20px 6px",
-
-                      background: darkMode
-                        ? "rgba(255,255,255,0.06)"
-                        : "#F3F4F6",
-
-                      border: darkMode
-                        ? "1px solid rgba(255,255,255,0.06)"
-                        : "1px solid rgba(0,0,0,0.06)",
-
-                      backdropFilter: "blur(12px)",
-                    }}
-                  >
-                    <div className="d-flex align-items-center gap-2">
-                      <SmartToyIcon
-                        sx={{
-                          fontSize: 20,
-                          color: "#8B5CF6",
-                        }}
-                      />
-
-                      <div className="d-flex align-items-center gap-1">
-                        <span className="typing-dot"></span>
-                        <span className="typing-dot"></span>
-                        <span className="typing-dot"></span>
-                      </div>
-
-                      <span
-                        style={{
-                          fontSize: "14px",
-                          opacity: 0.85,
-                        }}
-                      >
-                        AI is analyzing document...
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </>
-          ) : (
+            )}
+          </>
+        ) : (
+          <div
+            className="d-flex flex-column justify-content-center align-items-center text-center"
+            style={{
+              minHeight: "380px",
+              padding: "24px 16px",
+            }}
+          >
             <div
-              className="d-flex flex-column justify-content-center align-items-center text-center"
               style={{
-                minHeight: "520px",
-                padding: "40px",
+                width: "68px",
+                height: "68px",
+                borderRadius: "20px",
+                background: darkMode
+                  ? "rgba(124,77,255,0.12)"
+                  : "rgba(124,77,255,0.08)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                marginBottom: "20px",
               }}
             >
+              <SmartToyIcon
+                sx={{
+                  fontSize: 36,
+                  color: "#8B5CF6",
+                }}
+              />
+            </div>
+
+            <h5
+              style={{
+                fontWeight: 700,
+                marginBottom: "10px",
+                fontSize: "1.3rem",
+                letterSpacing: "-0.3px",
+              }}
+            >
+              Your AI document assistant
+            </h5>
+
+            <p
+              style={{
+                maxWidth: "320px",
+                color: darkMode ? "#A1A1AA" : "#666",
+                lineHeight: 1.6,
+                fontSize: "14px",
+                marginBottom: 0,
+              }}
+            >
+              Upload a document and ask intelligent questions about its
+              contents. Generate summaries, explore insights, and interact
+              naturally with your PDF files.
+            </p>
+
+            {!hasPdf && (
               <div
                 style={{
-                  width: "88px",
-                  height: "88px",
-                  borderRadius: "24px",
-                  background: darkMode
-                    ? "rgba(124,77,255,0.12)"
-                    : "rgba(124,77,255,0.08)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  marginBottom: "24px",
-                }}
-              >
-                <SmartToyIcon
-                  sx={{
-                    fontSize: 48,
-                    color: "#8B5CF6",
-                  }}
-                />
-              </div>
-
-              <h3
-                style={{
-                  fontWeight: 700,
-                  marginBottom: "12px",
-                  fontSize: "38px",
-                  letterSpacing: "-0.5px",
-                }}
-              >
-                Your AI Document Assistant
-              </h3>
-
-              <p
-                style={{
-                  maxWidth: "360px",
-                  color: darkMode ? "#A1A1AA" : "#666",
-                  lineHeight: 1.7,
-                  marginBottom: 0,
-                }}
-              >
-                Upload a document and ask intelligent questions about its
-                contents. Generate summaries, explore insights, and interact
-                naturally with your PDF files.
-              </p>
-              <div
-                style={{
-                  marginTop: "28px",
+                  marginTop: "22px",
                   width: "100%",
-                  maxWidth: "520px",
+                  maxWidth: "440px",
 
-                  padding: "18px 20px",
+                  padding: "14px 16px",
 
-                  borderRadius: "22px",
+                  borderRadius: "16px",
 
                   background: darkMode
                     ? "rgba(245,158,11,0.12)"
@@ -471,8 +455,9 @@ const askQuestion = async (overrideQuestion = null) => {
                 <div
                   style={{
                     fontWeight: 700,
-                    marginBottom: "4px",
+                    marginBottom: "3px",
                     color: "#F59E0B",
+                    fontSize: "13px",
                   }}
                 >
                   Waiting for document
@@ -480,29 +465,30 @@ const askQuestion = async (overrideQuestion = null) => {
 
                 <div
                   style={{
-                    fontSize: "14px",
+                    fontSize: "13px",
                     color: darkMode ? "#D1D5DB" : "#92400E",
-                    lineHeight: 1.6,
+                    lineHeight: 1.5,
                   }}
                 >
-                  Please upload a PDF document first to begin the conversation.
+                  Upload a PDF above to begin the conversation.
                 </div>
               </div>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        )}
         <div ref={messagesEndRef} />
-        {/* MODE SELECTOR */}
-        <div style={{ marginBottom: "10px" }}>
-          <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
-            {MODE_OPTIONS.map((opt) => (
+      </div>
+
+      {/* MODE SELECTOR */}
+      <div style={{ marginBottom: "10px" }}>
+        <div className="styled-scroll" style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+          {MODE_OPTIONS.map((opt) => (
+            <Tooltip key={opt.value} title={opt.tooltip} arrow placement="top">
               <button
-                key={opt.value}
                 id={`mode-btn-${opt.value}`}
-                title={opt.tooltip}
                 onClick={() => handleModeChange(opt.value)}
                 style={{
-                  padding: "4px 12px",
+                  padding: "5px 13px",
                   borderRadius: "20px",
                   border: mode === opt.value
                     ? "1.5px solid #8B5CF6"
@@ -514,95 +500,101 @@ const askQuestion = async (overrideQuestion = null) => {
                     ? "#8B5CF6"
                     : darkMode ? "#A1A1AA" : "#666",
                   fontSize: "12px",
-                  fontWeight: mode === opt.value ? 600 : 400,
+                  fontWeight: mode === opt.value ? 600 : 500,
                   cursor: "pointer",
-                  transition: "all 0.15s ease",
+                  flexShrink: 0,
                 }}
               >
                 {opt.label}
               </button>
-            ))}
-          </div>
-          <div style={{ fontSize: "11px", color: darkMode ? "#6B7280" : "#9CA3AF", marginTop: "4px" }}>
-            {MODE_OPTIONS.find(o => o.value === mode)?.tooltip}
-          </div>
+            </Tooltip>
+          ))}
         </div>
-        {/* INPUT */}
-        <div
+      </div>
+
+      {/* INPUT */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "10px",
+
+          padding: "8px 8px 8px 16px",
+
+          borderRadius: "16px",
+
+          background: darkMode
+            ? "rgba(255,255,255,0.07)"
+            : "#F8FAFC",
+
+          border: darkMode
+            ? "1px solid rgba(255,255,255,0.08)"
+            : "1px solid rgba(0,0,0,0.06)",
+        }}
+      >
+        <Form.Control
+          ref={inputRef}
+          className={darkMode ? "custom-chat-input" : "light-placeholder"}
+          type="text"
+          placeholder={hasPdf ? "Ask a question about your PDF…" : "Upload a PDF to start asking questions"}
+          value={question}
+          onChange={(e) => setQuestion(e.target.value)}
+          disabled={asking || !hasPdf}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              askQuestion();
+            }
+          }}
           style={{
+            border: "none",
+            background: "transparent",
+            boxShadow: "none",
+            color: darkMode ? "#fff" : "#111",
+            caretColor: darkMode ? "#fff" : "#111",
+            fontSize: "14.5px",
+            opacity: 1,
+            WebkitTextFillColor: darkMode ? "#fff" : "#111",
+            padding: "10px 0",
+          }}
+        />
+
+        <button
+          type="button"
+          aria-label="Send question"
+          onClick={askQuestion}
+          disabled={asking || !question.trim() || !selectedPdf}
+          style={{
+            width: "42px",
+            height: "42px",
+            borderRadius: "12px",
+            border: "none",
+            flexShrink: 0,
+
+            background: (asking || !question.trim() || !selectedPdf)
+              ? darkMode ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)"
+              : "linear-gradient(135deg, #8B5CF6, #7C4DFF)",
+
             display: "flex",
             alignItems: "center",
-            gap: "12px",
+            justifyContent: "center",
 
-            padding: "10px 12px",
+            cursor: (asking || !question.trim() || !selectedPdf) ? "default" : "pointer",
 
-            borderRadius: "18px",
-
-            background: darkMode
-              ? "rgba(255,255,255,0.07)"
-              : "#F8FAFC",
-
-            border: darkMode
-              ? "1px solid rgba(255,255,255,0.08)"
-              : "1px solid rgba(0,0,0,0.06)",
-
-            backdropFilter: "blur(12px)",
+            boxShadow: (asking || !question.trim() || !selectedPdf)
+              ? "none"
+              : "0 8px 20px rgba(124,77,255,0.3)",
           }}
         >
-          <Form.Control
-            className={darkMode ? "custom-chat-input" : "light-placeholder"}
-            type="text"
-            placeholder="Ask a question about your PDF..."
-            value={question}
-            onChange={(e) => setQuestion(e.target.value)}
-            disabled={asking}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                askQuestion();
-              }
-            }}
-            style={{
-              border: "none",
-              background: "transparent",
-              boxShadow: "none",
-              color: darkMode ? "#fff" : "#111",
-              caretColor: darkMode ? "#fff" : "#111",
-              fontSize: "15px",
-              opacity: 1,
-              WebkitTextFillColor: darkMode ? "#fff" : "#111",
-            }}
-          />
-
-          <Button
-            variant="primary"
-            onClick={askQuestion}
-            disabled={asking || !question.trim() || !selectedPdf}
-            style={{
-              width: "48px",
-              height: "48px",
-              borderRadius: "14px",
-              border: "none",
-
-              background: "linear-gradient(135deg, #8B5CF6, #7C4DFF)",
-
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-
-              flexShrink: 0,
-
-              boxShadow: "0 8px 24px rgba(124,77,255,0.25)",
-            }}
-          >
-            {asking ? <Spinner animation="border" size="sm" /> : "➜"}
-          </Button>
-        </div>
-      </Card.Body>
-    </Card>
+          {asking ? (
+            <Spinner animation="border" size="sm" style={{ color: "#fff", width: 16, height: 16 }} />
+          ) : (
+            <SendIcon sx={{ fontSize: 18, color: "#fff" }} />
+          )}
+        </button>
+      </div>
+    </div>
   );
 };
 
 export default ChatPanel;
-
-// Accessibility improvements applied

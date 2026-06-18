@@ -1,42 +1,110 @@
-import React from "react";
-import { Button } from "react-bootstrap";
+import React, { useEffect, useRef, useState } from "react";
+import Papa from "papaparse";
 import { saveAs } from "file-saver";
+import FileDownloadOutlinedIcon from "@mui/icons-material/FileDownloadOutlined";
 
 const ExportMenu = ({ currentChat, selectedPdfName }) => {
-  const exportChatTxt = () => {
-    if (!selectedPdfName || !currentChat || currentChat.length === 0) return;
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef(null);
+  const disabled = !selectedPdfName || !currentChat || currentChat.length === 0;
 
-    const now = new Date();
-    const yyyy = now.getFullYear();
-    const mm = String(now.getMonth() + 1).padStart(2, '0');
-    const dd = String(now.getDate()).padStart(2, '0');
-    const hh = String(now.getHours()).padStart(2, '0');
-    const min = String(now.getMinutes()).padStart(2, '0');
-    const formattedTimestamp = `${yyyy}-${mm}-${dd} ${hh}:${min}`;
-
-    let content = `PDF Q&A Bot — Chat Export\nPDF: ${selectedPdfName}\nExported: ${formattedTimestamp}\n\n---\n\n`;
-
-    currentChat.forEach((msg) => {
-      if (msg.role === "user") {
-        content += `Q: ${msg.text}\n`;
-      } else if (msg.role === "bot") {
-        content += `A: ${msg.text}\n\n`;
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) {
+        setOpen(false);
       }
-    });
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
-    const blob = new Blob([content], { type: "text/plain" });
-    saveAs(blob, `chat-export-${selectedPdfName}.txt`);
+  const exportChat = (type) => {
+    if (disabled) return;
+
+    if (type === "csv") {
+      const csv = Papa.unparse(currentChat);
+      const blob = new Blob([csv], { type: "text/csv" });
+      saveAs(blob, `${selectedPdfName}-chat.csv`);
+    } else if (type === "pdf") {
+      const text = currentChat.map((msg) => `${msg.role}: ${msg.text}`).join("\n\n");
+      const blob = new Blob([text], { type: "application/pdf" });
+      saveAs(blob, `${selectedPdfName}-chat.pdf`);
+    }
+    setOpen(false);
   };
 
   return (
-    <Button
-      variant="outline-secondary"
-      size="sm"
-      onClick={exportChatTxt}
-      disabled={!selectedPdfName || !currentChat || currentChat.length === 0}
-    >
-      📥 Export Chat
-    </Button>
+    <div ref={menuRef} style={{ position: "relative" }}>
+      <button
+        type="button"
+        title="Export this conversation"
+        onClick={() => !disabled && setOpen((o) => !o)}
+        disabled={disabled}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: "6px",
+          padding: "7px 12px",
+          borderRadius: "10px",
+          fontSize: "13px",
+          fontWeight: 600,
+          border: "1px solid rgba(107,114,128,0.35)",
+          background: "transparent",
+          color: "#6B7280",
+          cursor: disabled ? "default" : "pointer",
+          opacity: disabled ? 0.45 : 1,
+          whiteSpace: "nowrap",
+        }}
+      >
+        <FileDownloadOutlinedIcon sx={{ fontSize: 15 }} />
+        <span className="d-none d-sm-inline">Export</span>
+      </button>
+
+      {open && (
+        <div
+          style={{
+            position: "absolute",
+            top: "calc(100% + 6px)",
+            right: 0,
+            minWidth: "150px",
+            borderRadius: "12px",
+            overflow: "hidden",
+            background: "#1f2430",
+            border: "1px solid rgba(255,255,255,0.1)",
+            boxShadow: "0 16px 36px rgba(0,0,0,0.35)",
+            zIndex: 20,
+            animation: "fadeSlideUp 0.18s ease",
+          }}
+        >
+          {[
+            { type: "pdf", label: "As text file" },
+            { type: "csv", label: "As CSV" },
+          ].map((opt) => (
+            <button
+              key={opt.type}
+              type="button"
+              onClick={() => exportChat(opt.type)}
+              style={{
+                display: "block",
+                width: "100%",
+                textAlign: "left",
+                padding: "10px 14px",
+                fontSize: "13px",
+                fontWeight: 500,
+                color: "#E5E7EB",
+                background: "transparent",
+                border: "none",
+                cursor: "pointer",
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(139,92,246,0.15)")}
+              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 };
 

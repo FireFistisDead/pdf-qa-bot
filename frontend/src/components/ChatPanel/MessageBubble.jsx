@@ -1,46 +1,6 @@
 import React from "react";
-
 import ReactMarkdown from "react-markdown";
-import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
-import BookmarkBorderIcon from "@mui/icons-material/BookmarkBorder";
-import BookmarkIcon from "@mui/icons-material/Bookmark";
-import ContentCopyIcon from "@mui/icons-material/ContentCopy";
-import CheckIcon from "@mui/icons-material/Check";
-
-// Strict allowlist for AI-generated markdown content.
-//
-// ReactMarkdown converts markdown to a virtual DOM; rehype-sanitize then
-// walks that DOM and strips anything not in this schema before React renders
-// it. This is the defence-in-depth layer that prevents a crafted LLM response
-// from injecting <script>, <iframe>, event handlers, or javascript: URIs —
-// even if a future change to the AI prompt or model allows them through.
-//
-// Rules:
-//   - All elements in the default schema are kept (headings, lists, code, etc.)
-//   - `href` values on <a> are restricted to http/https/mailto — no javascript:.
-//   - Event handler attributes (onclick, onerror, …) are stripped globally.
-//   - Protocol-relative links (//) are blocked at the attribute level.
-const MARKDOWN_SANITIZE_SCHEMA = {
-  ...defaultSchema,
-  attributes: {
-    ...defaultSchema.attributes,
-    // Override the default link allowlist: strip javascript: and data: URIs.
-    a: [
-      ...(defaultSchema.attributes?.a ?? []).filter((attr) => attr !== "href"),
-      ["href", /^https?:\/\//i, /^mailto:/i],
-    ],
-    // Disallow all event handlers on every element via the wildcard "*" key.
-    // defaultSchema already omits them, but this makes the policy explicit and
-    // survives future schema updates from the rehype-sanitize package.
-    "*": [
-      ...(defaultSchema.attributes?.["*"] ?? []).filter(
-        (attr) =>
-          typeof attr !== "string" ||
-          !attr.startsWith("on"),
-      ),
-    ],
-  },
-};
+import MenuBookIcon from "@mui/icons-material/MenuBook";
 
 const MODE_BADGE = {
   default:  { label: "Standard",  bg: "rgba(107,114,128,0.15)", color: "#6B7280" },
@@ -50,72 +10,13 @@ const MODE_BADGE = {
   concise:  { label: "Concise",   bg: "rgba(249,115,22,0.15)", color: "#F97316" },
 };
 
-const MessageBubble = ({
-  msg,
-  darkMode,
-  onOpenSource,
-  isBookmarked = false,
-  onToggleBookmark,
-  highlighted = false,
-  registerMessageRef,
-  onOptionClick,
-}) => {
-  const [copied, setCopied] = React.useState(false);
-  const copyTimeoutRef = React.useRef(null);
-
-  React.useEffect(() => {
-    return () => {
-      if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
-    };
-  }, []);
-
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(msg.text);
-      setCopied(true);
-      if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
-      copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
-    } catch (err) {
-      console.error("Failed to copy text: ", err);
-      setCopied(false);
-    }
-  };
-
+const MessageBubble = ({ msg, darkMode, onOpenSource }) => {
+  const getSourceText = (source) => source.preview || source.text;
   const getSourceLabel = (source) => source.document || "Source Document";
   const hasOpenablePage = (source) => Boolean(source.page && source.document);
 
-  let mainText = msg.text;
-  let followup = null;
-  
-  if (msg.role === "bot" && typeof msg.text === "string") {
-    const followupMatch = msg.text.match(/<FOLLOWUP>([\s\S]*?)<\/FOLLOWUP>/i);
-    if (followupMatch) {
-      mainText = msg.text.replace(followupMatch[0], "").trim();
-      const followupContent = followupMatch[1].trim();
-      
-      const lines = followupContent.split('\n').map(l => l.trim()).filter(l => l);
-      let question = "";
-      const options = [];
-      
-      for (const line of lines) {
-        if (line.toLowerCase().startsWith("question:")) {
-          question = line.substring(9).trim();
-        } else if (line.startsWith("- ")) {
-          options.push(line.substring(2).trim());
-        } else if (line.startsWith("-")) {
-          options.push(line.substring(1).trim());
-        }
-      }
-      
-      if (question || options.length > 0) {
-        followup = { question, options };
-      }
-    }
-  }
-
   return (
     <div
-      ref={registerMessageRef}
       className={`d-flex ${
         msg.role === "user" ? "justify-content-end" : "justify-content-start"
       } mb-3 chat-message`}
@@ -148,20 +49,17 @@ const MessageBubble = ({
               : "none",
 
           boxShadow:
-            msg.role === "user" ? "0 8px 24px rgba(124,77,255,0.25)" : "none",
+            msg.role === "user" ? "0 8px 20px rgba(124,77,255,0.22)" : "none",
 
-          backdropFilter: "blur(12px)",
-          lineHeight: 1.7,
-          fontSize: "15px",
-          padding: "14px 16px",
-          outline: highlighted ? "2px solid #8B5CF6" : "none",
-          outlineOffset: highlighted ? "3px" : "0",
-          transition: "outline-color 0.2s ease, outline-offset 0.2s ease",
+          lineHeight: 1.65,
+          fontSize: "14.5px",
+          padding: "12px 15px",
+          wordBreak: "break-word",
         }}
       >
         {msg.role === "bot" ? (
           <span>
-            <ReactMarkdown rehypePlugins={[[rehypeSanitize, MARKDOWN_SANITIZE_SCHEMA]]}>{mainText}</ReactMarkdown>
+            <ReactMarkdown>{msg.text}</ReactMarkdown>
             {msg.streaming && (
               <span style={{
                 display: "inline-block", width: "2px", height: "1em",
@@ -173,58 +71,6 @@ const MessageBubble = ({
           </span>
         ) : (
           <span>{msg.text}</span>
-        )}
-
-        {followup && !msg.streaming && (
-          <div style={{
-            marginTop: "16px",
-            padding: "12px",
-            borderRadius: "12px",
-            background: darkMode ? "rgba(139, 92, 246, 0.1)" : "rgba(139, 92, 246, 0.05)",
-            border: darkMode ? "1px solid rgba(139, 92, 246, 0.2)" : "1px solid rgba(139, 92, 246, 0.15)",
-          }}>
-            {followup.question && (
-              <div style={{
-                fontWeight: 600,
-                color: darkMode ? "#E5E7EB" : "#1F2937",
-                marginBottom: "10px",
-                fontSize: "14px"
-              }}>
-                {followup.question}
-              </div>
-            )}
-            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-              {followup.options.map((opt, idx) => (
-                <button
-                  key={idx}
-                  onClick={() => onOptionClick?.(opt)}
-                  style={{
-                    textAlign: "left",
-                    padding: "8px 12px",
-                    borderRadius: "8px",
-                    background: darkMode ? "rgba(255,255,255,0.05)" : "#FFFFFF",
-                    border: darkMode ? "1px solid rgba(255,255,255,0.1)" : "1px solid rgba(0,0,0,0.08)",
-                    color: darkMode ? "#D1D5DB" : "#4B5563",
-                    fontSize: "13px",
-                    cursor: "pointer",
-                    transition: "all 0.2s ease"
-                  }}
-                  onMouseOver={(e) => {
-                    e.currentTarget.style.background = darkMode ? "rgba(139, 92, 246, 0.2)" : "rgba(139, 92, 246, 0.1)";
-                    e.currentTarget.style.borderColor = "#8B5CF6";
-                    e.currentTarget.style.color = darkMode ? "#FFF" : "#111";
-                  }}
-                  onMouseOut={(e) => {
-                    e.currentTarget.style.background = darkMode ? "rgba(255,255,255,0.05)" : "#FFFFFF";
-                    e.currentTarget.style.borderColor = darkMode ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.08)";
-                    e.currentTarget.style.color = darkMode ? "#D1D5DB" : "#4B5563";
-                  }}
-                >
-                  {opt}
-                </button>
-              ))}
-            </div>
-          </div>
         )}
 
         {msg.role === "bot" && msg.mode && msg.mode !== "default" && (() => {
@@ -246,147 +92,103 @@ const MessageBubble = ({
           );
         })()}
 
-        {msg.role === "bot" && !msg.streaming && (
+        {msg.role === "bot" && msg.sources?.length > 0 && (
           <div
             style={{
               marginTop: "12px",
-              display: "flex",
-              justifyContent: "flex-start",
-              gap: "8px",
+              borderTop: darkMode
+                ? "1px solid rgba(255,255,255,0.08)"
+                : "1px solid rgba(0,0,0,0.08)",
+              paddingTop: "10px",
             }}
           >
-            <button
-              type="button"
-              onClick={() => onToggleBookmark?.(msg)}
-              aria-pressed={isBookmarked}
-              aria-label={isBookmarked ? "Remove saved answer" : "Save answer"}
-              title={isBookmarked ? "Remove saved answer" : "Save answer"}
-              className="save-answer-button"
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "6px",
-                padding: "6px 10px",
-                borderRadius: "12px",
-                border: isBookmarked
-                  ? "1px solid rgba(245,158,11,0.45)"
-                  : darkMode
-                  ? "1px solid rgba(255,255,255,0.12)"
-                  : "1px solid rgba(0,0,0,0.1)",
-                background: isBookmarked
-                  ? "rgba(245,158,11,0.12)"
-                  : darkMode
-                  ? "rgba(255,255,255,0.05)"
-                  : "rgba(255,255,255,0.7)",
-                color: isBookmarked ? "#D97706" : darkMode ? "#D1D5DB" : "#4B5563",
-                fontSize: "12px",
-                fontWeight: 700,
-                cursor: "pointer",
-              }}
-            >
-              {isBookmarked ? (
-                <BookmarkIcon sx={{ fontSize: 16 }} />
-              ) : (
-                <BookmarkBorderIcon sx={{ fontSize: 16 }} />
-              )}
-              {isBookmarked ? "Saved" : "Save Answer"}
-            </button>
-            <button
-              type="button"
-              onClick={handleCopy}
-              aria-label="Copy to clipboard"
-              title="Copy answer"
-              className="copy-answer-button"
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "6px",
-                padding: "6px 10px",
-                borderRadius: "12px",
-                border: darkMode
-                  ? "1px solid rgba(255,255,255,0.12)"
-                  : "1px solid rgba(0,0,0,0.1)",
-                background: copied
-                  ? "rgba(34,197,94,0.12)"
-                  : darkMode
-                  ? "rgba(255,255,255,0.05)"
-                  : "rgba(255,255,255,0.7)",
-                color: copied ? "#22C55E" : darkMode ? "#D1D5DB" : "#4B5563",
-                fontSize: "12px",
-                fontWeight: 700,
-                cursor: "pointer",
-                transition: "all 0.2s",
-              }}
-            >
-              {copied ? (
-                <CheckIcon sx={{ fontSize: 16 }} />
-              ) : (
-                <ContentCopyIcon sx={{ fontSize: 16 }} />
-              )}
-              {copied ? "Copied!" : "Copy"}
-            </button>
-          </div>
-        )}
-
-        {msg.role === "bot" && !msg.streaming && msg.sources?.length > 0 && (() => {
-          // deduplicate sources by document and page
-          const uniqueSources = [];
-          const seen = new Set();
-          msg.sources.forEach(source => {
-            const label = getSourceLabel(source);
-            const page = source.page || "unknown";
-            const key = `${label}-${page}`;
-            if (!seen.has(key)) {
-               seen.add(key);
-               uniqueSources.push(source);
-            }
-          });
-
-          return (
             <div
               style={{
-                marginTop: "14px",
-                paddingTop: "12px",
-                display: "flex",
-                flexWrap: "wrap",
-                gap: "8px"
+                fontWeight: 600,
+                marginBottom: "8px",
+                fontSize: "13px",
+                opacity: 0.9,
               }}
             >
-              {uniqueSources.map((source, index) => {
-                const sourceLabel = getSourceLabel(source);
-                const canOpenPage = hasOpenablePage(source);
-                const truncatedLabel = sourceLabel.length > 24 
-                  ? sourceLabel.substring(0, 21) + "..." 
-                  : sourceLabel;
-                  
-                return (
-                  <button
-                    key={`${source.document_id || sourceLabel}-${source.page || "unknown"}-${index}`}
-                    onClick={() => canOpenPage && onOpenSource?.(source)}
-                    title={sourceLabel}
-                    className="citation-chip"
-                    style={{
-                      padding: "4px 10px",
-                      borderRadius: "16px",
-                      background: darkMode ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.05)",
-                      border: darkMode ? "1px solid rgba(255,255,255,0.12)" : "1px solid rgba(0,0,0,0.1)",
-                      color: darkMode ? "#D1D5DB" : "#4B5563",
-                      fontSize: "12px",
-                      fontWeight: 500,
-                      cursor: canOpenPage ? "pointer" : "default",
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "6px"
-                    }}
-                  >
-                    <span style={{ opacity: 0.8 }}>📄</span>
-                    <span>{truncatedLabel}{source.page ? ` — Page ${source.page}` : ""}</span>
-                  </button>
-                );
-              })}
+              Sources used
             </div>
-          );
-        })()}
+
+            {msg.sources.map((source, index) => {
+              const sourceText = getSourceText(source);
+              const sourceLabel = getSourceLabel(source);
+              const canOpenPage = hasOpenablePage(source);
+
+              return (
+                <div
+                  key={`${source.document_id || sourceLabel}-${source.page || "unknown"}-${index}`}
+                  style={{
+                    padding: "9px 10px",
+                    marginBottom: "8px",
+                    borderRadius: "10px",
+                    background: darkMode
+                      ? "rgba(255,255,255,0.05)"
+                      : "rgba(0,0,0,0.04)",
+                    fontSize: "12.5px",
+                  }}
+                >
+                  <div className="d-flex justify-content-between align-items-start gap-2">
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontWeight: 600 }} className="text-truncate">
+                        {sourceLabel}
+                      </div>
+
+                      <div
+                        style={{
+                          opacity: 0.75,
+                          marginBottom: sourceText ? "5px" : 0,
+                          fontSize: "12px",
+                        }}
+                      >
+                        {source.page ? `Page ${source.page}` : "Source page unavailable"}
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={!canOpenPage}
+                      onClick={() => onOpenSource?.(source)}
+                      style={{
+                        flexShrink: 0,
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "4px",
+                        padding: "5px 9px",
+                        borderRadius: "8px",
+                        fontSize: "11.5px",
+                        fontWeight: 600,
+                        border: darkMode ? "1px solid rgba(255,255,255,0.16)" : "1px solid rgba(0,0,0,0.14)",
+                        background: "transparent",
+                        color: darkMode ? "#E5E7EB" : "#374151",
+                        cursor: canOpenPage ? "pointer" : "default",
+                        opacity: canOpenPage ? 1 : 0.45,
+                      }}
+                    >
+                      <MenuBookIcon sx={{ fontSize: 13 }} />
+                      Open
+                    </button>
+                  </div>
+
+                  {sourceText && (
+                    <div
+                      style={{
+                        opacity: 0.85,
+                        lineHeight: 1.5,
+                        fontStyle: "italic",
+                      }}
+                    >
+                      “{sourceText}”
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
