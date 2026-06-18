@@ -1,6 +1,4 @@
-# ARCHITECTURE.md
-
-# PDF Q&A Bot - System Architecture
+# System Architecture
 
 ## High-Level Overview
 
@@ -719,6 +717,7 @@ to improve responsiveness under load.
 
 ---
 
-# Conclusion
 
-PDF Q&A Bot is a security-conscious, session-isolated RAG platform built around a microservice architecture. The design cleanly separates user experience, API orchestration, and AI processing while providing robust document ingestion, retrieval, and generation capabilities. The architecture is structured for maintainability, local-first AI deployment, and future horizontal scalability.
+## Conclusion
+
+PDF Q&A Bot follows a layered microservice architecture that separates the frontend, API gateway, and RAG service into distinct responsibilities. This design improves maintainability, security, and scalability while supporting efficient document ingestion, retrieval, and AI-powered interactions.
