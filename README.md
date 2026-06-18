@@ -38,7 +38,7 @@ Upload PDF documents, ask natural-language questions grounded in their content, 
 
 ---
 
-## Architecture & Documentation
+## System Architecture
 
 PDF Q&A Bot follows a multi-service Retrieval-Augmented Generation (RAG) architecture consisting of:
 
