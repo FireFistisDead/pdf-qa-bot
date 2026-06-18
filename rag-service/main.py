@@ -1255,6 +1255,20 @@ def _recover_session_unlocked(session_id: str):
         remove_persisted_session(session_id, session_dir)
         return None
 
+    chat = []
+    flashcards = []
+    meta_path = os.path.join(session_dir, "session_meta.json")
+    if os.path.isfile(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                per = json.load(f)
+            if isinstance(per.get("chat"), list):
+                chat = normalize_chat_history(per["chat"])
+            if isinstance(per.get("flashcards"), list):
+                flashcards = per["flashcards"]
+        except Exception as e:
+            logger.warning("Failed to load session metadata during recovery for %s: %s", session_id, e)
+
     try:
         vectorstore = _load_vectorstore_from_snapshot(session_id, get_embedding_model())
     except Exception:
@@ -1270,6 +1284,8 @@ def _recover_session_unlocked(session_id: str):
         "session_dir": session_dir,
         "created_at": float(entry.get("created_at", last_accessed) or last_accessed),
         "last_accessed": last_accessed,
+        "chat": chat,
+        "flashcards": flashcards,
     }
 
     try:
