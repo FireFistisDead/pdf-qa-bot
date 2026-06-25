@@ -3386,10 +3386,6 @@ def processing_status(
 
 @app.post("/ask")
 def ask_question(data: Question, _ready: None = Depends(require_models_ready)):
-    cleanup_expired_sessions()
-
-
-def ask_question(data: Question):
     question = (data.question or "").strip()
 
     if not question:
