@@ -2,6 +2,7 @@ import os
 import sys
 from unittest.mock import MagicMock
 import multiprocessing
+import threading
 
 os.environ.setdefault("INTERNAL_RAG_TOKEN", "test-secret")
 
@@ -1187,3 +1188,266 @@ def test_vectorstore_loader_rejects_path_traversal_like_session_id():
 
     with pytest.raises(ValueError, match=r"(badly formed hexadecimal UUID string|Invalid persisted session id)"):
         main_module._load_vectorstore_from_snapshot("../escape", MagicMock())
+
+
+# ============================================================================
+# Streaming SSE Protocol Tests
+# ============================================================================
+
+def test_stream_no_duplicate_content():
+    """Verify that /ask/stream does not emit duplicate content.
+    
+    Regression test for bug where tokens were streamed individually,
+    then the full answer was streamed again at the end.
+    
+    This test inspects the source code to ensure the problematic pattern
+    (yielding framed answer after tokens) is not present.
+    """
+    import main as main_module
+    import inspect
+    
+    source = inspect.getsource(main_module.ask_question_stream)
+    
+    # The bug was: after streaming tokens, the code would yield the full framed answer again
+    # This pattern should NOT exist in the streaming path
+    # We check for the specific pattern that was causing the bug
+    
+    # The buggy pattern was: yield _sse_frame(framed) after token streaming
+    # We verify that after the token streaming loop, we don't yield the framed answer
+    lines = source.split('\n')
+    
+    # Find the token streaming section
+    in_token_stream = False
+    after_token_stream = False
+    found_framed_yield_after_tokens = False
+    
+    for i, line in enumerate(lines):
+        if 'yield _sse_frame(token)' in line:
+            in_token_stream = True
+        
+        if in_token_stream and 'full_answer = ' in line:
+            after_token_stream = True
+        
+        if after_token_stream and 'yield _sse_frame(framed)' in line:
+            # Check if this is NOT in a comment or the refuse/grounded stream paths
+            # The refuse_stream and grounded_stream are separate functions that should yield framed
+            # We only care about the main LLM generation path
+            if '_refuse_stream' not in lines[max(0, i-10):i+10] and '_grounded_stream' not in lines[max(0, i-10):i+10]:
+                found_framed_yield_after_tokens = True
+    
+    assert not found_framed_yield_after_tokens, (
+        "Found yield _sse_frame(framed) after token streaming, which causes duplicate content. "
+        "The full framed answer should only be used for persistence, not re-emitted to the client."
+    )
+
+
+def test_stream_error_uses_sse_event():
+    """Verify that error paths use proper SSE event format, not raw text."""
+    import main as main_module
+    
+    # Temporarily remove GROQ_API_KEY to trigger the error path
+    original_groq_key = os.environ.get("GROQ_API_KEY")
+    if "GROQ_API_KEY" in os.environ:
+        del os.environ["GROQ_API_KEY"]
+    
+    try:
+        # Setup a minimal session
+        session_id = str(_secrets.token_hex(16))
+        session_secret = _secrets.token_urlsafe(32)
+        
+        with main_module.sessions_lock:
+            main_module.sessions[session_id] = {
+                "session_secret": session_secret,
+                "hashed_session_secret": main_module._hash_secret(session_secret),
+                "documents": [],
+                "chat": [],
+                "vectorstore": MagicMock(),
+                "lock": threading.Lock(),
+            }
+        
+        try:
+            client = TestClient(main_module.app)
+            response = client.post(
+                "/ask/stream",
+                json={
+                    "question": "test",
+                    "session_id": session_id,
+                    "session_secret": session_secret,
+                },
+                headers={"X-Internal-Token": "test-secret"},
+            )
+            
+            chunks = []
+            for chunk in response.iter_bytes():
+                chunks.append(chunk.decode('utf-8'))
+            
+            full_stream = ''.join(chunks)
+            
+            # Verify error uses SSE event format
+            assert 'event: error' in full_stream, "Error should use SSE event format"
+            
+            # Verify no raw text yields (all data should be prefixed with 'data:')
+            lines = full_stream.split('\n')
+            for line in lines:
+                if line and not line.startswith('event:') and not line.startswith('data:') and line != '':
+                    # Skip empty lines and comments
+                    if not line.startswith(':'):
+                        raise AssertionError(f"Found raw text without SSE prefix: {line}")
+            
+            # Verify exactly one [DONE] event after error
+            done_count = full_stream.count('[DONE]')
+            assert done_count == 1, f"[DONE] appeared {done_count} times, expected 1"
+            
+        finally:
+            with main_module.sessions_lock:
+                main_module.sessions.pop(session_id, None)
+    finally:
+        # Restore original GROQ_API_KEY
+        if original_groq_key:
+            os.environ["GROQ_API_KEY"] = original_groq_key
+
+
+def test_stream_single_completion_event():
+    """Verify that exactly one [DONE] event is emitted per stream."""
+    import main as main_module
+    from unittest.mock import patch, MagicMock
+    
+    # Mock the Groq API to return a simple response
+    mock_response = MagicMock()
+    mock_response.__iter__ = lambda self: iter([
+        b'data: {"choices":[{"delta":{"content":"Test"}}]}\n\n',
+        b'data: [DONE]\n\n',
+    ])
+    
+    with patch('urllib.request.urlopen', return_value=mock_response):
+        with patch.object(main_module, 'apply_mode_framing', return_value='Test'):
+            session_id = str(_secrets.token_hex(16))
+            session_secret = _secrets.token_urlsafe(32)
+            
+            with main_module.sessions_lock:
+                main_module.sessions[session_id] = {
+                    "session_secret": session_secret,
+                    "hashed_session_secret": main_module._hash_secret(session_secret),
+                    "documents": [],
+                    "chat": [],
+                    "vectorstore": MagicMock(),
+                    "lock": threading.Lock(),
+                }
+            
+            try:
+                client = TestClient(main_module.app)
+                response = client.post(
+                    "/ask/stream",
+                    json={
+                        "question": "test",
+                        "session_id": session_id,
+                        "session_secret": session_secret,
+                    },
+                    headers={"X-Internal-Token": "test-secret"},
+                )
+                
+                chunks = []
+                for chunk in response.iter_bytes():
+                    chunks.append(chunk.decode('utf-8'))
+                
+                full_stream = ''.join(chunks)
+                
+                # Count [DONE] events
+                done_count = full_stream.count('[DONE]')
+                assert done_count == 1, f"Expected exactly 1 [DONE] event, got {done_count}"
+                
+            finally:
+                with main_module.sessions_lock:
+                    main_module.sessions.pop(session_id, None)
+
+
+def test_stream_frontend_parser_compatibility():
+    """Verify that stream output is compatible with frontend SSE parser.
+    
+    This test ensures the output format matches what ragService.js expects:
+    - event: message for regular content
+    - event: error for errors
+    - data: [DONE] for completion
+    """
+    import main as main_module
+    from unittest.mock import patch, MagicMock
+    
+    # Mock the Groq API
+    mock_response = MagicMock()
+    mock_response.__iter__ = lambda self: iter([
+        b'data: {"choices":[{"delta":{"content":"Response"}}]}\n\n',
+        b'data: [DONE]\n\n',
+    ])
+    
+    with patch('urllib.request.urlopen', return_value=mock_response):
+        with patch.object(main_module, 'apply_mode_framing', return_value='Response'):
+            session_id = str(_secrets.token_hex(16))
+            session_secret = _secrets.token_urlsafe(32)
+            
+            with main_module.sessions_lock:
+                main_module.sessions[session_id] = {
+                    "session_secret": session_secret,
+                    "hashed_session_secret": main_module._hash_secret(session_secret),
+                    "documents": [],
+                    "chat": [],
+                    "vectorstore": MagicMock(),
+                    "lock": threading.Lock(),
+                }
+            
+            try:
+                client = TestClient(main_module.app)
+                response = client.post(
+                    "/ask/stream",
+                    json={
+                        "question": "test",
+                        "session_id": session_id,
+                        "session_secret": session_secret,
+                    },
+                    headers={"X-Internal-Token": "test-secret"},
+                )
+                
+                chunks = []
+                for chunk in response.iter_bytes():
+                    chunks.append(chunk.decode('utf-8'))
+                
+                full_stream = ''.join(chunks)
+                
+                # Parse the stream similar to ragService.js
+                events = full_stream.split('\n\n')
+                parsed_events = []
+                
+                for event_text in events:
+                    if not event_text.strip():
+                        continue
+                    
+                    event_name = 'message'
+                    data_lines = []
+                    
+                    for line in event_text.split('\n'):
+                        line = line.strip()
+                        if line.startswith('event:'):
+                            event_name = line[6:].strip()
+                        elif line.startswith('data:'):
+                            data_lines.append(line[5:].strip())
+                    
+                    if data_lines:
+                        parsed_events.append({
+                            'event': event_name,
+                            'data': '\n'.join(data_lines)
+                        })
+                
+                # Verify we got the expected events
+                assert len(parsed_events) >= 2, "Should have at least 2 events (content + done)"
+                
+                # Find the done event
+                done_events = [e for e in parsed_events if e['data'] == '[DONE]']
+                assert len(done_events) == 1, "Should have exactly one [DONE] event"
+                
+                # Verify content events use proper format
+                content_events = [e for e in parsed_events if e['data'] != '[DONE]']
+                for event in content_events:
+                    assert event['event'] in ['message', 'error'], f"Unexpected event type: {event['event']}"
+                
+            finally:
+                with main_module.sessions_lock:
+                    main_module.sessions.pop(session_id, None)
