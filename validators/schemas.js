@@ -135,7 +135,6 @@ module.exports = {
   askPayloadSchema,
   summarizeSchema,
   summarizeCredentialSchema,
-  sessionsLookupSchema,
   MAX_QUESTION_LENGTH,
   knowledgeGapsSchema,
   generateFlashcardsSchema,
