@@ -40,57 +40,36 @@ Upload PDF documents, ask natural-language questions grounded in their content, 
 
 ## System Architecture
 
-The application is split into three independently runnable components. Each listens on a dedicated port in development.
+PDF Q&A Bot follows a multi-service Retrieval-Augmented Generation (RAG) architecture consisting of:
+
+* **React Frontend** – User interface and document interaction
+* **Express API Gateway** – Authentication, validation, security, and request orchestration
+* **FastAPI RAG Service** – PDF processing, retrieval, and AI-powered response generation
 
 ```mermaid
 flowchart LR
-  subgraph client ["Browser — :3000"]
-    UI["React UI\nfrontend/"]
-  end
-
-  subgraph gateway ["API Gateway — :4000"]
-    API["Express\nserver.js"]
-  end
-
-  subgraph rag ["RAG Service — :5000"]
-    RAG["FastAPI\nrag-service/main.py"]
-    FAISS[("FAISS\nin-memory")]
-    HF["Hugging Face\nembeddings + LLM"]
-  end
-
-  UI -->|"POST /upload, /ask, /summarize"| API
-  API -->|"POST /process-pdf, /ask, /summarize"| RAG
-  RAG --> FAISS
-  RAG --> HF
+  UI[React Frontend] --> API[Express Gateway]
+  API --> RAG[FastAPI RAG Service]
+  RAG --> FAISS[(FAISS)]
+  RAG --> LLM[LLM Models]
 ```
 
-### Request lifecycle
+For detailed documentation covering:
 
-1. **Upload** — The UI sends a PDF to Express (`POST /upload`). Express stores the file temporarily, forwards its path to FastAPI (`POST /process-pdf`), then deletes the local copy.
-2. **Index** — FastAPI loads the PDF with LangChain, splits text into chunks, embeds them with `sentence-transformers/all-MiniLM-L6-v2`, and stores a FAISS index keyed by a new `session_id`.
-3. **Ask / Summarize** — The UI includes `session_id` on each request. FastAPI retrieves relevant chunks, builds a prompt, and runs the configured Hugging Face generation model locally.
+* System architecture
+* Component responsibilities
+* Authentication design
+* Security model
+* Data flow and sequence diagrams
+* RAG pipeline internals
+* Deployment architecture
+* Scalability considerations
 
-> **Note:** Vector stores live in process memory. Restarting the RAG service clears all sessions; users must re-upload PDFs.
+please see **[ARCHITECTURE.md](./ARCHITECTURE.md)**.
 
-> **Security note:** The FastAPI RAG service (`:5000`) is meant to be an **internal** dependency of the Express gateway (`:4000`).
-> Do not expose it publicly — otherwise attackers can bypass gateway rate limiting by calling RAG endpoints directly.
-> `INTERNAL_RAG_TOKEN` is required so the RAG service rejects requests missing `X-Internal-Token`.
-
-### Upgrade Notes
-
-Existing deployments and local environments must set `INTERNAL_RAG_TOKEN` before starting the Express API or RAG service. Generate a strong shared secret, put the same value in both environments, and restart both services. The RAG service fails closed when this value is missing.
-
-The Express authentication flow also requires `JWT_SECRET` for both token signing and verification. Use one strong random value across the auth controller and middleware; do not hardcode or reuse a default secret.
-
-### Default ports
-
-| Service | Folder | Port | URL |
-|---------|--------|------|-----|
-| React frontend | `frontend/` | **3000** | http://localhost:3000 |
-| Express API | repository root | **4000** | http://localhost:4000 |
-| FastAPI RAG | `rag-service/` | **5000** | http://localhost:5000 |
 
 ---
+
 
 ## Prerequisites
 
