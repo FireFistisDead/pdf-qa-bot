@@ -451,6 +451,46 @@ describe("route error responses", () => {
     assert.deepEqual(data.details.fieldErrors.question, ["Question is required."]);
   });
 
+  test("GET /processing-status/:sessionId forwards internal auth header and returns data", async () => {
+    const originalGet = axios.get;
+    let forwardedHeaders = null;
+
+    axios.get = async (url, options) => {
+      forwardedHeaders = options?.headers;
+      return { data: { stage: "Extracting text", progress: 50 } };
+    };
+
+    try {
+      const res = await fetch(`${baseUrl}/processing-status/550e8400-e29b-41d4-a716-446655440000`);
+      assert.equal(res.status, 200);
+      const data = await res.json();
+      assert.equal(data.stage, "Extracting text");
+      assert.equal(data.progress, 50);
+      assert.equal(forwardedHeaders["X-Internal-Token"], process.env.INTERNAL_RAG_TOKEN);
+    } finally {
+      axios.get = originalGet;
+    }
+  });
+
+  test("GET /processing-status/:sessionId returns 404 when upstream returns 404", async () => {
+    const originalGet = axios.get;
+
+    axios.get = async () => {
+      const err = new Error("Not Found");
+      err.response = { status: 404 };
+      throw err;
+    };
+
+    try {
+      const res = await fetch(`${baseUrl}/processing-status/unknown-id`);
+      assert.equal(res.status, 404);
+      const data = await res.json();
+      assert.equal(data.error, "Processing status not found.");
+    } finally {
+      axios.get = originalGet;
+    }
+  });
+
   test("POST /ask with invalid session_id returns 400", async () => {
     const res = await fetch(`${baseUrl}/ask`, {
       method: "POST",
@@ -518,6 +558,7 @@ describe("route error responses", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Authorization: `Bearer ${jwt.sign({ role: "authenticated" }, process.env.SUPABASE_JWT_SECRET)}`,
           Authorization: `Bearer ${validToken}`,
         },
         body: JSON.stringify({
@@ -564,6 +605,7 @@ describe("route error responses", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Authorization: `Bearer ${jwt.sign({ role: "authenticated" }, process.env.SUPABASE_JWT_SECRET)}`,
           Authorization: `Bearer ${validToken}`,
         },
         body: JSON.stringify({
