@@ -295,7 +295,7 @@ const handleDrop = (e) => {
                         mr: 1,
                       }}
                     />
-                    Uploading...
+                    Processing PDF...
                   </>
                 ) : hasSelectedFiles && files.length > 1 ? (
                   "Upload PDFs"

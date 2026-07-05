@@ -1,8 +1,8 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { pdfjs } from "react-pdf";
 import "bootstrap/dist/css/bootstrap.min.css";
-import { Container, Row, Col } from "react-bootstrap";
+import { Container, Row, Col } from "react-bootstrap";  
 import Navbar from "./components/Navbar/Navbar";
 import UploadCard from "./components/UploadCard/UploadCard";
 import PdfViewer from "./components/PdfViewer/PdfViewer";
@@ -43,14 +43,13 @@ function MainApp() {
   const [knowledgeGapResults, setKnowledgeGapResults] = useState({});
 
   // ── Credential storage key ────────────────────────────────────────────────
-  // Session credentials (session_id + session_secret) are stored in
-  // sessionStorage, NOT localStorage. sessionStorage is:
+  // Session identifiers are stored in sessionStorage, NOT localStorage.
+  // New uploads rely on the backend's HttpOnly cookie for the secret instead
+  // of persisting it in browser-accessible storage. sessionStorage is:
   //   - Scoped to the browser tab — cleared automatically when the tab closes.
   //   - Never persisted to disk between browser sessions.
   //   - Inaccessible to other tabs and origins.
-  // This eliminates the long-lived credential theft risk: even if an attacker
-  // achieves XSS, the credentials become invalid the moment the tab closes
-  // (or immediately if the session TTL on the server expires first).
+  // This reduces the amount of secret material exposed to frontend JavaScript.
   //
   // pdfqa_preferred_mode is a non-sensitive UI preference and intentionally
   // stays in localStorage so the user's chosen reading mode is remembered
@@ -113,7 +112,7 @@ function MainApp() {
 
   const loadKnownSessions = React.useCallback(() => {
     try {
-      const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+      const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
       if (!raw) return [];
       const parsed = decodePayload(raw);
       if (!Array.isArray(parsed)) return [];
@@ -122,13 +121,14 @@ function MainApp() {
           (s) =>
             s &&
             typeof s.session_id === "string" &&
-            s.session_id.trim() !== "" &&
-            typeof s.session_secret === "string" &&
-            s.session_secret.trim() !== "",
+            s.session_id.trim() !== "",
         )
         .map((s) => ({
           session_id: s.session_id.trim(),
-          session_secret: s.session_secret.trim(),
+          session_secret:
+            typeof s.session_secret === "string" && s.session_secret.trim() !== ""
+              ? s.session_secret.trim()
+              : null,
         }));
     } catch (_) {
       return [];
@@ -136,26 +136,76 @@ function MainApp() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const upsertKnownSession = React.useCallback(
-    (sessionId, sessionSecret) => {
-      if (!sessionId || !sessionSecret) return;
-      if (typeof sessionId !== "string" || typeof sessionSecret !== "string") return;
+    (sessionId, sessionSecret = null) => {
+      if (!sessionId || typeof sessionId !== "string") return;
+      if (sessionSecret !== null && typeof sessionSecret !== "string") return;
       const existing = loadKnownSessions();
+      const normalizedSessionId = sessionId.trim();
+      const normalizedSessionSecret =
+        typeof sessionSecret === "string" && sessionSecret.trim() !== ""
+          ? sessionSecret.trim()
+          : null;
       const next = [
-        { session_id: sessionId.trim(), session_secret: sessionSecret.trim() },
-        ...existing.filter((s) => s.session_id !== sessionId.trim()),
+        { session_id: normalizedSessionId, session_secret: normalizedSessionSecret },
+        ...existing.filter((s) => s.session_id !== normalizedSessionId),
       ];
       try {
-        localStorage.setItem(SESSION_STORAGE_KEY, encodePayload(next.slice(0, 50)));
+        sessionStorage.setItem(SESSION_STORAGE_KEY, encodePayload(next.slice(0, 50)));
       } catch (_) {
         // sessionStorage quota exceeded — prune to 10 most recent and retry once.
         try {
-          localStorage.setItem(SESSION_STORAGE_KEY, encodePayload(next.slice(0, 10)));
+          sessionStorage.setItem(SESSION_STORAGE_KEY, encodePayload(next.slice(0, 10)));
         } catch (_) {}
       }
     },
     [loadKnownSessions], // eslint-disable-line react-hooks/exhaustive-deps
   );
 
+
+  // One-time migration: if credentials were previously stored in localStorage
+  // under the same key (pre-fix behaviour), move them to sessionStorage and
+  // then delete them from localStorage so they are no longer readable by
+  // JavaScript after the next reload.
+  React.useEffect(() => {
+    try {
+      const legacy = localStorage.getItem(SESSION_STORAGE_KEY);
+      if (!legacy) return;
+      // Legacy format was plain JSON; try both plain and base64.
+      let parsed;
+      try { parsed = JSON.parse(legacy); } catch (_) { parsed = decodePayload(legacy); }
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        localStorage.removeItem(SESSION_STORAGE_KEY);
+        return;
+      }
+      const valid = parsed.filter(
+        (s) =>
+          s &&
+          typeof s.session_id === "string" &&
+          s.session_id.trim() !== "",
+      );
+      if (valid.length > 0) {
+        const existing = loadKnownSessions();
+        const existingIds = new Set(existing.map((s) => s.session_id));
+        const merged = [
+          ...existing,
+          ...valid
+            .filter((s) => !existingIds.has(s.session_id.trim()))
+            .map((s) => ({
+              session_id: s.session_id.trim(),
+              session_secret:
+                typeof s.session_secret === "string" && s.session_secret.trim() !== ""
+                  ? s.session_secret.trim()
+                  : null,
+            })),
+        ].slice(0, 50);
+        sessionStorage.setItem(SESSION_STORAGE_KEY, encodePayload(merged));
+      }
+      localStorage.removeItem(SESSION_STORAGE_KEY);
+    } catch (_) {
+      try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (_) {}
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   React.useEffect(() => {
     // Load historical sessions on initial mount
@@ -202,6 +252,16 @@ function MainApp() {
 
 
 
+  useEffect(() => {
+  return () => {
+    pdfs.forEach((pdf) => {
+      if (pdf.url) {
+        URL.revokeObjectURL(pdf.url);
+      }
+    });
+  };
+}, [pdfs]);
+
   const handleUpload = async (file) => {
     // Validate file type
     if (
@@ -215,14 +275,13 @@ function MainApp() {
     }
 
     // Validate file size (20MB limit)
-    const maxSize = 20 * 1024 * 1024; // 20MB in bytes
+   const maxSize = 20 * 1024 * 1024; // 20MB in bytes
     if (file.size > maxSize) {
       toast.error(
-        "File size exceeds 20MB limit. Please choose a smaller file.",
+        "File too large. Maximum allowed size is 20MB. Please choose a smaller PDF file.",
       );
       return;
     }
-
     setUploading(true);
     const loadingToast = toast.loading("Uploading PDF...");
 
@@ -240,8 +299,11 @@ function MainApp() {
       const url = URL.createObjectURL(file);
       const pdfId = data.document?.document_id || data.session_id;
 
-      if (data.session_id && data.session_secret) {
-        upsertKnownSession(data.session_id, data.session_secret);
+      if (data.session_id) {
+        upsertKnownSession(
+          data.session_id,
+          data.session_secret || currentPdfForUpload?.session_secret || null,
+        );
       }
 
     setPdfs((prev) => {
@@ -254,7 +316,7 @@ function MainApp() {
       url,
       chat: [],
       session_id: data.session_id,
-      session_secret: data.session_secret || null,
+      session_secret: data.session_secret || currentPdfForUpload?.session_secret || null,
     },
   ];
  

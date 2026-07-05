@@ -47,8 +47,12 @@ export const processDocument = async (url, filename, opts = {}) => {
  * @param {string} sessionId
  * @returns {Promise<{ stage: string, progress: number }>}
  */
-export const getProcessingStatus = async (sessionId) => {
-  const res = await fetch(`${RAG_BASE_URL}/processing-status/${sessionId}`);
+export const getProcessingStatus = async (sessionId, sessionSecret) => {
+  const headers = {};
+  if (sessionSecret) {
+    headers['X-Session-Secret'] = sessionSecret;
+  }
+  const res = await fetch(`${RAG_BASE_URL}/processing-status/${sessionId}`, { headers });
   if (!res.ok) return null;
   return res.json();
 };
@@ -65,7 +69,7 @@ export const getProcessingStatus = async (sessionId) => {
  * @param {Function} onError   - Called on error
  * @returns {AbortController} - Call .abort() to cancel the stream
  */
-export const askStream = (sessionId, sessionSecret, question, onChunk, onDone, onError) => {
+export const askStream = (sessionIds, sessionSecrets, question, onChunk, onDone, onError) => {
   const controller = new AbortController();
 
   const run = async () => {
@@ -74,8 +78,8 @@ export const askStream = (sessionId, sessionSecret, question, onChunk, onDone, o
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          session_id: sessionId,
-          session_secret: sessionSecret,
+          session_ids: sessionIds,
+          session_secrets: sessionSecrets,
           question,
         }),
         signal: controller.signal,
