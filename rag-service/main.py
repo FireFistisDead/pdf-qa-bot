@@ -428,6 +428,30 @@ def _load_with_pypdf(pdf_path: str, filename: str, max_pages: int) -> list:
     return docs
 
 
+def _load_with_ocr(pdf_path: str, filename: str, max_pages: int) -> list:
+    """Fallback loader using OCR for scanned or image-based PDFs."""
+    from pdf2image import convert_from_path
+    import pytesseract
+
+    images = convert_from_path(pdf_path, last_page=max_pages)
+    docs = []
+    for idx, image in enumerate(images):
+        text = (pytesseract.image_to_string(image) or "").strip()
+        if not text:
+            continue
+        docs.append(
+            Document(
+                page_content=text,
+                metadata={
+                    "page": idx,
+                    "filename": filename,
+                    "source": filename,
+                },
+            )
+        )
+    return docs
+
+
 async def load_pdf_documents_async(pdf_path: str, filename: str) -> list:
     """Parse a PDF and return a list of LangChain Documents.
 
@@ -530,10 +554,35 @@ async def load_pdf_documents_async(pdf_path: str, filename: str) -> list:
                 detail=f"Unable to read this PDF: {fallback_exc}",
             )
 
+    # Trigger OCR if the document is empty or has very little text (e.g. scanned images)
+    total_chars = sum(len(d.page_content) for d in docs) if docs else 0
+    if not docs or (len(docs) > 0 and (total_chars / len(docs)) < 50):
+        try:
+            logger.info("Text density is low (%s chars total). Attempting OCR fallback for filename=%s", total_chars, filename)
+            ocr_docs = await asyncio.wait_for(
+                loop.run_in_executor(
+                    _PDF_PARSE_EXECUTOR,
+                    _load_with_ocr,
+                    pdf_path,
+                    filename,
+                    MAX_PDF_PAGES,
+                ),
+                timeout=PDF_PARSE_TIMEOUT_SECONDS * 2, # Give OCR more time
+            )
+            if ocr_docs:
+                docs = ocr_docs
+                logger.info(
+                    "PDF parsed via OCR fallback filename=%s extracted_pages=%s",
+                    filename,
+                    len(docs),
+                )
+        except Exception as ocr_exc:
+            logger.warning("OCR fallback failed for filename=%s error=%s", filename, ocr_exc)
+
     if not docs:
         raise HTTPException(
             status_code=400,
-            detail="No readable text was found in the PDF. It may be a scanned image-only PDF.",
+            detail="No readable text was found in the PDF. It may be a scanned image-only PDF and OCR extraction failed.",
         )
     return docs
 
@@ -779,6 +828,19 @@ SEMANTIC_CHUNK_MERGE_WARN_SECS = float(
 SEMANTIC_CHUNK_HIERARCHICAL = os.getenv(
     "SEMANTIC_CHUNK_HIERARCHICAL", "true"
 ).strip().lower() in {"1", "true", "yes", "on"}
+
+# ── LLM Provider Configuration ────────────────────────────────────────────────
+# LLM_PROVIDER selects the cloud provider for answer generation.
+# Supported values: "openai", "anthropic", "groq", "ollama", "huggingface"
+# When set to "huggingface" (or empty), only the local model is used.
+# Cloud providers require their respective API keys to be set.
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "").strip().lower()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-haiku-20240307")
+ANTHROPIC_TIMEOUT_SECS = int(os.getenv("ANTHROPIC_TIMEOUT_SECS", "30"))
+OPENAI_TIMEOUT_SECS = int(os.getenv("OPENAI_TIMEOUT_SECS", "30"))
 
 # ── Ollama LLM Synthesis ─────────────────────────────────────────────────────
 # When Ollama is running locally the /ask endpoint will use it as the primary
@@ -1206,6 +1268,20 @@ def _recover_session_unlocked(session_id: str):
         remove_persisted_session(session_id, session_dir)
         return None
 
+    chat = []
+    flashcards = []
+    meta_path = os.path.join(session_dir, "session_meta.json")
+    if os.path.isfile(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                per = json.load(f)
+            if isinstance(per.get("chat"), list):
+                chat = normalize_chat_history(per["chat"])
+            if isinstance(per.get("flashcards"), list):
+                flashcards = per["flashcards"]
+        except Exception as e:
+            logger.warning("Failed to load session metadata during recovery for %s: %s", session_id, e)
+
     try:
         vectorstore = _load_vectorstore_from_snapshot(session_id, get_embedding_model())
     except Exception:
@@ -1221,6 +1297,8 @@ def _recover_session_unlocked(session_id: str):
         "session_dir": session_dir,
         "created_at": float(entry.get("created_at", last_accessed) or last_accessed),
         "last_accessed": last_accessed,
+        "chat": chat,
+        "flashcards": flashcards,
     }
 
     try:
@@ -1317,7 +1395,7 @@ def cleanup_expired_sessions():
             try:
                 target_path = Path(session_dir).resolve()
                 if target_path.is_dir() and PERSIST_PATH in target_path.parents:
-                    shutil.rmtree(target_path)
+                    shutil.rmtree(target_path, ignore_errors=True)
             except Exception:
                 logger.exception(
                     "Background cleanup failed to remove session dir path=%s", session_dir
@@ -1522,10 +1600,13 @@ def _flush_dirty_sessions() -> None:
     so that new dirty marks made during the flush are picked up next cycle.
     """
     with sessions_lock:
-        if not _dirty_sessions:
+        if not _dirty_sessions and not _dirty_registry_sessions:
             return
         dirty = set(_dirty_sessions)
         _dirty_sessions.clear()
+        dirty_registry = set(_dirty_registry_sessions)
+        _dirty_registry_sessions.clear()
+
     for session_id in dirty:
         with sessions_lock:
             meta = sessions.get(session_id)
@@ -1533,45 +1614,37 @@ def _flush_dirty_sessions() -> None:
                 continue
             data = _snapshot_session_for_persistence(meta)
         _write_session_meta_file(session_id, data)
+
     if dirty:
         logger.debug("Flushed metadata for %d dirty session(s)", len(dirty))
-        registry_updates = {}
 
-        with sessions_lock:
-            dirty_registry = set(_dirty_registry_sessions)
-            _dirty_registry_sessions.clear()
+    registry_updates = {}
+    with sessions_lock:
+        for session_id in dirty_registry:
+            meta = sessions.get(session_id)
+            if not meta:
+                continue
+            registry_updates[session_id] = {
+                "created_at": meta.get("created_at"),
+                "last_accessed": meta.get("last_accessed"),
+                "expires_at": session_expires_at(
+                    meta.get("last_accessed", now_ts())
+                ),
+                "documents": list(meta.get("documents", [])),
+                "session_dir": meta.get("session_dir"),
+                "hashed_session_secret": meta.get("hashed_session_secret") or _hash_secret(meta.get("session_secret", "")),
+            }
 
-            for session_id in dirty_registry:
-                meta = sessions.get(session_id)
+    if registry_updates:
+        with session_registry_lock():
+            registry = read_session_registry_unlocked()
+            registry.update(registry_updates)
+            write_session_registry_unlocked(registry)
 
-                if not meta:
-                    continue
-
-                registry_updates[session_id] = {
-                    "created_at": meta.get("created_at"),
-                    "last_accessed": meta.get("last_accessed"),
-                    "expires_at": session_expires_at(
-                        meta.get("last_accessed", now_ts())
-                    ),
-                    "documents": list(meta.get("documents", [])),
-                    "session_dir": meta.get("session_dir"),
-                    "hashed_session_secret": meta.get("hashed_session_secret") or _hash_secret(meta.get("session_secret", "")),
-                }
-
-        if registry_updates:
-
-            with session_registry_lock():
-
-                registry = read_session_registry_unlocked()
-
-                registry.update(registry_updates)
-
-                write_session_registry_unlocked(registry)
-
-            logger.debug(
-                "Flushed registry metadata for %d session(s)",
-                len(registry_updates),
-            )
+        logger.debug(
+            "Flushed registry metadata for %d session(s)",
+            len(registry_updates),
+        )
 
 
 def _background_flush_loop() -> None:
@@ -1986,6 +2059,302 @@ def synthesize_with_ollama(prompt: str) -> Optional[str]:
     except Exception as exc:  # noqa: BLE001 — intentional catch-all for fallback
         logger.info("Ollama unavailable, falling back to extractive path: %s", exc)
         return None
+
+
+def synthesize_with_openai(prompt: str) -> Optional[str]:
+    """Send a RAG prompt to OpenAI's API and return the generated text.
+    Returns None on any failure so the caller can fall back gracefully.
+    """
+    if not OPENAI_API_KEY:
+        return None
+
+    try:
+        payload = json.dumps({
+            "model": OPENAI_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "max_tokens": 512,
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+            },
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=OPENAI_TIMEOUT_SECS) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            text = (body.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+            if text:
+                logger.info("OpenAI synthesis succeeded model=%s chars=%d", OPENAI_MODEL, len(text))
+                return text
+            logger.warning("OpenAI returned an empty response")
+            return None
+
+    except Exception as exc:
+        logger.info("OpenAI unavailable, falling back: %s", exc)
+        return None
+
+
+def synthesize_with_anthropic(prompt: str) -> Optional[str]:
+    """Send a RAG prompt to Anthropic's API and return the generated text.
+    Returns None on any failure so the caller can fall back gracefully.
+    """
+    if not ANTHROPIC_API_KEY:
+        return None
+
+    try:
+        payload = json.dumps({
+            "model": ANTHROPIC_MODEL,
+            "max_tokens": 512,
+            "messages": [{"role": "user", "content": prompt}],
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+            },
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=ANTHROPIC_TIMEOUT_SECS) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            content_blocks = body.get("content", [])
+            text = ""
+            for block in content_blocks:
+                if block.get("type") == "text":
+                    text += block.get("text", "")
+            text = text.strip()
+            if text:
+                logger.info("Anthropic synthesis succeeded model=%s chars=%d", ANTHROPIC_MODEL, len(text))
+                return text
+            logger.warning("Anthropic returned an empty response")
+            return None
+
+    except Exception as exc:
+        logger.info("Anthropic unavailable, falling back: %s", exc)
+        return None
+
+
+def _select_cloud_synthesizer(prompt: str) -> Optional[str]:
+    """Try the configured cloud LLM provider and return the answer or None.
+
+    Provider priority: LLM_PROVIDER env var → Ollama → HuggingFace fallback.
+    When LLM_PROVIDER is explicitly set, only that provider is attempted.
+    When empty, the legacy Ollama-first fallback chain is preserved.
+    """
+    if LLM_PROVIDER == "openai":
+        return synthesize_with_openai(prompt)
+    if LLM_PROVIDER == "anthropic":
+        return synthesize_with_anthropic(prompt)
+    if LLM_PROVIDER == "groq":
+        return synthesize_with_groq(prompt)
+    if LLM_PROVIDER == "ollama":
+        return synthesize_with_ollama(prompt)
+    if LLM_PROVIDER == "huggingface":
+        return None
+
+    # Legacy fallback chain when no explicit provider is configured
+    ollama_result = synthesize_with_ollama(prompt)
+    if ollama_result:
+        return ollama_result
+    openai_result = synthesize_with_openai(prompt)
+    if openai_result:
+        return openai_result
+    anthropic_result = synthesize_with_anthropic(prompt)
+    if anthropic_result:
+        return anthropic_result
+    return None
+
+
+def synthesize_with_groq(prompt: str) -> Optional[str]:
+    """Send a RAG prompt to Groq's API and return the generated text.
+    Returns None on any failure so the caller can fall back gracefully.
+    """
+    groq_api_key = os.environ.get("GROQ_API_KEY")
+    if not groq_api_key:
+        return None
+
+    try:
+        payload = json.dumps({
+            "model": "llama-3.1-8b-instant",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "max_tokens": 512,
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            "https://api.groq.com/openai/v1/chat/completions",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {groq_api_key}",
+            },
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            text = (body.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+            if text:
+                logger.info("Groq synthesis succeeded chars=%d", len(text))
+                return text
+            logger.warning("Groq returned an empty response")
+            return None
+
+    except Exception as exc:
+        logger.info("Groq unavailable, falling back: %s", exc)
+        return None
+
+
+def _stream_with_openai(prompt: str):
+    """Yield tokens from OpenAI's streaming API."""
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+
+    payload = json.dumps({
+        "model": OPENAI_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "stream": True,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(req, timeout=OPENAI_TIMEOUT_SECS) as resp:
+        for line in resp:
+            decoded = line.decode("utf-8").strip()
+            if decoded.startswith("data: "):
+                data_str = decoded[6:]
+                if data_str == "[DONE]":
+                    break
+                try:
+                    data = json.loads(data_str)
+                    token = data["choices"][0]["delta"].get("content", "")
+                    if token:
+                        yield token
+                except Exception:
+                    pass
+
+
+def _stream_with_anthropic(prompt: str):
+    """Yield tokens from Anthropic's streaming API."""
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY is not configured")
+
+    payload = json.dumps({
+        "model": ANTHROPIC_MODEL,
+        "max_tokens": 512,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": True,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(req, timeout=ANTHROPIC_TIMEOUT_SECS) as resp:
+        for line in resp:
+            decoded = line.decode("utf-8").strip()
+            if decoded.startswith("data: "):
+                data_str = decoded[6:]
+                try:
+                    data = json.loads(data_str)
+                    if data.get("type") == "content_block_delta":
+                        delta = data.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            yield delta.get("text", "")
+                except Exception:
+                    pass
+
+
+def _stream_with_groq(prompt: str):
+    """Yield tokens from Groq's streaming API."""
+    groq_api_key = os.environ.get("GROQ_API_KEY")
+    if not groq_api_key:
+        raise RuntimeError("GROQ_API_KEY is not configured")
+
+    payload = json.dumps({
+        "model": "llama-3.1-8b-instant",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "stream": True,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.groq.com/openai/v1/chat/completions",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {groq_api_key}",
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        for line in resp:
+            decoded = line.decode("utf-8").strip()
+            if decoded.startswith("data: "):
+                data_str = decoded[6:]
+                if data_str == "[DONE]":
+                    break
+                try:
+                    data = json.loads(data_str)
+                    token = data["choices"][0]["delta"].get("content", "")
+                    if token:
+                        yield token
+                except Exception:
+                    pass
+
+
+def _select_streaming_provider(prompt: str):
+    """Return a generator that yields tokens from the configured streaming provider.
+
+    Raises RuntimeError if no streaming-capable provider is configured.
+    """
+    if LLM_PROVIDER == "openai":
+        return _stream_with_openai(prompt)
+    if LLM_PROVIDER == "anthropic":
+        return _stream_with_anthropic(prompt)
+    if LLM_PROVIDER == "groq":
+        return _stream_with_groq(prompt)
+
+    # When no explicit provider is set, try configured cloud providers
+    if OPENAI_API_KEY and not LLM_PROVIDER:
+        return _stream_with_openai(prompt)
+    if ANTHROPIC_API_KEY and not LLM_PROVIDER:
+        return _stream_with_anthropic(prompt)
+    if os.environ.get("GROQ_API_KEY") and not LLM_PROVIDER:
+        return _stream_with_groq(prompt)
+
+    raise RuntimeError(
+        "No streaming-capable LLM provider configured. "
+        "Set LLM_PROVIDER to 'openai', 'anthropic', or 'groq', "
+        "or configure OPENAI_API_KEY / ANTHROPIC_API_KEY / GROQ_API_KEY."
+    )
 
 
 def build_answer_from_documents(question, documents, intent, source_id_by_key=None):
@@ -2835,9 +3204,11 @@ VALID_MODES = {"default", "tutor", "socratic", "eli5", "concise"}
 
 class Question(BaseModel):
     question: str = Field(..., min_length=1, description="Question cannot be empty")
-    session_id: UUID
+    session_id: Optional[UUID] = None
+    session_ids: Optional[list[UUID]] = None
     mode: str = Field(default="default")
     session_secret: str | None = None
+    session_secrets: list[str] | None = None
 
     @field_validator("question")
     @classmethod
@@ -3263,7 +3634,9 @@ async def process_pdf(
 
 
     with sessions_lock:
-        documents = list(sessions[session_id].get("documents", []))
+        session = sessions.get(session_id)
+        session_secret = session.get("session_secret") if session else None
+        documents = list(session.get("documents", [])) if session else []
     update_processing_progress(
         session_id,
         "Completed",
@@ -3272,7 +3645,7 @@ async def process_pdf(
     return {
         "message": "PDF processed successfully",
         "session_id": session_id,
-        "session_secret": sessions[session_id].get("session_secret"),
+        "session_secret": session_secret,
         "document": uploaded_document,
         "documents": documents,
     }
@@ -3322,10 +3695,6 @@ def processing_status(
 
 @app.post("/ask")
 def ask_question(data: Question, _ready: None = Depends(require_models_ready)):
-    cleanup_expired_sessions()
-
-
-def ask_question(data: Question):
     question = (data.question or "").strip()
 
     if not question:
@@ -3674,34 +4043,34 @@ def ask_question(data: Question):
     )
 
     logger.info(
-        "Executing query session_id=%s retrieved_chunks=%s sources=%s",
+        "Executing query session_id=%s retrieved_chunks=%s sources=%s provider=%s",
         session_id,
         len(docs),
         retrieved_sources,
+        LLM_PROVIDER or "auto",
     )
 
-    # ── Step 1: Try Ollama (local generative LLM) ────────────────────────────
-    # synthesize_with_ollama() returns None on any failure so the pipeline
-    # falls through to the HuggingFace model transparently.
-    ollama_answer = synthesize_with_ollama(prompt)
+    # ── Step 1: Try cloud / Ollama synthesizer via unified provider ───────────
+    cloud_answer = _select_cloud_synthesizer(prompt)
 
-    if ollama_answer:
-        framed = apply_mode_framing(ollama_answer, question, mode, docs, context)
+    if cloud_answer:
+        framed = apply_mode_framing(cloud_answer, question, mode, docs, context)
         # Mode-framing can strip citations for non-standard modes; keep the
-        # raw Ollama answer as-is — it already cited sources in the prompt.
+        # raw answer as-is — it already cited sources in the prompt.
         if ASK_REQUIRE_CITATIONS and not answer_contains_citation(framed, len(docs)):
             logger.info(
-                "Mode framing stripped citations from Ollama answer; reverting session_id=%s mode=%s",
+                "Mode framing stripped citations from LLM answer; reverting session_id=%s mode=%s",
                 session_id,
                 mode,
             )
-            framed = ollama_answer
+            framed = cloud_answer
 
+        answer_mode = f"{LLM_PROVIDER}-generative" if LLM_PROVIDER else "generative"
         response_payload = {
             "answer": framed,
             "sources": citation_sources,
             "retrieval_type": "citation-aware",
-            "answer_mode": "generative",
+            "answer_mode": answer_mode,
             "cache_hit": cache_hit,
             "mode": mode,
         }
@@ -3794,86 +4163,106 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
         raise HTTPException(status_code=400, detail="Question is required.")
 
     intent = detect_question_intent(question)
-    session_id = str(data.session_id)
     mode = data.mode
     normalized_query = normalize_query(question)
+    
+    session_id_list = [str(sid) for sid in data.session_ids] if data.session_ids else ([str(data.session_id)] if data.session_id else [])
+    secret_list = data.session_secrets if data.session_secrets else ([data.session_secret] if data.session_secret else [])
+    
+    if not session_id_list:
+        raise HTTPException(status_code=400, detail="At least one session ID must be provided.")
 
-    with sessions_lock:
-        session = _touch_session_unlocked(session_id)
-        if not session:
-            raise HTTPException(
-                status_code=404,
-                detail="Session expired or invalid. Please re-upload your PDFs.",
-            )
+    all_scored_candidates = []
+    all_indexed_documents = []
+    
+    cache_key = f"{mode}:{normalized_query}"
 
-        _require_session_secret(session, data.session_secret)
-
-        if "lock" not in session:
-            session["lock"] = threading.Lock()
-
-        session_lock = session["lock"]
-        if not session.get("vectorstore"):
-            try:
-                session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
-            except Exception as exc:
-                logger.error("Failed to lazy load vectorstore session_id=%s error=%s", session_id, exc)
-                raise HTTPException(status_code=500, detail="Failed to load session index.")
-        vectorstore = session["vectorstore"]
-
-        # Session-level retrieval cache for streaming path
-        retrieval_cache = ensure_retrieval_cache(session)
-        with session_lock:
-            cleanup_retrieval_cache(retrieval_cache)
-            cache_key = f"{mode}:{normalized_query}"
-            cached_value = retrieval_cache.get(cache_key)
-            cache_hit = False
-            if isinstance(cached_value, dict) and "scored_candidates" in cached_value:
-                logger.info(
-                    "Stream retrieval cache hit session_id=%s cache_key=%s",
-                    session_id,
-                    cache_key,
+    for idx, session_id in enumerate(session_id_list):
+        secret = secret_list[idx] if idx < len(secret_list) else None
+        
+        with sessions_lock:
+            session = _touch_session_unlocked(session_id)
+            if not session:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Session {session_id} expired or invalid. Please re-upload your PDFs.",
                 )
-                scored_candidates = cached_value["scored_candidates"]
-                cache_hit = True
-            elif cached_value is not None:
-                logger.info(
-                    "Stream retrieval cache invalidated session_id=%s cache_key=%s",
-                    session_id,
-                    cache_key,
-                )
-                retrieval_cache.pop(cache_key, None)
+
+            _require_session_secret(session, secret)
+
+            if "lock" not in session:
+                session["lock"] = threading.Lock()
+
+            session_lock = session["lock"]
+            if not session.get("vectorstore"):
+                try:
+                    session["vectorstore"] = _load_vectorstore_for_session_unlocked(session_id, session)
+                except Exception as exc:
+                    logger.error("Failed to lazy load vectorstore session_id=%s error=%s", session_id, exc)
+                    raise HTTPException(status_code=500, detail="Failed to load session index.")
+            vectorstore = session["vectorstore"]
+
+            # Session-level retrieval cache for streaming path
+            retrieval_cache = ensure_retrieval_cache(session)
+            with session_lock:
+                cleanup_retrieval_cache(retrieval_cache)
+                cached_value = retrieval_cache.get(cache_key)
                 cache_hit = False
+                if isinstance(cached_value, dict) and "scored_candidates" in cached_value:
+                    logger.info(
+                        "Stream retrieval cache hit session_id=%s cache_key=%s",
+                        session_id,
+                        cache_key,
+                    )
+                    scored_candidates = cached_value["scored_candidates"]
+                    cache_hit = True
+                elif cached_value is not None:
+                    logger.info(
+                        "Stream retrieval cache invalidated session_id=%s cache_key=%s",
+                        session_id,
+                        cache_key,
+                    )
+                    retrieval_cache.pop(cache_key, None)
+                    cache_hit = False
 
-    try:
-        with session_lock:
-            indexed_documents = collect_index_documents(vectorstore)
+        try:
+            with session_lock:
+                indexed_documents = collect_index_documents(vectorstore)
+                if not cache_hit:
+                    logger.info(
+                        "Stream retrieval cache miss session_id=%s cache_key=%s",
+                        session_id,
+                        cache_key,
+                    )
+                    scored_candidates = search_retrieval_candidates(
+                        vectorstore,
+                        question,
+                        ASK_RETRIEVAL_CANDIDATES,
+                    )
+
             if not cache_hit:
-                logger.info(
-                    "Stream retrieval cache miss session_id=%s cache_key=%s",
-                    session_id,
-                    cache_key,
-                )
-                scored_candidates = search_retrieval_candidates(
-                    vectorstore,
-                    question,
-                    ASK_RETRIEVAL_CANDIDATES,
-                )
+                with sessions_lock:
+                    current_session = sessions.get(session_id)
+                    if current_session:
+                        rc = ensure_retrieval_cache(current_session)
+                        if len(rc) >= RETRIEVAL_CACHE_LIMIT:
+                            oldest = next(iter(rc))
+                            del rc[oldest]
+                        rc[cache_key] = {
+                            "cached_at": now_ts(),
+                            "scored_candidates": scored_candidates,
+                        }
+        except Exception:
+            logger.exception("Stream similarity search failed session_id=%s", session_id)
+            raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
+            
+        all_scored_candidates.extend(scored_candidates)
+        all_indexed_documents.extend(indexed_documents)
 
-        if not cache_hit:
-            with sessions_lock:
-                current_session = sessions.get(session_id)
-                if current_session:
-                    rc = ensure_retrieval_cache(current_session)
-                    if len(rc) >= RETRIEVAL_CACHE_LIMIT:
-                        oldest = next(iter(rc))
-                        del rc[oldest]
-                    rc[cache_key] = {
-                        "cached_at": now_ts(),
-                        "scored_candidates": scored_candidates,
-                    }
-    except Exception:
-        logger.exception("Stream similarity search failed session_id=%s", session_id)
-        raise HTTPException(status_code=500, detail="Failed to search the uploaded documents.")
+    # Sort all candidates from multiple documents by score ascending (lower is better in FAISS L2)
+    all_scored_candidates.sort(key=lambda x: x[1])
+    scored_candidates = all_scored_candidates[:ASK_RETRIEVAL_CANDIDATES]
+    indexed_documents = all_indexed_documents
 
     docs = (
         representative_documents_by_source(indexed_documents)
@@ -3975,20 +4364,23 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
     )
 
     logger.info(
-        "Stream executing query session_id=%s retrieved_chunks=%s",
+        "Stream executing query session_id=%s retrieved_chunks=%s provider=%s",
         session_id,
         len(docs),
+        LLM_PROVIDER or "auto",
     )
 
     def _generate_and_stream():
-        groq_api_key = os.environ.get("GROQ_API_KEY")
-        if not groq_api_key:
-            err = "Groq API Key is missing! Please provide your GROQ_API_KEY in the environment."
-            yield err
-            return
-
         full_answer_parts = []
         try:
+            token_stream = _select_streaming_provider(prompt)
+            for token in token_stream:
+                full_answer_parts.append(token)
+                yield token
+        except RuntimeError as exc:
+            err = str(exc)
+            yield err
+            full_answer_parts.append(err)
             import urllib.request
             import json
             
@@ -4022,7 +4414,7 @@ def ask_question_stream(data: Question, _ready: None = Depends(require_models_re
                         except Exception:
                             pass
         except Exception as e:
-            err = f"Groq API Error: {str(e)}"
+            err = f"LLM API Error: {str(e)}"
             yield err
             full_answer_parts.append(err)
 

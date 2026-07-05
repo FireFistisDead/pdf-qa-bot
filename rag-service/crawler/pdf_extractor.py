@@ -80,6 +80,31 @@ def extract_pdf_text(
     return "\n".join(chunks).strip()
 
 
+def extract_pdf_ocr(
+    pdf_bytes: bytes,
+    *,
+    max_pages: int = 50,
+    max_chars: int = 250_000,
+) -> str:
+    """
+    Extract text from image-based PDFs using OCR (pdf2image + pytesseract).
+    """
+    import pytesseract
+    from pdf2image import convert_from_bytes
+
+    images = convert_from_bytes(pdf_bytes, last_page=max_pages)
+    
+    chunks: list[str] = []
+    for image in images:
+        text = pytesseract.image_to_string(image)
+        if text:
+            chunks.append(text)
+        if sum(len(c) for c in chunks) >= max_chars:
+            break
+
+    return "\n".join(chunks).strip()
+
+
 # Patterns marking natural boundary points, in priority order:
 #   1. Paragraph break (blank line) — preferred split
 #   2. Sentence terminal (`.`, `?`, `!` followed by whitespace)

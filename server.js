@@ -20,6 +20,8 @@ const {
   summarizeCredentialSchema,
   sessionsLookupSchema,
   knowledgeGapsSchema,
+  generateFlashcardsSchema,
+  updateFlashcardProgressSchema,
   MAX_QUESTION_LENGTH,
 } = require("./validators/schemas");
 const { clientIpFromRequest } = require("./security/ip");
@@ -172,6 +174,7 @@ app.use(helmet());
 app.use(cors({
   origin: process.env.ALLOWED_ORIGIN || "http://localhost:3000",
   methods: ["GET", "POST"],
+  credentials: true,
 }));
 
 // ─── Body Size Limit ─────────────────────────────────────────────────────────
@@ -555,6 +558,7 @@ const startUploadsCleanup = () => {
     intervalId.unref();
   }
 };
+startUploadsCleanup();
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -659,6 +663,7 @@ const extractServiceDetails = (err, fallbackMessage = "Upstream service request 
 
 const requireInternalRagToken = () => {
   if (!getInternalRagToken()) {
+    console.error("INTERNAL_RAG_TOKEN must be configured for RAG service requests.");
     throw new Error("INTERNAL_RAG_TOKEN must be configured for RAG service requests.");
   }
 };
@@ -690,6 +695,289 @@ const propagateRagError = (err, res, fallback) => {
 
 const normalizeSessionSecret = (value) =>
   typeof value === "string" ? value.trim() || null : null;
+
+const SESSION_SECRET_COOKIE_PREFIX = "pdfqa_session_secret_";
+
+const getSessionSecretCookieName = (sessionId) =>
+  `${SESSION_SECRET_COOKIE_PREFIX}${sessionId}`;
+
+const SESSION_SECRET_TTL_MS = (parseInt(process.env.SESSION_SECRET_COOKIE_TTL_DAYS || "7", 10) || 7) * 24 * 60 * 60 * 1000;
+const SESSION_SECRET_REDIS_URL = process.env.SESSION_SECRET_REDIS_URL || RATE_LIMIT_REDIS_URL || process.env.REDIS_URL || "";
+const SESSION_SECRET_REDIS_PREFIX = "session-secret:";
+const SESSION_SECRET_MEMORY_MAP = new Map(); // token -> { encrypted: string, expiry }
+
+// Cookie SameSite configuration for session-secret fallback cookie.
+// Default: 'lax'. Operators can set to 'none' when frontend+API are cross-site,
+// but that requires Secure to be true per browser rules.
+const SESSION_SECRET_COOKIE_SAMESITE = (process.env.SESSION_SECRET_COOKIE_SAMESITE || "lax").toString();
+
+let sessionSecretRedisClient = null;
+let sessionSecretRedisConnectPromise = null;
+
+if (SESSION_SECRET_REDIS_URL) {
+  if (redisClient) {
+    sessionSecretRedisClient = redisClient;
+  } else {
+    ({ client: sessionSecretRedisClient, connectPromise: sessionSecretRedisConnectPromise } = createRedisClient(SESSION_SECRET_REDIS_URL));
+  }
+  if (sessionSecretRedisConnectPromise) {
+    void sessionSecretRedisConnectPromise.catch((err) => {
+      console.warn("[session-secret] redis connect failed:", err?.message || err);
+    });
+  }
+}
+
+// Encryption key must be provided via env var as base64-encoded 32 bytes.
+// If not present, generate a runtime-only key (lost on restart) and log a warning.
+let ENC_KEY = null;
+const _initEncKey = () => {
+  if (ENC_KEY) return;
+  const fromEnv = (process.env.SESSION_SECRET_ENC_KEY || "").trim();
+  if (fromEnv) {
+    try {
+      const buf = Buffer.from(fromEnv, "base64");
+      if (buf.length === 32) {
+        ENC_KEY = buf;
+      } else {
+        console.warn("SESSION_SECRET_ENC_KEY must be 32 bytes base64; falling back to runtime key");
+      }
+    } catch (_) {
+      console.warn("Invalid SESSION_SECRET_ENC_KEY; falling back to runtime key");
+    }
+  }
+  if (!ENC_KEY) {
+    // If Redis-backed storage is enabled (or specifically sessionSecretRedisClient is set)
+    // and we're running in production, require a persistent encryption key so
+    // stored values remain decryptable across restarts. Falling back to a
+    // runtime-only key in this configuration leads to opaque failures.
+    if (sessionSecretRedisClient && process.env.NODE_ENV === "production") {
+      throw new Error("SESSION_SECRET_ENC_KEY is required when using Redis-backed session secret storage in production");
+    }
+
+    ENC_KEY = crypto.randomBytes(32);
+    console.warn("No SESSION_SECRET_ENC_KEY provided — generated runtime-only key (won't persist across restarts)");
+  }
+};
+
+const _encryptSecret = (secret) => {
+  _initEncKey();
+  const iv = crypto.randomBytes(12); // recommended IV size for AES-GCM
+  const cipher = crypto.createCipheriv("aes-256-gcm", ENC_KEY, iv);
+  const ciphertext = Buffer.concat([cipher.update(secret, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  // Store as base64 segments iv:ciphertext:tag
+  return `${iv.toString("base64")}:${ciphertext.toString("base64")}:${tag.toString("base64")}`;
+};
+
+const _decryptSecret = (blob) => {
+  if (!blob) return null;
+  _initEncKey();
+  try {
+    const [ivB64, ctB64, tagB64] = blob.split(":");
+    const iv = Buffer.from(ivB64, "base64");
+    const ct = Buffer.from(ctB64, "base64");
+    const tag = Buffer.from(tagB64, "base64");
+    const decipher = crypto.createDecipheriv("aes-256-gcm", ENC_KEY, iv);
+    decipher.setAuthTag(tag);
+    const decrypted = Buffer.concat([decipher.update(ct), decipher.final()]);
+    return decrypted.toString("utf8");
+  } catch (e) {
+    console.warn("Failed to decrypt session secret token:", e?.message || e);
+    return null;
+  }
+};
+
+const _sessionSecretRedisKey = (token) => `${SESSION_SECRET_REDIS_PREFIX}${token}`;
+
+const _storeSessionSecretInRedis = async (token, encrypted, expiry) => {
+  if (!sessionSecretRedisClient) {
+    return false;
+  }
+
+  try {
+    await sessionSecretRedisClient.set(
+      _sessionSecretRedisKey(token),
+      JSON.stringify({ encrypted, expiry }),
+      { PX: SESSION_SECRET_TTL_MS },
+    );
+    return true;
+  } catch (err) {
+    console.warn("[session-secret] redis write failed:", err?.message || err);
+    return false;
+  }
+};
+
+const _readSessionSecretFromRedis = async (token) => {
+  if (!sessionSecretRedisClient) {
+    return null;
+  }
+
+  try {
+    const raw = await sessionSecretRedisClient.get(_sessionSecretRedisKey(token));
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed.encrypted !== "string") {
+      return null;
+    }
+
+    if (typeof parsed.expiry === "number" && parsed.expiry <= Date.now()) {
+      return null;
+    }
+
+    return parsed.encrypted;
+  } catch (err) {
+    console.warn("[session-secret] redis read failed:", err?.message || err);
+    return null;
+  }
+};
+
+const _storeSessionSecret = async (token, sessionSecret) => {
+  if (!token || !sessionSecret) return false;
+  const expiry = Date.now() + SESSION_SECRET_TTL_MS;
+  const encrypted = _encryptSecret(sessionSecret);
+
+  if (sessionSecretRedisClient) {
+    await _storeSessionSecretInRedis(token, encrypted, expiry);
+  }
+
+  SESSION_SECRET_MEMORY_MAP.set(token, { encrypted, expiry });
+  // Only create a per-token timer for in-memory fallback. When Redis is
+  // configured we rely on Redis TTLs and lazy eviction to avoid creating
+  // large numbers of active timers in-process.
+  if (!sessionSecretRedisClient) {
+    const timeout = setTimeout(() => {
+      SESSION_SECRET_MEMORY_MAP.delete(token);
+    }, SESSION_SECRET_TTL_MS + 1000);
+    if (typeof timeout.unref === "function") {
+      timeout.unref();
+    }
+  }
+  return true;
+};
+
+const _lookupSessionSecret = async (token) => {
+  if (!token) return null;
+
+  const encryptedFromRedis = await _readSessionSecretFromRedis(token);
+  if (encryptedFromRedis) {
+    return _decryptSecret(encryptedFromRedis);
+  }
+
+  const entry = SESSION_SECRET_MEMORY_MAP.get(token);
+  if (!entry) return null;
+  if (entry.expiry <= Date.now()) {
+    SESSION_SECRET_MEMORY_MAP.delete(token);
+    return null;
+  }
+  return _decryptSecret(entry.encrypted);
+};
+
+const readRequestCookies = (req) => {
+  const header = req.headers.cookie;
+  if (!header || typeof header !== "string") {
+    return {};
+  }
+
+  return header.split(";").reduce((cookies, pair) => {
+    const separatorIndex = pair.indexOf("=");
+    if (separatorIndex === -1) {
+      return cookies;
+    }
+
+    const rawName = pair.slice(0, separatorIndex).trim();
+    const rawValue = pair.slice(separatorIndex + 1).trim();
+
+    if (!rawName) {
+      return cookies;
+    }
+
+    try {
+      cookies[rawName] = decodeURIComponent(rawValue);
+    } catch (_) {
+      cookies[rawName] = rawValue;
+    }
+
+    return cookies;
+  }, {});
+};
+
+const getSessionSecretFromCookie = async (req, sessionId) => {
+  if (!sessionId) {
+    return null;
+  }
+
+  const cookies = readRequestCookies(req);
+  const rawCookieValue = normalizeSessionSecret(cookies[getSessionSecretCookieName(sessionId)]);
+  if (!rawCookieValue) return null;
+
+  const resolvedFromStore = await _lookupSessionSecret(rawCookieValue);
+  if (resolvedFromStore) {
+    return resolvedFromStore;
+  }
+
+  // Legacy compatibility: older clients/tests may still send the plaintext
+  // session secret in the cookie. Only accept the raw value when it is not one
+  // of our generated UUID-like tokens, so token loss on restart does not
+  // silently fall back to an opaque token string.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(rawCookieValue)) {
+    return rawCookieValue;
+  }
+
+  return null;
+};
+
+const resolveSessionSecret = async (req, sessionId, providedSecret) =>
+  normalizeSessionSecret(providedSecret) || getSessionSecretFromCookie(req, sessionId);
+
+const setSessionSecretCookie = async (res, sessionId, sessionSecret) => {
+  if (!sessionId || !sessionSecret) {
+    return;
+  }
+
+  // Store the real secret server-side and put only a random token in the cookie.
+  // Generate the token outside the storage helper so cookie data never flows
+  // from a function that accepts the sensitive plaintext secret.
+  const token = crypto.randomUUID();
+  const stored = await _storeSessionSecret(token, sessionSecret);
+  if (!stored) return;
+
+  // Respect operator-configured SameSite. If operators explicitly request
+  // 'none', ensure the Secure flag is set (browsers require this for None).
+  const sameSiteRaw = (SESSION_SECRET_COOKIE_SAMESITE || "lax").toString();
+  const sameSite = ("" + sameSiteRaw).toLowerCase();
+  const secureFlag = process.env.NODE_ENV === "production" || sameSite === "none";
+
+  if (sameSite === "none" && !secureFlag) {
+    console.warn("SESSION_SECRET_COOKIE_SAMESITE=none was requested but secure cookies are not enabled; forcing Secure flag to true for compatibility.");
+  }
+
+  res.cookie(getSessionSecretCookieName(sessionId), token, {
+    httpOnly: true,
+    sameSite: sameSiteRaw,
+    secure: !!secureFlag,
+    path: "/",
+    maxAge: SESSION_SECRET_TTL_MS,
+  });
+};
+
+const attachSessionSecrets = async (req, sessions) => {
+  if (!Array.isArray(sessions)) {
+    return [];
+  }
+
+  return Promise.all(sessions.map(async (session) => {
+    const sessionId = session?.session_id;
+    const sessionSecret = await resolveSessionSecret(req, sessionId, session?.session_secret);
+
+    return {
+      ...session,
+      session_secret: sessionSecret,
+    };
+  }));
+};
 
 const SUPABASE_ALLOWED_HOST_SUFFIXES = new Set(["supabase.co", "supabase.in"]);
 
@@ -842,7 +1130,7 @@ app.post(
     ? path.join(UPLOADS_DIR, path.basename(uploadedFilePath))
     : null;
   const sessionId = req.body?.session_id || null;
-  const sessionSecret = normalizeSessionSecret(req.body?.session_secret);
+  const sessionSecret = await resolveSessionSecret(req, sessionId, req.body?.session_secret);
 
   try {
     if (!req.file) {
@@ -942,10 +1230,11 @@ app.post(
     // the raw PDF without supplying a session_secret.
     await cleanupFile(uploadedFilePath);
 
+    await setSessionSecretCookie(res, response.data.session_id || sessionId, response.data.session_secret || sessionSecret);
+
     return res.json({
       message: "PDF uploaded & processed successfully!",
       session_id: response.data.session_id,
-      session_secret: response.data.session_secret,
       document: response.data.document,
       documents: response.data.documents || [],
     });
@@ -992,6 +1281,7 @@ const requireSupabaseAuth = (req, res, next) => {
   try {
     req.user = jwt.verify(token, secret);
   } catch (err) {
+    console.error("requireSupabaseAuth JWT verification failed:", err.message);
     return res.status(401).json({ error: "Invalid token" });
   }
 
@@ -1067,9 +1357,10 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
     form.append("original_filename", safeFilename);
 
     // Optionally extend an existing session
-    if (session_id && session_secret) {
+    const resolvedSessionSecret = await resolveSessionSecret(req, session_id, session_secret);
+    if (session_id && resolvedSessionSecret) {
       form.append("session_id", session_id);
-      form.append("session_secret", session_secret);
+      form.append("session_secret", resolvedSessionSecret);
     }
 
     const ragResponse = await axios.post(
@@ -1083,10 +1374,11 @@ app.post("/process-from-url", uploadLimiter, requireSupabaseAuth, async (req, re
       }
     );
 
+    await setSessionSecretCookie(res, ragResponse.data.session_id || session_id, ragResponse.data.session_secret || resolvedSessionSecret);
+
     return res.json({
       message: "PDF processed and indexed successfully.",
       session_id: ragResponse.data.session_id,
-      session_secret: ragResponse.data.session_secret,
       document: ragResponse.data.document,
       documents: ragResponse.data.documents || [],
     });
@@ -1119,7 +1411,16 @@ app.get("/processing-status/:sessionId", async (req, res) => {
 });
 
 app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
-  const validation = validateAskBody(req.body);
+  const resolvedSessionSecret = await resolveSessionSecret(
+    req,
+    req.body?.session_id,
+    req.body?.session_secret
+  );
+
+  const validation = validateAskBody({
+    ...req.body,
+    session_secret: resolvedSessionSecret,
+  });
 
   if (!validation.success) {
     return res.status(400).json({
@@ -1149,12 +1450,25 @@ app.post("/ask", inferenceSlowDown, inferenceLimiter, async (req, res) => {
       mode: response.data.mode ?? "default",
     });
   } catch (err) {
-    console.error("Question answering failed:", extractServiceDetails(err, "Error answering question"));
+    console.error(
+      "Question answering failed:",
+      extractServiceDetails(err, "Error answering question")
+    );
     return propagateRagError(err, res, "Error answering question");
   }
 });
+
 app.post("/ask/stream", inferenceSlowDown, inferenceLimiter, async (req, res) => {
-  const validation = validateAskBody(req.body);
+  const resolvedSessionSecret = await resolveSessionSecret(
+    req,
+    req.body?.session_id,
+    req.body?.session_secret
+  );
+
+  const validation = validateAskBody({
+    ...req.body,
+    session_secret: resolvedSessionSecret,
+  });
 
   if (!validation.success) {
     return res.status(400).json({
@@ -1265,7 +1579,16 @@ return res.status(statusCode).json({
 });
 
 app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => {
-  const validation = validateSummarizeBody(req.body);
+  const resolvedSessionSecret = await resolveSessionSecret(
+    req,
+    req.body?.session_id,
+    req.body?.session_secret
+  );
+
+  const validation = validateSummarizeBody({
+    ...req.body,
+    session_secret: resolvedSessionSecret,
+  });
 
   if (!validation.success) {
     return res.status(400).json({
@@ -1275,21 +1598,37 @@ app.post("/summarize", inferenceSlowDown, inferenceLimiter, async (req, res) => 
   }
 
   try {
-    const response = await axios.post(`${RAG_SERVICE_URL}/summarize`, validation.data, {
-      headers: ragAuthHeaders(),
-    });
+    const response = await axios.post(
+      `${RAG_SERVICE_URL}/summarize`,
+      validation.data,
+      {
+        headers: ragAuthHeaders(),
+      }
+    );
 
     return res.json({
       summary: response.data.summary,
     });
   } catch (err) {
-    console.error("Summarization failed:", extractServiceDetails(err, "Error summarizing PDF"));
+    console.error(
+      "Summarization failed:",
+      extractServiceDetails(err, "Error summarizing PDF")
+    );
     return propagateRagError(err, res, "Error summarizing PDF");
   }
 });
 
 app.post("/knowledge-gaps", inferenceSlowDown, inferenceLimiter, async (req, res) => {
-  const validation = knowledgeGapsSchema.safeParse(req.body);
+  const resolvedSessionSecret = await resolveSessionSecret(
+    req,
+    req.body?.session_id,
+    req.body?.session_secret
+  );
+
+  const validation = knowledgeGapsSchema.safeParse({
+    ...req.body,
+    session_secret: resolvedSessionSecret,
+  });
 
   if (!validation.success) {
     return res.status(400).json({
@@ -1302,19 +1641,94 @@ app.post("/knowledge-gaps", inferenceSlowDown, inferenceLimiter, async (req, res
     const response = await axios.post(
       `${RAG_SERVICE_URL}/knowledge-gaps`,
       validation.data,
-      { headers: ragAuthHeaders() },
+      {
+        headers: ragAuthHeaders(),
+      }
     );
-    // Pass the response through as-is — no gateway-layer transformation.
+
     return res.json(response.data);
   } catch (err) {
-    const statusCode = err.response?.status || 500;
-    const details = extractServiceDetails(err, "Error mapping knowledge gaps");
-    console.error("Knowledge gap mapping failed:", details);
+    console.error(
+      "Knowledge gaps mapping failed:",
+      extractServiceDetails(err, "Error mapping knowledge gaps")
+    );
+    return propagateRagError(err, res, "Error mapping knowledge gaps");
+  }
+});
 
-    return res.status(statusCode).json({
-      error: typeof details === "string" ? details : "Error mapping knowledge gaps",
-      details: isDevelopment ? details : "Internal processing error",
+app.post("/sessions/flashcards", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+  const resolvedSessionSecret = await resolveSessionSecret(
+    req,
+    req.body?.session_id,
+    req.body?.session_secret
+  );
+
+  const validation = generateFlashcardsSchema.safeParse({
+    ...req.body,
+    session_secret: resolvedSessionSecret,
+  });
+
+  if (!validation.success) {
+    return res.status(400).json({
+      error: "Validation failed",
+      details: validation.error.flatten(),
     });
+  }
+
+  try {
+    const response = await axios.post(
+      `${RAG_SERVICE_URL}/sessions/flashcards/generate`,
+      validation.data,
+      {
+        headers: ragAuthHeaders(),
+      }
+    );
+
+    return res.json(response.data);
+  } catch (err) {
+    console.error(
+      "Flashcard generation failed:",
+      extractServiceDetails(err, "Error generating flashcards")
+    );
+    return propagateRagError(err, res, "Error generating flashcards");
+  }
+});
+
+app.post("/sessions/flashcards/progress", inferenceSlowDown, inferenceLimiter, async (req, res) => {
+  const resolvedSessionSecret = await resolveSessionSecret(
+    req,
+    req.body?.session_id,
+    req.body?.session_secret
+  );
+
+  const validation = updateFlashcardProgressSchema.safeParse({
+    ...req.body,
+    session_secret: resolvedSessionSecret,
+  });
+
+  if (!validation.success) {
+    return res.status(400).json({
+      error: "Validation failed",
+      details: validation.error.flatten(),
+    });
+  }
+
+  try {
+    const response = await axios.post(
+      `${RAG_SERVICE_URL}/sessions/flashcards/update-progress`,
+      validation.data,
+      {
+        headers: ragAuthHeaders(),
+      }
+    );
+
+    return res.json(response.data);
+  } catch (err) {
+    console.error(
+      "Flashcard progress update failed:",
+      extractServiceDetails(err, "Error updating flashcard progress")
+    );
+    return propagateRagError(err, res, "Error updating flashcard progress");
   }
 });
 
@@ -1325,7 +1739,10 @@ app.get("/sessions", async (req, res) => {
 });
 
 app.post("/sessions/lookup", async (req, res) => {
-  const validation = sessionsLookupSchema.safeParse(req.body);
+  const validation = sessionsLookupSchema.safeParse({
+    ...req.body,
+    sessions: await attachSessionSecrets(req, req.body?.sessions),
+  });
 
   if (!validation.success) {
     return res.status(400).json({
@@ -1352,14 +1769,44 @@ app.post("/sessions/lookup", async (req, res) => {
   }
 });
 
+app.get("/processing-status/:session_id", async (req, res) => {
+  const { session_id } = req.params;
+  
+  // CodeQL [js/server-side-request-forgery] Mitigation: Validate UUID structure strictly
+  const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (!UUID_PATTERN.test(session_id)) {
+    return res.status(400).json({ error: "Invalid session ID format." });
+  }
+
+  // CodeQL [js/sensitive-data-read-from-get-request] Mitigation: Accept secrets only via headers to prevent leak in logs/browser history
+  const session_secret = req.headers["x-session-secret"] || "";
+
+  try {
+    const response = await axios.get(
+      `${RAG_SERVICE_URL}/processing-status/${session_id}`,
+      {
+        headers: {
+          ...ragAuthHeaders(),
+          "X-Session-Secret": session_secret,
+        },
+      }
+    );
+    return res.json(response.data);
+  } catch (err) {
+    return propagateRagError(err, res, "Failed to check processing status");
+  }
+});
+
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-app.use((req, res, next) => {
-  res.status(404).json({ error: "Not found" });
+
+app.use((req, res) => {
+  res.status(404).json({ error: "Route not found" });
 });
 
+// eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   if (!err) {
     return next();
@@ -1383,34 +1830,42 @@ app.use((err, req, res, next) => {
 });
 
 if (require.main === module) {
-  requireInternalRagToken();
-  if (!SUPABASE_JWT_SECRET) {
-    throw new Error("SUPABASE_JWT_SECRET missing in .env – required for /process-from-url authentication");
-  }
-
-  (async () => {
+  try {
     requireInternalRagToken();
-
-    if (redisConnectPromise) {
-      console.log("[redis] connecting for distributed rate limiting...");
-      await redisConnectPromise;
-      console.log("[redis] connected");
+    if (!SUPABASE_JWT_SECRET) {
+      console.error("SUPABASE_JWT_SECRET missing in .env – required for /process-from-url authentication");
+      process.exit(1);
     }
 
-    const server = app.listen(PORT, () =>
-      console.log(`Backend running on port ${PORT}`)
-    );
+    (async () => {
+      try {
+        requireInternalRagToken();
 
-    // ─── Server-Level Timeouts ───────────────────────────────────────────────
-    // Slow-loris and connection-exhaustion attacks open connections and then
-    // trickle data to keep the socket alive forever. These timeouts kill them.
-    server.keepAliveTimeout = 65_000;  // 65 s — slightly above typical LB (60 s)
-    server.headersTimeout = 70_000;    // Must be > keepAliveTimeout
-    server.requestTimeout = 120_000;   // Max time to fully receive a request (2 min)
-  })().catch((err) => {
+        if (redisConnectPromise) {
+          console.log("[redis] connecting for distributed rate limiting...");
+          await redisConnectPromise;
+          console.log("[redis] connected");
+        }
+
+        const server = app.listen(PORT, () =>
+          console.log(`Backend running on port ${PORT}`)
+        );
+
+        // ─── Server-Level Timeouts ───────────────────────────────────────────────
+        // Slow-loris and connection-exhaustion attacks open connections and then
+        // trickle data to keep the socket alive forever. These timeouts kill them.
+        server.keepAliveTimeout = 65_000;  // 65 s — slightly above typical LB (60 s)
+        server.headersTimeout = 70_000;    // Must be > keepAliveTimeout
+        server.requestTimeout = 120_000;   // Max time to fully receive a request (2 min)
+      } catch (err) {
+        console.error("Backend failed to start:", err?.message || err);
+        process.exit(1);
+      }
+    })();
+  } catch (err) {
     console.error("Backend failed to start:", err?.message || err);
-    process.exitCode = 1;
-  });
+    process.exit(1);
+  }
 }
 
 module.exports = {
