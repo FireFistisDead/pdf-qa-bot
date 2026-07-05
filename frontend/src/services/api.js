@@ -2,6 +2,8 @@ import axios from "axios";
 
 const API_BASE = process.env.REACT_APP_API_URL || "";
 
+axios.defaults.withCredentials = true;
+
 export const extractApiErrorMessage = (error, fallbackMessage) => {
   return (
     error?.response?.data?.detail ||
@@ -110,6 +112,7 @@ export const askQuestionStreamApi = async (question, sessionId, sessionSecret, m
   const response = await fetch(`${API_BASE}/ask/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    credentials: "include",
     body: JSON.stringify({ question, session_id: sessionId, session_secret: sessionSecret, mode }),
     signal,
   });
@@ -142,13 +145,29 @@ export const askQuestionStreamApi = async (question, sessionId, sessionSecret, m
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let fullText = "";
+  let buffer = "";
 
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    const chunk = decoder.decode(value, { stream: true });
-    fullText += chunk;
-    onChunk(fullText);
+    
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop(); // Hold onto incomplete last line
+
+    for (let line of lines) {
+      if (line.endsWith("\r")) {
+        line = line.slice(0, -1);
+      }
+      if (line.startsWith("data: ")) {
+        const dataVal = line.slice(6);
+        if (dataVal === "[DONE]") {
+          break;
+        }
+        fullText += dataVal;
+        onChunk(fullText);
+      }
+    }
   }
 
   return fullText;

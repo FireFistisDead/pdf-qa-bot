@@ -8,6 +8,7 @@ const LandingNavbar = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [activeSection, setActiveSection] = useState('');
   const dropdownRef = useRef(null);
 
   // Close dropdown when clicking outside
@@ -20,6 +21,29 @@ const LandingNavbar = () => {
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  useEffect(() => {
+  const sections = ['features', 'how-it-works', 'pricing', 'faq'];
+  const observer = new IntersectionObserver(
+    (entries) => {
+      const visible = entries
+        .filter((e) => e.isIntersecting)
+        .sort((a, b) => b.intersectionRatio - a.intersectionRatio);
+
+      if (visible.length > 0) {
+        setActiveSection(visible[0].target.id);
+      }
+    },
+    { threshold: 0.4 }
+  );
+
+  sections.forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) observer.observe(el);
+  });
+
+  return () => observer.disconnect();
+}, []);
 
   return (
     <nav className="navbar" id="landing-navbar">
@@ -35,10 +59,10 @@ const LandingNavbar = () => {
 
       {/* Center Links */}
       <div className="navbar-links" id="navbar-links">
-        <a href="#features" className="navbar-link">Features</a>
-        <a href="#how-it-works" className="navbar-link">How It Works</a>
-        <a href="#pricing" className="navbar-link">Pricing</a>
-        <a href="#faq" className="navbar-link">FAQ</a>
+        <a href="#features" className={`navbar-link ${activeSection === 'features' ? 'active' : ''}`}>Features</a>
+        <a href="#how-it-works" className={`navbar-link ${activeSection === 'how-it-works' ? 'active' : ''}`}>How It Works</a>
+        <a href="#pricing" className={`navbar-link ${activeSection === 'pricing' ? 'active' : ''}`}>Pricing</a>
+        <a href="#faq" className={`navbar-link ${activeSection === 'faq' ? 'active' : ''}`}>FAQ</a>
       </div>
 
       {/* Actions */}

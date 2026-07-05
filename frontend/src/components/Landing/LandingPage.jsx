@@ -1,3 +1,4 @@
+import BackToTop from "../BackToTop";
 import React, { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
@@ -33,6 +34,7 @@ const LandingPage = () => {
       <Pricing />
       <FAQ />
       <Footer />
+      <BackToTop />
     </div>
   );
 };
