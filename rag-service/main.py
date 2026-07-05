@@ -274,6 +274,8 @@ PROTECTED_RAG_PATHS = {
     "/validate-session-write",
     "/sessions/lookup",
     "/demo-query-validation",
+    "/sessions/flashcards",
+    "/sessions/flashcards/progress",
 }
 PROTECTED_RAG_PREFIXES = (
     "/ask/",
@@ -4865,7 +4867,7 @@ def generate_flashcards_from_text(indexed_docs, count):
     return cards
 
 
-@app.post("/sessions/flashcards/generate")
+@app.post("/sessions/flashcards")
 def generate_flashcards(data: FlashcardGenerateRequest):
     cleanup_expired_sessions()
     session_id = str(data.session_id)
@@ -4909,7 +4911,7 @@ def generate_flashcards(data: FlashcardGenerateRequest):
     return {"flashcards": cards}
 
 
-@app.post("/sessions/flashcards/update-progress")
+@app.post("/sessions/flashcards/progress")
 def update_flashcard_progress(data: FlashcardProgressRequest):
     cleanup_expired_sessions()
     session_id = str(data.session_id)

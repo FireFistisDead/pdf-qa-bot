@@ -518,6 +518,7 @@ describe("route error responses", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Authorization: `Bearer ${jwt.sign({ role: "authenticated" }, process.env.SUPABASE_JWT_SECRET)}`,
           Authorization: `Bearer ${validToken}`,
         },
         body: JSON.stringify({
@@ -564,6 +565,7 @@ describe("route error responses", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Authorization: `Bearer ${jwt.sign({ role: "authenticated" }, process.env.SUPABASE_JWT_SECRET)}`,
           Authorization: `Bearer ${validToken}`,
         },
         body: JSON.stringify({
@@ -847,6 +849,59 @@ describe("route error responses", () => {
     } finally {
       axios.post = originalPost;
       axios.postForm = originalPostForm;
+    }
+  });
+
+  test("POST /sessions/flashcards generates flashcards", async () => {
+    const originalPost = axios.post;
+    let forwardedHeaders = null;
+
+    axios.post = async (url, body, options) => {
+      forwardedHeaders = options?.headers;
+      return { data: { flashcards: [] } };
+    };
+
+    try {
+      const res = await fetch(`${baseUrl}/sessions/flashcards`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: "550e8400-e29b-41d4-a716-446655440000",
+          session_secret: "secret-abc",
+          count: 5,
+        }),
+      });
+      assert.equal(res.status, 200);
+      assert.equal(forwardedHeaders["X-Internal-Token"], process.env.INTERNAL_RAG_TOKEN);
+    } finally {
+      axios.post = originalPost;
+    }
+  });
+
+  test("POST /sessions/flashcards/progress updates progress", async () => {
+    const originalPost = axios.post;
+    let forwardedHeaders = null;
+
+    axios.post = async (url, body, options) => {
+      forwardedHeaders = options?.headers;
+      return { data: { success: true } };
+    };
+
+    try {
+      const res = await fetch(`${baseUrl}/sessions/flashcards/progress`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: "550e8400-e29b-41d4-a716-446655440000",
+          session_secret: "secret-abc",
+          card_id: "card-1",
+          rating: "good",
+        }),
+      });
+      assert.equal(res.status, 200);
+      assert.equal(forwardedHeaders["X-Internal-Token"], process.env.INTERNAL_RAG_TOKEN);
+    } finally {
+      axios.post = originalPost;
     }
   });
 

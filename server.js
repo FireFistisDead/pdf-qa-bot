@@ -23,6 +23,8 @@ const {
   generateFlashcardsSchema,
   updateFlashcardProgressSchema,
   MAX_QUESTION_LENGTH,
+  generateFlashcardsSchema,
+  updateFlashcardProgressSchema,
 } = require("./validators/schemas");
 const { clientIpFromRequest } = require("./security/ip");
 const { createRedisClient } = require("./security/redis");
@@ -1754,6 +1756,47 @@ app.post("/sessions/lookup", async (req, res) => {
   }
 });
 
+app.post("/sessions/flashcards", async (req, res) => {
+  const validation = generateFlashcardsSchema.safeParse(req.body);
+
+  if (!validation.success) {
+    return res.status(400).json({
+      error: "Validation failed",
+      details: validation.error.flatten(),
+    });
+  }
+
+  try {
+    const response = await axios.post(
+      `${RAG_SERVICE_URL}/sessions/flashcards`,
+      validation.data,
+      { headers: ragAuthHeaders(), timeout: 60000 },
+    );
+    return res.json(response.data);
+  } catch (err) {
+    return propagateRagError(err, res, "Failed to generate flashcards");
+  }
+});
+
+app.post("/sessions/flashcards/progress", async (req, res) => {
+  const validation = updateFlashcardProgressSchema.safeParse(req.body);
+
+  if (!validation.success) {
+    return res.status(400).json({
+      error: "Validation failed",
+      details: validation.error.flatten(),
+    });
+  }
+
+  try {
+    const response = await axios.post(
+      `${RAG_SERVICE_URL}/sessions/flashcards/progress`,
+      validation.data,
+      { headers: ragAuthHeaders(), timeout: 10000 },
+    );
+    return res.json(response.data);
+  } catch (err) {
+    return propagateRagError(err, res, "Failed to update flashcard progress");
 app.get("/processing-status/:session_id", async (req, res) => {
   const { session_id } = req.params;
   
