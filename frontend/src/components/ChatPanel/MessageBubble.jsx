@@ -355,6 +355,7 @@ const MessageBubble = ({
               {uniqueSources.map((source, index) => {
                 const sourceLabel = getSourceLabel(source);
                 const canOpenPage = hasOpenablePage(source);
+                const isWebSource = source.type === "web";
                 const truncatedLabel = sourceLabel.length > 24 
                   ? sourceLabel.substring(0, 21) + "..." 
                   : sourceLabel;
@@ -362,7 +363,24 @@ const MessageBubble = ({
                 return (
                   <button
                     key={`${source.document_id || sourceLabel}-${source.page || "unknown"}-${index}`}
-                    onClick={() => canOpenPage && onOpenSource?.(source)}
+                    onClick={() => {
+                      if (isWebSource && source.url) {
+                        try {
+                          const url = new URL(source.url);
+                          if (!["http:", "https:"].includes(url.protocol)) return;
+                          const opened = window.open(
+                            url.toString(),
+                            "_blank",
+                            "noopener,noreferrer",
+                          );
+                          if (opened) opened.opener = null;
+                        } catch {
+                          return;
+                        }
+                      } else if (canOpenPage) {
+                        onOpenSource?.(source);
+                      }
+                    }}
                     title={sourceLabel}
                     className="citation-chip"
                     style={{
@@ -373,14 +391,14 @@ const MessageBubble = ({
                       color: darkMode ? "#D1D5DB" : "#4B5563",
                       fontSize: "12px",
                       fontWeight: 500,
-                      cursor: canOpenPage ? "pointer" : "default",
+                      cursor: (canOpenPage || isWebSource) ? "pointer" : "default",
                       display: "flex",
                       alignItems: "center",
                       gap: "6px"
                     }}
                   >
-                    <span style={{ opacity: 0.8 }}>📄</span>
-                    <span>{truncatedLabel}{source.page ? ` — Page ${source.page}` : ""}</span>
+                    <span style={{ opacity: 0.8 }}>{isWebSource ? "🌐" : "📄"}</span>
+                    <span>{truncatedLabel}{(source.page && !isWebSource) ? ` — Page ${source.page}` : ""}</span>
                   </button>
                 );
               })}
