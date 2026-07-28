@@ -112,7 +112,7 @@ function MainApp() {
 
   const loadKnownSessions = React.useCallback(() => {
     try {
-      const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+      const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
       if (!raw) return [];
       const parsed = decodePayload(raw);
       if (!Array.isArray(parsed)) return [];
@@ -150,11 +150,11 @@ function MainApp() {
         ...existing.filter((s) => s.session_id !== normalizedSessionId),
       ];
       try {
-        localStorage.setItem(SESSION_STORAGE_KEY, encodePayload(next.slice(0, 50)));
+        sessionStorage.setItem(SESSION_STORAGE_KEY, encodePayload(next.slice(0, 50)));
       } catch (_) {
         // sessionStorage quota exceeded — prune to 10 most recent and retry once.
         try {
-          localStorage.setItem(SESSION_STORAGE_KEY, encodePayload(next.slice(0, 10)));
+          sessionStorage.setItem(SESSION_STORAGE_KEY, encodePayload(next.slice(0, 10)));
         } catch (_) {}
       }
     },
