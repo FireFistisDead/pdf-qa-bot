@@ -150,7 +150,7 @@ const askQuestion = async (overrideQuestion = null) => {
       return;
     }
     setMappingGaps(true);
-    const loadingToast = toast.loading("Analysing knowledge prerequisites…");
+    const loadingToast = toast.loading("Analyzing knowledge prerequisites…");
     try {
       const data = await mapKnowledgeGapsApi(
         currentPdfSessionId,
