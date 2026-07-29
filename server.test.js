@@ -495,7 +495,14 @@ describe("route error responses", () => {
   test("POST /process-from-url keeps protocol-relative paths on the trusted host", async () => {
     const originalGet = axios.get;
     const originalPost = axios.post;
+    const dns = require('dns').promises;
+    const originalResolve4 = dns.resolve4;
+    const originalResolve6 = dns.resolve6;
     let requestedDownloadUrl = null;
+
+    // Mock DNS resolution to return a public IP
+    dns.resolve4 = async () => ['1.2.3.4'];
+    dns.resolve6 = async () => [];
 
     axios.get = async (url) => {
       requestedDownloadUrl = url;
@@ -535,13 +542,22 @@ describe("route error responses", () => {
     } finally {
       axios.get = originalGet;
       axios.post = originalPost;
+      dns.resolve4 = originalResolve4;
+      dns.resolve6 = originalResolve6;
     }
   });
 
   test("POST /process-from-url accepts whitespace-trimmed Supabase URLs", async () => {
     const originalGet = axios.get;
     const originalPost = axios.post;
+    const dns = require('dns').promises;
+    const originalResolve4 = dns.resolve4;
+    const originalResolve6 = dns.resolve6;
     let requestedDownloadUrl = null;
+
+    // Mock DNS resolution to return a public IP
+    dns.resolve4 = async () => ['1.2.3.4'];
+    dns.resolve6 = async () => [];
 
     axios.get = async (url) => {
       requestedDownloadUrl = url;
@@ -579,6 +595,8 @@ describe("route error responses", () => {
     } finally {
       axios.get = originalGet;
       axios.post = originalPost;
+      dns.resolve4 = originalResolve4;
+      dns.resolve6 = originalResolve6;
     }
   });
 
@@ -1329,5 +1347,148 @@ describe("requireSupabaseAuth", () => {
       body: JSON.stringify({ url: "https://example.com/test.pdf" }),
     });
     assert.notEqual(res.status, 401, "Valid token should not be rejected");
+  });
+});
+
+describe("SSRF Validation", () => {
+  let validateURLForSSRF, validateRedirectForSSRF, isPrivateIP, SSRFValidationError;
+
+  before(() => {
+    const ssrfModule = require("./src/utils/ssrfValidation");
+    validateURLForSSRF = ssrfModule.validateURLForSSRF;
+    validateRedirectForSSRF = ssrfModule.validateRedirectForSSRF;
+    isPrivateIP = ssrfModule.isPrivateIP;
+    SSRFValidationError = ssrfModule.SSRFValidationError;
+  });
+
+  test("rejects HTTP protocol (non-HTTPS)", async () => {
+    await assert.rejects(
+      validateURLForSSRF("http://example.supabase.co/test.pdf"),
+      (err) => {
+        assert(err instanceof SSRFValidationError);
+        assert.equal(err.message, "Only HTTPS URLs are allowed");
+        return true;
+      }
+    );
+  });
+
+  test("rejects invalid URL format", async () => {
+    await assert.rejects(
+      validateURLForSSRF("not-a-valid-url"),
+      (err) => {
+        assert(err instanceof SSRFValidationError);
+        assert.equal(err.message, "Invalid URL format");
+        return true;
+      }
+    );
+  });
+
+  test("rejects disallowed hostname", async () => {
+    await assert.rejects(
+      validateURLForSSRF("https://evil.com/test.pdf"),
+      (err) => {
+        assert(err instanceof SSRFValidationError);
+        assert.equal(err.message, "URL host is not allowed");
+        return true;
+      }
+    );
+  });
+
+  test("rejects hostname without subdomain", async () => {
+    await assert.rejects(
+      validateURLForSSRF("https://supabase.co/test.pdf"),
+      (err) => {
+        assert(err instanceof SSRFValidationError);
+        assert.equal(err.message, "URL host is not allowed");
+        return true;
+      }
+    );
+  });
+
+  test("rejects hostname with trailing dot bypass attempt", async () => {
+    await assert.rejects(
+      validateURLForSSRF("https://evil.com.supabase.co./test.pdf"),
+      (err) => {
+        assert(err instanceof SSRFValidationError);
+        // The hostname normalization removes the trailing dot, so it becomes
+        // "evil.com.supabase.co" which is not in the allowlist
+        assert.match(err.message, /not allowed|DNS resolution/);
+        return true;
+      }
+    );
+  });
+
+  test("rejects private IPv4 addresses - loopback", () => {
+    assert.equal(isPrivateIP("127.0.0.1"), true);
+    assert.equal(isPrivateIP("127.0.0.2"), true);
+    assert.equal(isPrivateIP("127.255.255.255"), true);
+  });
+
+  test("rejects private IPv4 addresses - Class A", () => {
+    assert.equal(isPrivateIP("10.0.0.1"), true);
+    assert.equal(isPrivateIP("10.255.255.255"), true);
+  });
+
+  test("rejects private IPv4 addresses - Class B", () => {
+    assert.equal(isPrivateIP("172.16.0.1"), true);
+    assert.equal(isPrivateIP("172.31.255.255"), true);
+    assert.equal(isPrivateIP("172.32.0.1"), false); // Outside range
+  });
+
+  test("rejects private IPv4 addresses - Class C", () => {
+    assert.equal(isPrivateIP("192.168.0.1"), true);
+    assert.equal(isPrivateIP("192.168.255.255"), true);
+  });
+
+  test("rejects private IPv4 addresses - link-local", () => {
+    assert.equal(isPrivateIP("169.254.0.1"), true);
+    assert.equal(isPrivateIP("169.254.255.255"), true);
+  });
+
+  test("accepts public IPv4 addresses", () => {
+    assert.equal(isPrivateIP("8.8.8.8"), false);
+    assert.equal(isPrivateIP("1.1.1.1"), false);
+    assert.equal(isPrivateIP("172.32.0.1"), false);
+  });
+
+  test("rejects private IPv6 addresses - loopback", () => {
+    assert.equal(isPrivateIP("::1"), true);
+  });
+
+  test("rejects private IPv6 addresses - unique local", () => {
+    assert.equal(isPrivateIP("fc00::1"), true);
+    assert.equal(isPrivateIP("fd00::1"), true);
+  });
+
+  test("rejects private IPv6 addresses - link-local", () => {
+    assert.equal(isPrivateIP("fe80::1"), true);
+    assert.equal(isPrivateIP("febf::ffff"), true);
+  });
+
+  test("accepts public IPv6 addresses", () => {
+    assert.equal(isPrivateIP("2001:4860:4860::8888"), false);
+    assert.equal(isPrivateIP("2606:4700:4700::1111"), false);
+  });
+
+  test("validateRedirectForSSRF uses same validation as validateURLForSSRF", async () => {
+    await assert.rejects(
+      validateRedirectForSSRF("https://evil.com/redirect"),
+      (err) => {
+        assert(err instanceof SSRFValidationError);
+        assert.equal(err.message, "URL host is not allowed");
+        return true;
+      }
+    );
+  });
+
+  test("validateRedirectForSSRF rejects HTTP redirects", async () => {
+    await assert.rejects(
+      validateRedirectForSSRF("http://example.supabase.co/redirect"),
+      (err) => {
+        assert(err instanceof SSRFValidationError);
+        assert.equal(err.message, "Only HTTPS URLs are allowed");
+        return true;
+      }
+    );
   });
 });
