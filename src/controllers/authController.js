@@ -45,9 +45,9 @@ exports.signup = async (req, res) => {
       });
     }
 
-    const users = getUsers();
+    let users = getUsers();
 
-    const existingUser = users.find(
+    let existingUser = users.find(
       (u) => u.email === email
     );
 
@@ -61,6 +61,12 @@ exports.signup = async (req, res) => {
       password,
       10
     );
+
+    users = getUsers();
+    existingUser = users.find((u) => u.email === email);
+    if (existingUser) {
+      return res.status(400).json({ message: "User already exists" });
+    }
 
     users.push({
       email,
