@@ -109,7 +109,7 @@ const Login = () => {
             mt: 4,
             py: 1.5,
             borderRadius: "14px",
-            background: "#7C4DFF",
+            background: "#6D28D9",
             textTransform: "none",
             fontSize: "16px",
             fontWeight: 700,

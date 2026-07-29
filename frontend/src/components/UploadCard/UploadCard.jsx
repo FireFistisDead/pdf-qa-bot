@@ -253,7 +253,7 @@ const handleDrop = (e) => {
                 onClick={handleUpload}
                 disabled={uploading || !hasSelectedFiles}
                 sx={{
-                  background: "#8B5CF6",
+                  background: "#6D28D9",
                   color: "#fff",
 
                   borderRadius: "14px",
