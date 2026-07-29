@@ -56,13 +56,14 @@ function loadKnownSessions() {
         (s) =>
           s &&
           typeof s.session_id === "string" &&
-          s.session_id.trim() !== "" &&
-          typeof s.session_secret === "string" &&
-          s.session_secret.trim() !== "",
+          s.session_id.trim() !== "",
       )
       .map((s) => ({
         session_id: s.session_id.trim(),
-        session_secret: s.session_secret.trim(),
+        session_secret:
+          typeof s.session_secret === "string" && s.session_secret.trim() !== ""
+            ? s.session_secret.trim()
+            : null,
       }));
   } catch (_) {
     return [];
