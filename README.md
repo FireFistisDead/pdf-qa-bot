@@ -259,16 +259,15 @@ You can run the entire multi-service application easily using Docker Compose. Th
 ### Prerequisites
 - [Docker](https://docs.docker.com/get-docker/)
 - [Docker Compose](https://docs.docker.com/compose/install/)
-
 ### Quick Start
 
 1. Clone the repository and navigate to the project root.
-2. Build and start all services in detached mode:
+2. Initialize your environment variables by copying the example file:
 
 ```bash
-docker-compose up -d --build
+cp .env.example .env
 ```
-
+Edit `.env` and set `INTERNAL_RAG_TOKEN` to a secure random value.
 3. The services will be available at:
    - **Frontend UI**: http://localhost:3000
    - **Express API Gateway**: http://localhost:4000
