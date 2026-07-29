@@ -943,6 +943,156 @@ describe("route error responses", () => {
     );
   });
 
+  // ── Authentication Rate Limiting Tests ───────────────────────────────────────
+  //
+  // These tests verify that authentication endpoints (login and signup) have
+  // dedicated rate limiting to prevent brute-force attacks. The limits are
+  // stricter than the global limiter and trigger the IP ban system on violation.
+
+  test("POST /api/auth/login returns 429 when rate limit is exceeded", () => {
+    const result = runIsolatedGatewayScript(`
+      const http = require("node:http");
+      const { app } = require("./server.js");
+
+      const server = http.createServer(app);
+      server.listen(0, async () => {
+        const { port } = server.address();
+        const baseUrl = "http://127.0.0.1:" + port;
+        const body = JSON.stringify({
+          email: "test@example.com",
+          password: "password123",
+        });
+
+        // Make requests up to the limit
+        const responses = [];
+        for (let i = 0; i < 6; i++) {
+          const res = await fetch(baseUrl + "/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body,
+          });
+          responses.push({ status: res.status, json: await res.json() });
+        }
+
+        console.log(JSON.stringify({
+          responses,
+        }));
+
+        await new Promise((resolve) => server.close(resolve));
+      });
+    `, {
+      AUTH_RATE_LIMIT_MAX: "5",
+      AUTH_RATE_LIMIT_WINDOW_MS: "60000",
+    });
+
+    // First 5 requests should succeed (or fail with auth error, not rate limit)
+    for (let i = 0; i < 5; i++) {
+      assert.notEqual(result.responses[i].status, 429, `Request ${i + 1} should not be rate limited`);
+    }
+
+    // 6th request should be rate limited
+    assert.equal(result.responses[5].status, 429, "6th request should be rate limited");
+    assert.match(result.responses[5].json.error, /too many login attempts/i);
+  });
+
+  test("POST /api/auth/signup returns 429 when rate limit is exceeded", () => {
+    const result = runIsolatedGatewayScript(`
+      const http = require("node:http");
+      const { app } = require("./server.js");
+
+      const server = http.createServer(app);
+      server.listen(0, async () => {
+        const { port } = server.address();
+        const baseUrl = "http://127.0.0.1:" + port;
+        const body = JSON.stringify({
+          email: "test@example.com",
+          password: "Password123!",
+        });
+
+        // Make requests up to the limit
+        const responses = [];
+        for (let i = 0; i < 4; i++) {
+          const res = await fetch(baseUrl + "/api/auth/signup", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body,
+          });
+          responses.push({ status: res.status, json: await res.json() });
+        }
+
+        console.log(JSON.stringify({
+          responses,
+        }));
+
+        await new Promise((resolve) => server.close(resolve));
+      });
+    `, {
+      AUTH_SIGNUP_RATE_LIMIT_MAX: "3",
+      AUTH_RATE_LIMIT_WINDOW_MS: "60000",
+    });
+
+    // First 3 requests should succeed (or fail with auth error, not rate limit)
+    for (let i = 0; i < 3; i++) {
+      assert.notEqual(result.responses[i].status, 429, `Request ${i + 1} should not be rate limited`);
+    }
+
+    // 4th request should be rate limited
+    assert.equal(result.responses[3].status, 429, "4th request should be rate limited");
+    assert.match(result.responses[3].json.error, /too many signup attempts/i);
+  });
+
+  test("POST /api/auth/login allows requests after rate limit window expires", () => {
+    const result = runIsolatedGatewayScript(`
+      const http = require("node:http");
+      const { app } = require("./server.js");
+
+      const server = http.createServer(app);
+      server.listen(0, async () => {
+        const { port } = server.address();
+        const baseUrl = "http://127.0.0.1:" + port;
+        const body = JSON.stringify({
+          email: "test@example.com",
+          password: "password123",
+        });
+
+        // Make requests up to the limit
+        const firstBatch = [];
+        for (let i = 0; i < 5; i++) {
+          const res = await fetch(baseUrl + "/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body,
+          });
+          firstBatch.push(res.status);
+        }
+
+        // Wait for window to expire (2 seconds for test)
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        // Make another request - should succeed now
+        const afterReset = await fetch(baseUrl + "/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+        });
+
+        console.log(JSON.stringify({
+          firstBatch,
+          afterResetStatus: afterReset.status,
+          afterResetJson: await afterReset.json(),
+        }));
+
+        await new Promise((resolve) => server.close(resolve));
+      });
+    `, {
+      AUTH_RATE_LIMIT_MAX: "5",
+      AUTH_RATE_LIMIT_WINDOW_MS: "1000", // 1 second window
+    });
+
+    // After window expires, request should not be rate limited
+    assert.notEqual(result.afterResetStatus, 429, "Request after window reset should not be rate limited");
+  });
+
   test("successful upload response does not include a url field", async () => {
     const originalPostForm = axios.postForm;
     const originalPost = axios.post;
