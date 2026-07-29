@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const lockfile = require("proper-lockfile");
 
 const { validatePassword } = require("../utils/passwordValidator");
 
@@ -17,8 +18,30 @@ const getUsers = () => {
   return JSON.parse(fs.readFileSync(usersFile));
 };
 
-const saveUsers = (users) => {
-  fs.writeFileSync(usersFile, JSON.stringify(users, null, 2));
+const getUsersLocked = async () => {
+  const release = await lockfile.lock(usersFile, { retries: 3, stale: 5000 });
+  try {
+    const data = fs.readFileSync(usersFile, "utf8");
+    return { users: JSON.parse(data), release };
+  } catch (error) {
+    await release();
+    throw error;
+  }
+};
+
+const saveUsersLocked = async (users) => {
+  const tempFile = `${usersFile}.tmp`;
+  try {
+    fs.writeFileSync(tempFile, JSON.stringify(users, null, 2), "utf8");
+    fs.renameSync(tempFile, usersFile);
+  } catch (error) {
+    try {
+      fs.unlinkSync(tempFile);
+    } catch {
+      // Ignore cleanup errors - temp file might not exist
+    }
+    throw error;
+  }
 };
 
 const normalizeEmail = (email) => {
@@ -26,6 +49,7 @@ const normalizeEmail = (email) => {
 };
 
 exports.signup = async (req, res) => {
+  let release = null;
   try {
     let { email, password } = req.body;
 
@@ -34,7 +58,7 @@ exports.signup = async (req, res) => {
         message: "Email and password are required",
       });
     }
-    
+
     email = normalizeEmail(email);
 
     const validation = validatePassword(password);
@@ -45,29 +69,34 @@ exports.signup = async (req, res) => {
       });
     }
 
-    const users = getUsers();
+    const hashedPassword = await bcrypt.hash(
+      password,
+      10
+    );
+
+    const { users, release: lockRelease } = await getUsersLocked();
+    release = lockRelease;
 
     const existingUser = users.find(
       (u) => u.email === email
     );
 
     if (existingUser) {
+      await release();
+      release = null;
       return res.status(400).json({
         message: "User already exists",
       });
     }
-
-    const hashedPassword = await bcrypt.hash(
-      password,
-      10
-    );
 
     users.push({
       email,
       password: hashedPassword,
     });
 
-    saveUsers(users);
+    await saveUsersLocked(users);
+    await release();
+    release = null;
 
     const token = jwt.sign({ email }, SECRET, { expiresIn: "7d" });
 
@@ -76,6 +105,14 @@ exports.signup = async (req, res) => {
       message: "Signup successful",
     });
   } catch (error) {
+    console.error("[signup] error:", error);
+    if (release) {
+      try {
+        await release();
+      } catch (releaseError) {
+        console.error("[signup] lock release error:", releaseError);
+      }
+    }
     res.status(500).json({
       message: "Server error",
     });
