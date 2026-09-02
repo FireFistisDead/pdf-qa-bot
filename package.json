@@ -25,7 +25,7 @@
     "express-slow-down": "^3.1.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
-    "multer": "^2.0.2",
+    "multer": "^2.3.0",
     "rate-limit-redis": "^4.2.3",
     "react-hot-toast": "^2.6.0",
     "redis": "^4.7.1",
